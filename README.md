@@ -87,7 +87,7 @@ frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.1.0_x64_en-US.msi
 浏览器开发地址：`http://127.0.0.1:5173`<br>
 API 文档：`http://127.0.0.1:8000/docs`
 
-知识库完整接口和 RAG 存储/检索策略见 [`docs/KNOWLEDGE_API.md`](docs/KNOWLEDGE_API.md)。
+知识库完整建立过程、系统架构和工作流程见 [`docs/KNOWLEDGE_SYSTEM_TECHNICAL_GUIDE.md`](docs/KNOWLEDGE_SYSTEM_TECHNICAL_GUIDE.md)，接口和 RAG 存储/检索参数见 [`docs/KNOWLEDGE_API.md`](docs/KNOWLEDGE_API.md)。
 
 桌面开发：
 
