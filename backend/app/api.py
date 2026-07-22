@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -25,6 +25,8 @@ from .models import (
     EvolutionProposal,
     Extension,
     KnowledgeBase,
+    KnowledgeBaseGroup,
+    KnowledgeBaseGroupMember,
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeEmbedding,
@@ -51,6 +53,9 @@ from .schemas import (
     EvolutionDecision,
     ExtensionCreate,
     KnowledgeBaseCreate,
+    KnowledgeBaseGroupCreate,
+    KnowledgeBaseGroupMembersUpdate,
+    KnowledgeBaseGroupUpdate,
     KnowledgeProviderConfigUpdate,
     KnowledgeQueryRequest,
     KnowledgeSearchRequest,
@@ -956,6 +961,133 @@ async def list_knowledge_bases(db: AsyncSession = Depends(get_db)) -> list[dict[
     return [row(item) for item in (await db.scalars(select(KnowledgeBase))).all()]
 
 
+async def _knowledge_group_row(
+    db: AsyncSession, group: KnowledgeBaseGroup
+) -> dict[str, Any]:
+    base_ids = list(
+        (
+            await db.scalars(
+                select(KnowledgeBaseGroupMember.knowledge_base_id).where(
+                    KnowledgeBaseGroupMember.group_id == group.id
+                )
+            )
+        ).all()
+    )
+    return {**row(group), "knowledge_base_ids": base_ids, "knowledge_base_count": len(base_ids)}
+
+
+@router.get("/knowledge-groups")
+async def list_knowledge_groups(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
+    groups = (
+        await db.scalars(select(KnowledgeBaseGroup).order_by(KnowledgeBaseGroup.name))
+    ).all()
+    return [await _knowledge_group_row(db, group) for group in groups]
+
+
+@router.post("/knowledge-groups", status_code=201)
+async def create_knowledge_group(
+    payload: KnowledgeBaseGroupCreate, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    if await db.scalar(select(KnowledgeBaseGroup.id).where(KnowledgeBaseGroup.name == payload.name)):
+        raise HTTPException(status_code=409, detail="知识库分组名称已存在")
+    base_ids = list(dict.fromkeys(payload.knowledge_base_ids))
+    if base_ids:
+        existing = set(
+            (
+                await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))
+            ).all()
+        )
+        if existing != set(base_ids):
+            raise HTTPException(status_code=400, detail="分组中包含不存在的知识库")
+    group = KnowledgeBaseGroup(
+        name=payload.name,
+        description=payload.description,
+        color=payload.color,
+    )
+    db.add(group)
+    await db.flush()
+    for base_id in base_ids:
+        db.add(KnowledgeBaseGroupMember(group_id=group.id, knowledge_base_id=base_id))
+    await db.flush()
+    await audit(
+        db,
+        "knowledge.group_created",
+        "knowledge_base_group",
+        group.id,
+        {"knowledge_base_count": len(base_ids)},
+    )
+    return await _knowledge_group_row(db, group)
+
+
+@router.patch("/knowledge-groups/{group_id}")
+async def update_knowledge_group(
+    group_id: str,
+    payload: KnowledgeBaseGroupUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    group = await db.get(KnowledgeBaseGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="知识库分组不存在")
+    if payload.name and await db.scalar(
+        select(KnowledgeBaseGroup.id).where(
+            KnowledgeBaseGroup.name == payload.name,
+            KnowledgeBaseGroup.id != group_id,
+        )
+    ):
+        raise HTTPException(status_code=409, detail="知识库分组名称已存在")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(group, key, value)
+    await db.flush()
+    await audit(db, "knowledge.group_updated", "knowledge_base_group", group.id)
+    return await _knowledge_group_row(db, group)
+
+
+@router.put("/knowledge-groups/{group_id}/members")
+async def update_knowledge_group_members(
+    group_id: str,
+    payload: KnowledgeBaseGroupMembersUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    group = await db.get(KnowledgeBaseGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="知识库分组不存在")
+    base_ids = list(dict.fromkeys(payload.knowledge_base_ids))
+    existing = set(
+        (
+            await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))
+        ).all()
+    ) if base_ids else set()
+    if existing != set(base_ids):
+        raise HTTPException(status_code=400, detail="分组中包含不存在的知识库")
+    await db.execute(
+        delete(KnowledgeBaseGroupMember).where(KnowledgeBaseGroupMember.group_id == group_id)
+    )
+    for base_id in base_ids:
+        db.add(KnowledgeBaseGroupMember(group_id=group_id, knowledge_base_id=base_id))
+    await db.flush()
+    await audit(
+        db,
+        "knowledge.group_members_updated",
+        "knowledge_base_group",
+        group.id,
+        {"knowledge_base_count": len(base_ids)},
+    )
+    return await _knowledge_group_row(db, group)
+
+
+@router.delete("/knowledge-groups/{group_id}", status_code=204)
+async def delete_knowledge_group(
+    group_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    group = await db.get(KnowledgeBaseGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="知识库分组不存在")
+    await db.delete(group)
+    await audit(db, "knowledge.group_deleted", "knowledge_base_group", group_id)
+    return Response(status_code=204)
+
+
 @router.post("/knowledge-bases", status_code=201)
 async def create_knowledge_base(
     payload: KnowledgeBaseCreate, db: AsyncSession = Depends(get_db)
@@ -1240,7 +1372,11 @@ async def search_knowledge(
     payload: KnowledgeSearchRequest, db: AsyncSession = Depends(get_db)
 ) -> list[dict[str, Any]]:
     return await knowledge_service.search(
-        db, payload.query, payload.knowledge_base_ids, payload.top_k
+        db,
+        payload.query,
+        payload.knowledge_base_ids,
+        payload.top_k,
+        payload.knowledge_group_ids,
     )
 
 
@@ -1253,6 +1389,7 @@ async def query_knowledge(
             db,
             query=payload.query,
             knowledge_base_ids=payload.knowledge_base_ids,
+            knowledge_group_ids=payload.knowledge_group_ids,
             top_k=payload.top_k,
             candidate_k=payload.candidate_k,
             generate_answer=payload.generate_answer,
@@ -1537,6 +1674,10 @@ async def knowledge_mcp(
                                     "type": "array",
                                     "items": {"type": "string"},
                                 },
+                                "knowledge_group_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
                                 "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
                             },
                             "required": ["query"],
@@ -1561,6 +1702,7 @@ async def knowledge_mcp(
                 query,
                 list(arguments.get("knowledge_base_ids") or []),
                 min(max(int(arguments.get("top_k") or 5), 1), 20),
+                list(arguments.get("knowledge_group_ids") or []),
             )
         else:
             return mcp_error(payload, -32601, "知识库 MCP 不支持此工具")

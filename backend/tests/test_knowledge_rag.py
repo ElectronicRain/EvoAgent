@@ -176,6 +176,67 @@ def test_external_sources_can_be_registered_without_immediate_network(client):
     assert all("config_ciphertext" not in item for item in listed)
 
 
+def test_knowledge_group_crud_and_scoped_retrieval(client):
+    aerodynamics = _new_base(client)
+    medicine = _new_base(client)
+    for base, title, content in (
+        (aerodynamics, "空气动力学", "机翼升力与压力分布是空气动力学分析的重要内容。" * 12),
+        (medicine, "细胞医学", "细胞膜蛋白与免疫反应是医学研究的重要内容。" * 12),
+    ):
+        response = client.post(
+            f"/api/knowledge-bases/{base['id']}/documents/text",
+            json={"title": title, "content": content, "source": "分组测试"},
+        )
+        assert response.status_code == 201
+
+    created = client.post(
+        "/api/knowledge-groups",
+        json={
+            "name": f"航空学科-{uuid.uuid4()}",
+            "description": "仅包含航空知识库",
+            "color": "#2878c8",
+            "knowledge_base_ids": [aerodynamics["id"]],
+        },
+    )
+    assert created.status_code == 201
+    group = created.json()
+    assert group["knowledge_base_ids"] == [aerodynamics["id"]]
+
+    scoped = client.post(
+        "/api/knowledge/query",
+        json={
+            "query": "细胞免疫",
+            "knowledge_group_ids": [group["id"]],
+            "generate_answer": False,
+        },
+    )
+    assert scoped.status_code == 200
+    assert scoped.json()["trace"]["knowledge_base_ids"] == [aerodynamics["id"]]
+    assert all(item["knowledge_base_id"] == aerodynamics["id"] for item in scoped.json()["chunks"])
+
+    updated = client.put(
+        f"/api/knowledge-groups/{group['id']}/members",
+        json={"knowledge_base_ids": [medicine["id"]]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["knowledge_base_ids"] == [medicine["id"]]
+
+    rescoped = client.post(
+        "/api/knowledge/query",
+        json={
+            "query": "细胞免疫",
+            "knowledge_group_ids": [group["id"]],
+            "generate_answer": False,
+        },
+    ).json()
+    assert rescoped["chunks"]
+    assert all(item["knowledge_base_id"] == medicine["id"] for item in rescoped["chunks"])
+
+    deleted = client.delete(f"/api/knowledge-groups/{group['id']}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/knowledge-bases/{medicine['id']}/documents").status_code == 200
+
+
 @pytest.mark.asyncio
 async def test_siliconflow_embedding_and_rerank_payloads(monkeypatch):
     calls = []

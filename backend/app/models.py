@@ -151,6 +151,26 @@ class KnowledgeBase(TimestampMixin, Base):
     document_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class KnowledgeBaseGroup(TimestampMixin, Base):
+    __tablename__ = "knowledge_base_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(20), default="#1769c2")
+
+
+class KnowledgeBaseGroupMember(Base):
+    __tablename__ = "knowledge_base_group_members"
+
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_base_groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
 class KnowledgeDocument(TimestampMixin, Base):
     __tablename__ = "knowledge_documents"
 

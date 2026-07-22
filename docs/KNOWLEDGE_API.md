@@ -69,6 +69,25 @@
 
 列出知识库。
 
+### 知识库分组
+
+知识库与分组采用多对多关系：一个知识库可以进入多个分组，删除分组不会删除知识库或文档。
+
+- `GET /api/knowledge-groups`：列出分组、成员知识库 ID 和成员数。
+- `POST /api/knowledge-groups`：创建分组，可同时传入 `knowledge_base_ids`。
+- `PATCH /api/knowledge-groups/{group_id}`：修改名称、说明和颜色。
+- `PUT /api/knowledge-groups/{group_id}/members`：整体更新分组成员。
+- `DELETE /api/knowledge-groups/{group_id}`：只删除分组关系。
+
+```json
+{
+  "name": "计算流体力学",
+  "description": "网格、求解器和湍流模型资料",
+  "color": "#1769c2",
+  "knowledge_base_ids": ["kb-mesh", "kb-solver"]
+}
+```
+
 ### `POST /api/knowledge-bases/{knowledge_base_id}/documents/upload`
 
 `multipart/form-data`，字段名 `file`，最大 25MB。支持 PDF、DOCX、PPTX、TXT、Markdown、CSV、JSON 和 HTML。PDF 保留页码，PPTX 保留幻灯片页码，DOCX 优先保留标题和表格结构。
@@ -167,11 +186,19 @@ curl -F "file=@paper.pdf" http://127.0.0.1:8000/api/knowledge-bases/{id}/documen
 {
   "query": "二维结构化网格出现负雅可比时意味着什么？",
   "knowledge_base_ids": ["kb-id"],
+  "knowledge_group_ids": [],
   "top_k": 6,
   "candidate_k": 30,
   "generate_answer": true
 }
 ```
+
+检索范围规则：
+
+- `knowledge_base_ids` 和 `knowledge_group_ids` 都为空：检索全部知识库。
+- 仅传 `knowledge_group_ids`：只检索这些分组的成员知识库。
+- 两者都传：取知识库 ID 与分组成员的并集。
+- 指定的分组为空：返回空结果，不会退化为搜索全部知识库。
 
 响应：
 

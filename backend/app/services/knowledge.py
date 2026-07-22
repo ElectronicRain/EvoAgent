@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
     KnowledgeBase,
+    KnowledgeBaseGroupMember,
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeProviderConfig,
@@ -233,11 +234,13 @@ class KnowledgeService:
         query: str,
         knowledge_base_ids: list[str] | None = None,
         top_k: int = 5,
+        knowledge_group_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         result = await self.query(
             db,
             query=query,
             knowledge_base_ids=knowledge_base_ids or [],
+            knowledge_group_ids=knowledge_group_ids or [],
             top_k=top_k,
             generate_answer=False,
         )
@@ -249,10 +252,39 @@ class KnowledgeService:
         *,
         query: str,
         knowledge_base_ids: list[str],
+        knowledge_group_ids: list[str] | None = None,
         top_k: int | None = None,
         candidate_k: int | None = None,
         generate_answer: bool = True,
     ) -> dict[str, Any]:
+        requested_scope = bool(knowledge_base_ids or knowledge_group_ids)
+        resolved_ids = set(knowledge_base_ids)
+        if knowledge_group_ids:
+            grouped_ids = (
+                await db.scalars(
+                    select(KnowledgeBaseGroupMember.knowledge_base_id).where(
+                        KnowledgeBaseGroupMember.group_id.in_(knowledge_group_ids)
+                    )
+                )
+            ).all()
+            resolved_ids.update(grouped_ids)
+        scoped_base_ids = sorted(resolved_ids)
+        if requested_scope and not scoped_base_ids:
+            return {
+                "answer": "所选知识库分组中还没有知识库或可检索资料。",
+                "query": query,
+                "rewritten_queries": [query],
+                "chunks": [],
+                "citations": [],
+                "trace": {
+                    "scope": "empty",
+                    "knowledge_base_ids": [],
+                    "knowledge_group_ids": knowledge_group_ids or [],
+                    "dense_candidates": 0,
+                    "lexical_candidates": 0,
+                    "reranked": 0,
+                },
+            }
         config = await get_knowledge_config(db)
         final_k = max(1, min(top_k or config.top_k, 20))
         pool_k = max(final_k, min(candidate_k or config.candidate_k, 100))
@@ -263,12 +295,12 @@ class KnowledgeService:
         dense_rankings: list[list[str]] = []
         dense_scores: dict[str, float] = {}
         for vector in query_vectors:
-            results = await vector_store.search(db, vector, knowledge_base_ids, pool_k)
+            results = await vector_store.search(db, vector, scoped_base_ids, pool_k)
             dense_rankings.append([item.chunk_id for item in results])
             for item in results:
                 dense_scores[item.chunk_id] = max(dense_scores.get(item.chunk_id, -1), item.score)
         lexical_ids, lexical_scores = await self._lexical_search(
-            db, rewrites, knowledge_base_ids, pool_k
+            db, rewrites, scoped_base_ids, pool_k
         )
 
         fused: defaultdict[str, float] = defaultdict(float)
@@ -285,7 +317,14 @@ class KnowledgeService:
                 "rewritten_queries": rewrites,
                 "chunks": [],
                 "citations": [],
-                "trace": {"dense_candidates": 0, "lexical_candidates": 0, "reranked": 0},
+                "trace": {
+                    "scope": "selected" if requested_scope else "all",
+                    "knowledge_base_ids": scoped_base_ids,
+                    "knowledge_group_ids": knowledge_group_ids or [],
+                    "dense_candidates": 0,
+                    "lexical_candidates": 0,
+                    "reranked": 0,
+                },
             }
         models = (await db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.id.in_(candidate_ids)))).all()
         by_id = {item.id: item for item in models}
@@ -354,6 +393,9 @@ class KnowledgeService:
                 "rerank_model": config.rerank_model,
                 "rerank_error": rerank_error,
                 "context_chars": len(context),
+                "scope": "selected" if requested_scope else "all",
+                "knowledge_base_ids": scoped_base_ids,
+                "knowledge_group_ids": knowledge_group_ids or [],
             },
         }
 

@@ -109,6 +109,23 @@ class KnowledgeBaseCreate(BaseModel):
     description: str = ""
 
 
+class KnowledgeBaseGroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    color: str = Field(default="#1769c2", pattern=r"^#[0-9A-Fa-f]{6}$")
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+
+
+class KnowledgeBaseGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+class KnowledgeBaseGroupMembersUpdate(BaseModel):
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+
+
 class TextDocumentCreate(BaseModel):
     title: str
     content: str = Field(min_length=1)
@@ -118,12 +135,14 @@ class TextDocumentCreate(BaseModel):
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(min_length=1)
     knowledge_base_ids: list[str] = Field(default_factory=list)
+    knowledge_group_ids: list[str] = Field(default_factory=list)
     top_k: int = Field(default=5, ge=1, le=20)
 
 
 class KnowledgeQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     knowledge_base_ids: list[str] = Field(default_factory=list)
+    knowledge_group_ids: list[str] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
     candidate_k: int | None = Field(default=None, ge=5, le=100)
     generate_answer: bool = True

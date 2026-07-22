@@ -47,6 +47,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const body = await response.json().catch(() => ({}))
     throw new ApiError(response.status, errorMessage(body.detail, response.status))
   }
+  if (response.status === 204) return undefined as T
   return response.json()
 }
 
@@ -107,6 +108,7 @@ export const api = {
   }),
   put: <T = any>(path: string, data: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(data) }),
   patch: <T = any>(path: string, data: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: <T = any>(path: string) => request<T>(path, { method: 'DELETE' }),
   stream,
   blob,
   upload: <T = any>(path: string, file: File) => {
