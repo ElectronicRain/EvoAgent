@@ -26,6 +26,9 @@ from .models import (
     Extension,
     KnowledgeBase,
     KnowledgeDocument,
+    KnowledgeIngestionJob,
+    KnowledgeProviderConfig,
+    KnowledgeSource,
     ModelEndpoint,
     ResearchSourceReview,
     Skill,
@@ -46,7 +49,12 @@ from .schemas import (
     EvolutionDecision,
     ExtensionCreate,
     KnowledgeBaseCreate,
+    KnowledgeProviderConfigUpdate,
+    KnowledgeQueryRequest,
     KnowledgeSearchRequest,
+    WebKnowledgeSourceCreate,
+    DatabaseKnowledgeSourceCreate,
+    APIKnowledgeSourceCreate,
     ModelEndpointCreate,
     ModelEndpointUpdate,
     ResearchSourceReviewCreate,
@@ -61,7 +69,10 @@ from .services.agents import agent_engine
 from .services.common import audit, dumps, loads
 from .services.evolution import evolution_service
 from .services.extensions import extension_service
-from .services.knowledge import extract_document, knowledge_service
+from .services.knowledge import knowledge_service
+from .services.knowledge_processing import extract_sections
+from .services.knowledge_sources import knowledge_source_service
+from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
 from .services.llm import OpenAICompatibleProvider, get_provider, provider_from_endpoint
 from .services.secrets import secret_store
 from .services.teaching import teaching_service
@@ -83,6 +94,13 @@ def endpoint_row(model: ModelEndpoint) -> dict[str, Any]:
     data = row(model)
     data.pop("api_key_ciphertext", None)
     data["has_api_key"] = bool(model.api_key_ciphertext)
+    return data
+
+
+def knowledge_config_row(model: KnowledgeProviderConfig) -> dict[str, Any]:
+    data = row(model)
+    data.pop("api_key_ciphertext", None)
+    data["has_api_key"] = bool(model.api_key_ciphertext or settings.siliconflow_api_key)
     return data
 
 
@@ -977,6 +995,8 @@ async def add_text_document(
         )
     except LookupError as exc:
         raise not_found("知识库") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return row(item)
 
 
@@ -990,18 +1010,35 @@ async def upload_document(
     if len(data) > 25 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="文件不能超过 25MB")
     try:
-        content, mime = extract_document(file.filename or "document.txt", data)
-        item = await knowledge_service.add_document(
+        filename = file.filename or "document.txt"
+        sections, mime = extract_sections(filename, data)
+        source = await knowledge_source_service.create(
             db,
             knowledge_base_id,
-            title=file.filename or "未命名文档",
-            content=content,
-            source=f"本地文件：{file.filename}",
-            mime_type=mime,
+            name=filename,
+            source_type="file",
+            uri=filename,
+            config={"filename": filename},
         )
+        item, result = await knowledge_service.add_sections(
+            db,
+            knowledge_base_id,
+            title=filename,
+            sections=sections,
+            source=f"本地文件：{filename}",
+            mime_type=mime,
+            source_id=source.id,
+            metadata={"filename": filename, "source_type": "file"},
+        )
+        source.status = "ready"
+        source.last_synced_at = datetime.now(timezone.utc)
     except (ValueError, LookupError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return row(item)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if item is None:
+        raise HTTPException(status_code=400, detail="文档清洗后没有可用内容")
+    return {**row(item), "ingestion": result, "source_id": source.id}
 
 
 @router.post("/knowledge/search")
@@ -1011,6 +1048,211 @@ async def search_knowledge(
     return await knowledge_service.search(
         db, payload.query, payload.knowledge_base_ids, payload.top_k
     )
+
+
+@router.post("/knowledge/query")
+async def query_knowledge(
+    payload: KnowledgeQueryRequest, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    try:
+        return await knowledge_service.query(
+            db,
+            query=payload.query,
+            knowledge_base_ids=payload.knowledge_base_ids,
+            top_k=payload.top_k,
+            candidate_k=payload.candidate_k,
+            generate_answer=payload.generate_answer,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/knowledge/config")
+async def get_knowledge_provider_config(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    return knowledge_config_row(await get_knowledge_config(db))
+
+
+@router.put("/knowledge/config")
+async def update_knowledge_provider_config(
+    payload: KnowledgeProviderConfigUpdate, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    config = await get_knowledge_config(db)
+    changes = payload.model_dump(exclude_unset=True)
+    api_key = changes.pop("api_key", None)
+    if api_key is not None:
+        config.api_key_ciphertext = secret_store.encrypt(api_key)
+    if "llm_endpoint_id" in changes and changes["llm_endpoint_id"]:
+        if not await db.get(ModelEndpoint, changes["llm_endpoint_id"]):
+            raise HTTPException(status_code=400, detail="指定的大模型端点不存在")
+    for key, value in changes.items():
+        if value is not None:
+            setattr(config, key, value)
+    await db.flush()
+    await audit(db, "knowledge.config_updated", "knowledge_provider_config", config.id)
+    return knowledge_config_row(config)
+
+
+@router.post("/knowledge/config/test")
+async def test_knowledge_provider_config(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    config = await get_knowledge_config(db)
+    try:
+        embedder = EmbeddingClient(config)
+        vectors = await embedder.embed(["EvoAgent 知识库连接测试"])
+        reranked = await RerankClient(config).rerank(
+            "网格质量", ["天气预报", "网格质量评价"], 1
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "status": "healthy" if embedder.provider_name == "siliconflow" else "degraded",
+        "embedding_provider": embedder.provider_name,
+        "embedding_model": embedder.model,
+        "dimensions": len(vectors[0]),
+        "rerank_model": config.rerank_model,
+        "rerank_top_index": reranked[0][0] if reranked else None,
+    }
+
+
+async def _create_and_optionally_sync_source(
+    db: AsyncSession,
+    knowledge_base_id: str,
+    *,
+    name: str,
+    source_type: str,
+    uri: str,
+    config: dict[str, Any],
+    sync_now: bool,
+) -> dict[str, Any]:
+    source = await knowledge_source_service.create(
+        db,
+        knowledge_base_id,
+        name=name,
+        source_type=source_type,
+        uri=uri,
+        config=config,
+    )
+    result: dict[str, Any] = {"source": knowledge_source_service.public_row(source), "job": None}
+    if sync_now:
+        try:
+            job = await knowledge_source_service.sync(db, source.id)
+            result["job"] = row(job)
+        except Exception as exc:
+            result["sync_error"] = str(exc)
+            result["source"] = knowledge_source_service.public_row(source)
+    return result
+
+
+@router.get("/knowledge-bases/{knowledge_base_id}/sources")
+async def list_knowledge_sources(
+    knowledge_base_id: str, db: AsyncSession = Depends(get_db)
+) -> list[dict[str, Any]]:
+    items = await knowledge_source_service.list_for_base(db, knowledge_base_id)
+    return [knowledge_source_service.public_row(item) for item in items]
+
+
+@router.post("/knowledge-bases/{knowledge_base_id}/sources/web", status_code=201)
+async def create_web_knowledge_source(
+    knowledge_base_id: str,
+    payload: WebKnowledgeSourceCreate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return await _create_and_optionally_sync_source(
+            db,
+            knowledge_base_id,
+            name=payload.name,
+            source_type="web",
+            uri=payload.url,
+            config=payload.model_dump(exclude={"name", "sync_now"}),
+            sync_now=payload.sync_now,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-bases/{knowledge_base_id}/sources/database", status_code=201)
+async def create_database_knowledge_source(
+    knowledge_base_id: str,
+    payload: DatabaseKnowledgeSourceCreate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return await _create_and_optionally_sync_source(
+            db,
+            knowledge_base_id,
+            name=payload.name,
+            source_type="database",
+            uri=payload.connection_url,
+            config=payload.model_dump(exclude={"name", "sync_now"}),
+            sync_now=payload.sync_now,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-bases/{knowledge_base_id}/sources/api", status_code=201)
+async def create_api_knowledge_source(
+    knowledge_base_id: str,
+    payload: APIKnowledgeSourceCreate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return await _create_and_optionally_sync_source(
+            db,
+            knowledge_base_id,
+            name=payload.name,
+            source_type="api",
+            uri=payload.url,
+            config=payload.model_dump(exclude={"name", "sync_now"}),
+            sync_now=payload.sync_now,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/knowledge-sources/{source_id}/sync")
+async def sync_knowledge_source(
+    source_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    try:
+        job = await knowledge_source_service.sync(db, source_id)
+        return row(job)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        source = await db.get(KnowledgeSource, source_id)
+        return {
+            "status": "failed",
+            "source_id": source_id,
+            "error": str(exc),
+            "source": knowledge_source_service.public_row(source) if source else None,
+        }
+
+
+@router.get("/knowledge-ingestion-jobs/{job_id}")
+async def get_knowledge_ingestion_job(
+    job_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    job = await db.get(KnowledgeIngestionJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    return row(job)
+
+
+@router.post("/knowledge-bases/{knowledge_base_id}/reindex")
+async def reindex_knowledge_base(
+    knowledge_base_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    if not await db.get(KnowledgeBase, knowledge_base_id):
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    try:
+        return await knowledge_service.reindex(db, knowledge_base_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/mcp/workspace")

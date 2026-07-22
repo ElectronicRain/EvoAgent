@@ -121,6 +121,57 @@ class KnowledgeSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
 
 
+class KnowledgeQueryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    knowledge_base_ids: list[str] = Field(default_factory=list)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    candidate_k: int | None = Field(default=None, ge=5, le=100)
+    generate_answer: bool = True
+
+
+class WebKnowledgeSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    url: str = Field(min_length=8, max_length=2048)
+    max_pages: int = Field(default=1, ge=1, le=20)
+    same_domain: bool = True
+    sync_now: bool = True
+
+
+class DatabaseKnowledgeSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    connection_url: str = Field(min_length=5, max_length=4096)
+    query: str = Field(min_length=6, max_length=20_000)
+    params: dict[str, Any] = Field(default_factory=dict)
+    row_limit: int = Field(default=5000, ge=1, le=20_000)
+    title: str = ""
+    sync_now: bool = True
+
+
+class APIKnowledgeSourceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    url: str = Field(min_length=8, max_length=2048)
+    method: Literal["GET", "POST"] = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+    body: Any | None = None
+    response_path: str = ""
+    title: str = ""
+    sync_now: bool = True
+
+
+class KnowledgeProviderConfigUpdate(BaseModel):
+    embedding_base_url: str | None = None
+    embedding_model: str | None = None
+    rerank_base_url: str | None = None
+    rerank_model: str | None = None
+    api_key: str | None = None
+    llm_endpoint_id: str | None = None
+    embedding_batch_size: int | None = Field(default=None, ge=1, le=64)
+    candidate_k: int | None = Field(default=None, ge=5, le=100)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    context_char_budget: int | None = Field(default=None, ge=1000, le=100_000)
+
+
 class SkillCreate(BaseModel):
     name: str
     description: str = ""

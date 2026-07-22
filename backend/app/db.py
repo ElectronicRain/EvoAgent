@@ -53,12 +53,51 @@ async def init_db() -> None:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        # create_all does not add columns to databases created by earlier EvoAgent versions.
+        # These additive migrations keep existing local knowledge bases usable.
+        migrations = {
+            "knowledge_documents": {
+                "source_id": "VARCHAR(36)",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+                "cleaning_stats_json": "TEXT NOT NULL DEFAULT '{}'",
+                "status": "VARCHAR(30) NOT NULL DEFAULT 'ready'",
+            },
+            "knowledge_chunks": {
+                "parent_chunk_id": "VARCHAR(36)",
+                "level": "VARCHAR(20) NOT NULL DEFAULT 'child'",
+                "token_count": "INTEGER NOT NULL DEFAULT 0",
+                "content_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        }
+        for table_name, columns in migrations.items():
+            existing = {
+                row[1]
+                for row in (await connection.execute(text(f"PRAGMA table_info({table_name})"))).all()
+            }
+            for column_name, definition in columns.items():
+                if column_name not in existing:
+                    await connection.execute(
+                        text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+                    )
         await connection.execute(
             text(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts
                 USING fts5(chunk_id UNINDEXED, title, content, tokenize='unicode61')
                 """
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_documents_source_id "
+                "ON knowledge_documents(source_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_parent_chunk_id "
+                "ON knowledge_chunks(parent_chunk_id)"
             )
         )
 

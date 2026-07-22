@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -161,6 +161,12 @@ class KnowledgeDocument(TimestampMixin, Base):
     mime_type: Mapped[str] = mapped_column(String(100), default="text/plain")
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     char_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_sources.id"), nullable=True, index=True
+    )
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    cleaning_stats_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
 
 
 class KnowledgeChunk(Base):
@@ -173,6 +179,88 @@ class KnowledgeChunk(Base):
     title: Mapped[str] = mapped_column(String(255))
     content: Mapped[str] = mapped_column(Text)
     citation: Mapped[str] = mapped_column(Text, default="")
+    parent_chunk_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_chunks.id"), nullable=True, index=True
+    )
+    level: Mapped[str] = mapped_column(String(20), default="child", index=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    content_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class KnowledgeSource(TimestampMixin, Base):
+    __tablename__ = "knowledge_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    source_type: Mapped[str] = mapped_column(String(30), index=True)
+    uri: Mapped[str] = mapped_column(Text, default="")
+    config_ciphertext: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class KnowledgeIngestionJob(TimestampMixin, Base):
+    __tablename__ = "knowledge_ingestion_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_sources.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(50), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    document_count: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class KnowledgeEmbedding(Base):
+    __tablename__ = "knowledge_embeddings"
+
+    chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_chunks.id", ondelete="CASCADE"), primary_key=True
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(50), default="siliconflow")
+    model: Mapped[str] = mapped_column(String(180), index=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
+    norm: Mapped[float] = mapped_column(Float, default=1.0)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeProviderConfig(TimestampMixin, Base):
+    __tablename__ = "knowledge_provider_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    embedding_base_url: Mapped[str] = mapped_column(
+        Text, default="https://api.siliconflow.cn/v1/embeddings"
+    )
+    embedding_model: Mapped[str] = mapped_column(
+        String(180), default="Qwen/Qwen3-VL-Embedding-8B"
+    )
+    rerank_base_url: Mapped[str] = mapped_column(
+        Text, default="https://api.siliconflow.cn/v1/rerank"
+    )
+    rerank_model: Mapped[str] = mapped_column(
+        String(180), default="BAAI/bge-reranker-v2-m3"
+    )
+    api_key_ciphertext: Mapped[str] = mapped_column(Text, default="")
+    llm_endpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_endpoints.id"), nullable=True
+    )
+    embedding_batch_size: Mapped[int] = mapped_column(Integer, default=16)
+    candidate_k: Mapped[int] = mapped_column(Integer, default=30)
+    top_k: Mapped[int] = mapped_column(Integer, default=6)
+    context_char_budget: Mapped[int] = mapped_column(Integer, default=12000)
 
 
 class Skill(TimestampMixin, Base):

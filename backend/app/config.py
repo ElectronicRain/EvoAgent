@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    siliconflow_api_key: str = ""
     max_agent_depth: int = 5
     max_tool_iterations: int = 8
     command_timeout_seconds: int = 30
