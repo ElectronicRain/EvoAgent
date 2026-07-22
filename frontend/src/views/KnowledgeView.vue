@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
-import { BookOpen, Database, FileText, FolderTree, Globe2, Plus, Search, Settings2, Trash2, Upload } from 'lucide-vue-next'
+import { BookOpen, Database, FolderTree, Plus, Search, Settings2, Trash2 } from 'lucide-vue-next'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Entity } from '../services/api'
 import { useAppStore } from '../stores/app'
@@ -13,23 +13,16 @@ const selected = ref<Entity | null>(null)
 const activeGroupId = ref('all')
 const searchScope = ref<'all' | 'group' | 'base'>('all')
 const searchGroupId = ref('')
-const documents = ref<Entity[]>([])
-const sources = ref<Entity[]>([])
-const overview = ref<Entity | null>(null)
-const documentDetail = ref<Entity | null>(null)
-const documentChunks = ref<Entity[]>([])
-const chunkTotal = ref(0)
-const inspectorTab = ref<'content' | 'chunks' | 'strategy'>('content')
-const chunkLevel = ref<'all' | 'parent' | 'child'>('all')
-const chunkLevels = ['all', 'parent', 'child'] as const
 const answer = ref('')
 const results = ref<Entity[]>([])
 const citations = ref<Entity[]>([])
 const trace = ref<Entity | null>(null)
+const rewrittenQueries = ref<string[]>([])
+const queryRunning = ref(false)
+const queryAttempted = ref(false)
+const queryError = ref('')
 const search = ref('二维结构化网格质量应如何评价？')
 const createBase = ref(false)
-const addText = ref(false)
-const addSource = ref(false)
 const showConfig = ref(false)
 const showGroupEditor = ref(false)
 const editingGroupId = ref('')
@@ -47,12 +40,7 @@ const initialSource = reactive({
   name: '', url: '', max_pages: 1, method: 'GET', headers: '{}', response_path: '',
   connection_url: '', query: 'SELECT * FROM your_table', row_limit: 5000,
 })
-const docForm = reactive({ title: '', source: '用户录入', content: '' })
 const groupForm = reactive({ name: '', description: '', color: '#1769c2', knowledge_base_ids: [] as string[] })
-const sourceForm = reactive({
-  type: 'web', name: '', url: '', max_pages: 1, method: 'GET', headers: '{}',
-  response_path: '', connection_url: '', query: 'SELECT * FROM your_table', row_limit: 5000,
-})
 const providerConfig = reactive<Entity>({
   embedding_base_url: '', embedding_model: '', rerank_base_url: '', rerank_model: '',
   api_key: '', llm_endpoint_id: null, top_k: 6, candidate_k: 30, context_char_budget: 12000,
@@ -70,6 +58,7 @@ function groupsForBase(baseId: string) {
 }
 
 async function openKnowledgeWindow(item: Entity) {
+  selected.value = item
   const routeUrl = `/#/knowledge/${item.id}`
   if ('__TAURI_INTERNALS__' in window) {
     const label = `knowledge-${String(item.id).replace(/[^a-zA-Z0-9-]/g, '-')}`
@@ -98,7 +87,7 @@ async function load() {
   store.loading(true)
   try {
     bases.value = await api.get('/knowledge-bases')
-    selected.value ||= bases.value[0] || null
+    selected.value = bases.value.find(item => item.id === selected.value?.id) || bases.value[0] || null
     const [config, modelEndpoints, groupRows] = await Promise.all([
       api.get<Entity>('/knowledge/config'),
       api.get<Entity[]>('/model-endpoints'),
@@ -108,7 +97,6 @@ async function load() {
     endpoints.value = modelEndpoints
     groups.value = groupRows
     if (!searchGroupId.value && groupRows.length) searchGroupId.value = groupRows[0].id
-    if (selected.value) await choose(selected.value)
   } catch (error: any) {
     store.notify(error.message, 'error')
   } finally {
@@ -116,12 +104,12 @@ async function load() {
   }
 }
 
-async function selectGroupFilter(groupId: string) {
+function selectGroupFilter(groupId: string) {
   activeGroupId.value = groupId
   const target = groupId === 'all'
     ? bases.value[0]
     : bases.value.find(item => groups.value.find(group => group.id === groupId)?.knowledge_base_ids?.includes(item.id))
-  if (target) await choose(target)
+  if (target) selected.value = target
 }
 
 function openNewGroup() {
@@ -180,55 +168,6 @@ async function removeGroup(group: Entity) {
   }
 }
 
-async function choose(item: Entity) {
-  selected.value = item
-  const [documentRows, sourceRows, overviewData] = await Promise.all([
-    api.get<Entity[]>(`/knowledge-bases/${item.id}/documents`),
-    api.get<Entity[]>(`/knowledge-bases/${item.id}/sources`),
-    api.get<Entity>(`/knowledge-bases/${item.id}/overview`),
-  ])
-  documents.value = documentRows
-  sources.value = sourceRows
-  overview.value = overviewData
-  if (documentRows.length) {
-    const current = documentRows.find(row => row.id === documentDetail.value?.id) || documentRows[0]
-    await inspectDocument(current)
-  } else {
-    documentDetail.value = null
-    documentChunks.value = []
-    chunkTotal.value = 0
-  }
-}
-
-async function inspectDocument(item: Entity) {
-  store.loading(true)
-  try {
-    const [detail, chunks] = await Promise.all([
-      api.get<Entity>(`/knowledge-documents/${item.id}`),
-      api.get<Entity>(`/knowledge-documents/${item.id}/chunks?level=${chunkLevel.value}&limit=500`),
-    ])
-    documentDetail.value = detail
-    documentChunks.value = chunks.items || []
-    chunkTotal.value = chunks.total || 0
-  } catch (error: any) {
-    store.notify(error.message, 'error')
-  } finally {
-    store.loading(false)
-  }
-}
-
-async function changeChunkLevel(level: 'all' | 'parent' | 'child') {
-  chunkLevel.value = level
-  if (!documentDetail.value) return
-  const chunks = await api.get<Entity>(`/knowledge-documents/${documentDetail.value.id}/chunks?level=${level}&limit=500`)
-  documentChunks.value = chunks.items || []
-  chunkTotal.value = chunks.total || 0
-}
-
-function shortHash(value?: string) {
-  return value ? `${value.slice(0, 10)}…${value.slice(-6)}` : '—'
-}
-
 async function saveBase() {
   store.loading(true)
   try {
@@ -269,76 +208,6 @@ function selectInitialFiles(event: Event) {
   initialFiles.value = Array.from((event.target as HTMLInputElement).files || [])
 }
 
-async function saveText() {
-  if (!selected.value) return
-  store.loading(true)
-  try {
-    await api.post(`/knowledge-bases/${selected.value.id}/documents/text`, docForm)
-    addText.value = false
-    await choose(selected.value)
-    store.notify('资料已完成清洗、分块和向量化')
-  } catch (error: any) {
-    store.notify(error.message, 'error')
-  } finally {
-    store.loading(false)
-  }
-}
-
-async function upload(event: Event) {
-  if (!selected.value) return
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  store.loading(true)
-  try {
-    await api.upload(`/knowledge-bases/${selected.value.id}/documents/upload`, file)
-    await choose(selected.value)
-    store.notify('文档已完成解析、清洗、分块和向量化')
-  } catch (error: any) {
-    store.notify(error.message, 'error')
-  } finally {
-    store.loading(false)
-    input.value = ''
-  }
-}
-
-async function saveSource() {
-  if (!selected.value) return
-  let path = `/knowledge-bases/${selected.value.id}/sources/${sourceForm.type}`
-  let payload: Entity
-  try {
-    if (sourceForm.type === 'web') {
-      payload = { name: sourceForm.name, url: sourceForm.url, max_pages: sourceForm.max_pages, sync_now: true }
-    } else if (sourceForm.type === 'api') {
-      payload = {
-        name: sourceForm.name, url: sourceForm.url, method: sourceForm.method,
-        headers: JSON.parse(sourceForm.headers || '{}'), response_path: sourceForm.response_path, sync_now: true,
-      }
-    } else {
-      payload = {
-        name: sourceForm.name, connection_url: sourceForm.connection_url,
-        query: sourceForm.query, row_limit: sourceForm.row_limit, sync_now: true,
-      }
-    }
-  } catch {
-    store.notify('请求头必须是有效的 JSON 对象', 'error')
-    return
-  }
-  store.loading(true)
-  try {
-    const response = await api.post<Entity>(path, payload)
-    await choose(selected.value)
-    addSource.value = false
-    if (response.sync_error || response.job?.status === 'failed') {
-      store.notify(`数据源已保存，但同步失败：${response.sync_error || response.job?.error}`, 'error')
-    } else store.notify('数据源同步完成')
-  } catch (error: any) {
-    store.notify(error.message, 'error')
-  } finally {
-    store.loading(false)
-  }
-}
-
 async function saveConfig() {
   const payload: Entity = { ...providerConfig }
   delete payload.id
@@ -372,19 +241,6 @@ async function testConfig() {
   }
 }
 
-async function reindex() {
-  if (!selected.value) return
-  store.loading(true)
-  try {
-    const result = await api.post<Entity>(`/knowledge-bases/${selected.value.id}/reindex`)
-    store.notify(`重新向量化完成：${result.embedded_chunks} 个片段`)
-  } catch (error: any) {
-    store.notify(error.message, 'error')
-  } finally {
-    store.loading(false)
-  }
-}
-
 async function ask() {
   if (!search.value.trim()) return
   if (searchScope.value === 'group' && !searchGroupId.value) {
@@ -392,8 +248,14 @@ async function ask() {
     return
   }
   store.loading(true)
+  queryRunning.value = true
+  queryAttempted.value = true
   answer.value = ''
   results.value = []
+  citations.value = []
+  trace.value = null
+  rewrittenQueries.value = []
+  queryError.value = ''
   try {
     const response = await api.post<Entity>('/knowledge/query', {
       query: search.value,
@@ -405,9 +267,12 @@ async function ask() {
     results.value = response.chunks || []
     citations.value = response.citations || []
     trace.value = response.trace
+    rewrittenQueries.value = response.rewritten_queries || [search.value]
   } catch (error: any) {
+    queryError.value = error.message
     store.notify(error.message, 'error')
   } finally {
+    queryRunning.value = false
     store.loading(false)
   }
 }
@@ -449,6 +314,7 @@ onMounted(load)
 
   <section v-if="showGroupEditor" class="card" style="margin-top:20px"><div class="card-header"><h2>{{ editingGroupId ? '编辑知识库分组' : '新建知识库分组' }}</h2><button class="btn btn-sm" @click="showGroupEditor=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>分组名称</label><input v-model="groupForm.name" class="input" placeholder="例如：计算流体力学"></div><div class="field"><label>标识颜色</label><input v-model="groupForm.color" type="color" class="input" style="height:40px"></div><div class="field full"><label>说明</label><input v-model="groupForm.description" class="input"></div><div class="field full"><label>选择分组中的知识库</label><div class="member-grid"><label v-for="item in bases" :key="item.id"><input v-model="groupForm.knowledge_base_ids" type="checkbox" :value="item.id"><span><strong>{{ item.name }}</strong><small>{{ item.discipline }} · {{ item.document_count }} 份资料</small></span></label><div v-if="!bases.length" class="empty">请先创建知识库</div></div></div><div class="field full"><button class="btn btn-primary" @click="saveGroup">保存分组与成员</button></div></div></section>
 
+  <!-- Knowledge-base contents and data sources are managed in the detached detail window.
   <section v-if="selected" class="card" style="margin-top:20px">
     <div class="card-header"><h2>{{ selected.name }} · 数据源</h2><div style="display:flex;gap:8px"><button class="btn btn-sm" @click="addSource=true"><Globe2 :size="14" />网页 / 数据库 / API</button><button class="btn btn-sm" @click="addText=true"><FileText :size="14" />粘贴文本</button><label class="btn btn-sm"><Upload :size="14" />上传文档<input type="file" accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html" hidden @change="upload"></label><button class="btn btn-sm" @click="reindex">重新向量化</button></div></div>
     <div v-if="overview" class="knowledge-metrics"><div><strong>{{ overview.statistics.documents }}</strong><span>文档</span></div><div><strong>{{ overview.statistics.parent_chunks }}</strong><span>父块</span></div><div><strong>{{ overview.statistics.child_chunks }}</strong><span>检索子块</span></div><div><strong>{{ overview.statistics.embeddings }}</strong><span>已向量化</span></div><div><strong>{{ overview.statistics.sources }}</strong><span>数据源</span></div></div>
@@ -480,8 +346,32 @@ onMounted(load)
   <section v-if="addText" class="card" style="margin-top:20px"><div class="card-header"><h2>录入资料</h2><button class="btn btn-sm" @click="addText=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>标题</label><input v-model="docForm.title" class="input"></div><div class="field"><label>来源</label><input v-model="docForm.source" class="input"></div><div class="field full"><label>正文</label><textarea v-model="docForm.content" class="textarea" style="min-height:220px" /></div><div class="field full"><button class="btn btn-primary" @click="saveText">清洗、切分并向量化</button></div></div></section>
 
   <section v-if="addSource" class="card" style="margin-top:20px"><div class="card-header"><h2>添加外部数据源</h2><button class="btn btn-sm" @click="addSource=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>类型</label><select v-model="sourceForm.type" class="input"><option value="web">网页</option><option value="database">数据库</option><option value="api">API / 第三方</option></select></div><div class="field"><label>名称</label><input v-model="sourceForm.name" class="input"></div><template v-if="sourceForm.type==='web'"><div class="field full"><label>网页 URL</label><input v-model="sourceForm.url" class="input"></div><div class="field"><label>最多抓取页数</label><input v-model.number="sourceForm.max_pages" type="number" min="1" max="20" class="input"></div></template><template v-else-if="sourceForm.type==='api'"><div class="field full"><label>API URL</label><input v-model="sourceForm.url" class="input"></div><div class="field"><label>方法</label><select v-model="sourceForm.method" class="input"><option>GET</option><option>POST</option></select></div><div class="field"><label>JSON 响应路径</label><input v-model="sourceForm.response_path" class="input" placeholder="data.items"></div><div class="field full"><label>请求头 JSON（将加密保存）</label><textarea v-model="sourceForm.headers" class="textarea" /></div></template><template v-else><div class="field full"><label>SQLAlchemy 连接地址（凭据将加密保存）</label><input v-model="sourceForm.connection_url" class="input" placeholder="sqlite:///D:/data/source.db"></div><div class="field full"><label>只读 SELECT / WITH 查询</label><textarea v-model="sourceForm.query" class="textarea" /></div></template><div class="field full"><button class="btn btn-primary" @click="saveSource">保存并同步</button></div></div></section>
+  -->
 
-  <section class="card" style="margin-top:20px"><div class="card-header"><h2>知识库问答</h2><BookOpen :size="18" color="#1769c2" /></div><div class="card-body"><div class="search-scope"><label>检索范围</label><select v-model="searchScope" class="input"><option value="all">全部知识库</option><option value="group" :disabled="!groups.length">指定分组</option><option value="base" :disabled="!selected">当前知识库</option></select><select v-if="searchScope==='group'" v-model="searchGroupId" class="input"><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}（{{ group.knowledge_base_count }} 个知识库）</option></select><span v-if="searchScope==='base' && selected">{{ selected.name }}</span></div><div style="display:flex;gap:9px"><input v-model="search" class="input" @keyup.enter="ask"><button class="btn btn-primary" @click="ask"><Search :size="14" />提问</button></div><article v-if="answer" class="notice" style="margin-top:16px;white-space:pre-wrap;line-height:1.8">{{ answer }}</article><div class="list-stack" style="margin-top:14px"><div v-for="(item,index) in results" :key="item.id" class="list-item"><div><strong>[资料 {{ index+1 }}] {{ item.title }}</strong><p style="font-size:12px;color:#385570;line-height:1.7">{{ item.content }}</p><a v-if="item.metadata?.url" :href="item.metadata.url" target="_blank" rel="noreferrer">打开原始来源</a><p>{{ item.citation }}</p></div></div></div><p v-if="trace" style="font-size:11px;color:#60758b;margin-top:12px">范围：{{ trace.scope === 'all' ? '全部知识库' : trace.knowledge_base_ids?.length + ' 个知识库' }}；召回 {{ trace.fused_candidates || 0 }} 条候选，Rerank {{ trace.reranked || 0 }} 条，最终引用 {{ citations.length }} 条；Embedding：{{ trace.embedding_model || '—' }}</p></div></section>
+  <section class="card knowledge-qa" style="margin-top:20px">
+    <div class="card-header"><h2>知识库问答</h2><BookOpen :size="18" color="#1769c2" /></div>
+    <div class="card-body">
+      <div class="search-scope"><label>检索范围</label><select v-model="searchScope" class="input"><option value="all">全部知识库</option><option value="group" :disabled="!groups.length">指定分组</option><option value="base" :disabled="!selected">当前知识库</option></select><select v-if="searchScope==='group'" v-model="searchGroupId" class="input"><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}（{{ group.knowledge_base_count }} 个知识库）</option></select><span v-if="searchScope==='base' && selected">{{ selected.name }}</span></div>
+      <div class="question-row"><input v-model="search" class="input" :disabled="queryRunning" @keyup.enter="ask"><button class="btn btn-primary" :disabled="queryRunning" @click="ask"><Search :size="14" />{{ queryRunning ? '检索中' : '提问' }}</button></div>
+
+      <div v-if="queryAttempted" class="retrieval-process" :class="{failed:queryError}">
+        <div class="process-head"><strong>精简检索过程</strong><span>{{ queryRunning ? '正在检索…' : queryError ? '检索失败' : '已完成' }}</span></div>
+        <div class="process-steps">
+          <div :class="{running:queryRunning}"><b>1</b><span><strong>查询改写</strong><small>{{ queryRunning ? '理解问题与检索意图' : `生成 ${rewrittenQueries.length || 1} 条检索式` }}</small></span></div>
+          <i>→</i>
+          <div :class="{running:queryRunning}"><b>2</b><span><strong>混合召回</strong><small>{{ queryRunning ? '向量与关键词并行检索' : `Dense ${trace?.dense_candidates || 0} · BM25 ${trace?.lexical_candidates || 0} · 融合 ${trace?.fused_candidates || 0}` }}</small></span></div>
+          <i>→</i>
+          <div :class="{running:queryRunning}"><b>3</b><span><strong>相关性重排</strong><small>{{ queryRunning ? '筛选最相关证据' : `重排 ${trace?.reranked || 0} · 保留 ${results.length}` }}</small></span></div>
+          <i>→</i>
+          <div :class="{running:queryRunning}"><b>4</b><span><strong>证据生成</strong><small>{{ queryRunning ? '组织上下文与答案' : `上下文 ${trace?.context_chars || 0} 字符 · 引用 ${citations.length}` }}</small></span></div>
+        </div>
+        <p v-if="queryError" class="process-error">{{ queryError }}</p>
+      </div>
+
+      <article v-if="answer" class="notice answer-card">{{ answer }}</article>
+      <div class="list-stack result-list"><div v-for="(item,index) in results" :key="item.id" class="list-item"><div><strong>[资料 {{ index+1 }}] {{ item.title }}</strong><p class="result-content">{{ item.content }}</p><a v-if="item.metadata?.url" :href="item.metadata.url" target="_blank" rel="noreferrer">打开原始来源</a><p>{{ item.citation }}</p></div></div></div>
+    </div>
+  </section>
 
   <section v-if="showConfig" class="card" style="margin-top:20px"><div class="card-header"><h2>知识库模型配置</h2><button class="btn btn-sm" @click="showConfig=false">取消</button></div><div class="card-body form-grid"><div class="field full"><label>SiliconFlow API Key（留空表示保持不变）</label><input v-model="providerConfig.api_key" type="password" class="input" :placeholder="providerConfig.has_api_key ? '已安全保存' : 'sk-...'" autocomplete="new-password"></div><div class="field"><label>Embedding 模型</label><input v-model="providerConfig.embedding_model" class="input"></div><div class="field"><label>Embedding URL</label><input v-model="providerConfig.embedding_base_url" class="input"></div><div class="field"><label>Rerank 模型</label><input v-model="providerConfig.rerank_model" class="input"></div><div class="field"><label>Rerank URL</label><input v-model="providerConfig.rerank_base_url" class="input"></div><div class="field"><label>答案生成模型端点</label><select v-model="providerConfig.llm_endpoint_id" class="input"><option :value="null">离线摘要</option><option v-for="item in endpoints" :key="item.id" :value="item.id">{{ item.name }} · {{ item.default_model }}</option></select></div><div class="field"><label>最终 Top-K</label><input v-model.number="providerConfig.top_k" type="number" min="1" max="20" class="input"></div><div class="field"><label>候选数量</label><input v-model.number="providerConfig.candidate_k" type="number" min="5" max="100" class="input"></div><div class="field full" style="display:flex;gap:8px"><button class="btn" @click="testConfig">测试连接</button><button class="btn btn-primary" @click="saveConfig">保存配置</button></div></div></section>
 </template>
@@ -490,4 +380,5 @@ onMounted(load)
 .initial-source-types{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}.upload-zone{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px;border:1px dashed #83afd6;border-radius:9px;background:#f4f9fe;color:#315b7e;cursor:pointer}.upload-zone span{font-size:11px;color:#1769c2}
 .group-bar{margin-bottom:20px}.group-bar .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.group-pills{display:flex;flex-wrap:wrap;gap:8px}.group-pills button{display:flex;align-items:center;gap:7px;border:1px solid #d5e3f0;border-radius:9px;background:#fff;color:#3c5d79;padding:8px 10px;cursor:pointer}.group-pills button.active{border-color:var(--group-color,#1769c2);background:#eaf4fe;color:#174f88;box-shadow:inset 0 0 0 1px var(--group-color,#1769c2)}.group-pills button>i{width:9px;height:9px;border-radius:50%}.group-pills button>span{display:grid;place-items:center;min-width:19px;height:19px;border-radius:10px;background:#edf3f8;font-size:10px}.group-pills button>em{font-style:normal;font-size:10px;color:#1769c2;margin-left:3px}.base-groups{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.base-groups span{border:1px solid;border-radius:999px;padding:2px 6px;font-size:9px;background:#fff}.member-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid #d7e4f0;border-radius:9px;background:#f8fbfe}.member-grid>label{display:flex;align-items:flex-start;gap:8px;padding:9px;border-radius:7px;background:#fff;cursor:pointer}.member-grid input{margin-top:3px}.member-grid span{display:flex;flex-direction:column}.member-grid small{margin-top:3px;color:#6a8094}.search-scope{display:flex;align-items:center;gap:8px;margin-bottom:10px}.search-scope label{font-size:11px;color:#60758b;white-space:nowrap}.search-scope select{max-width:240px}.search-scope>span{font-size:11px;color:#1769c2;background:#edf6ff;padding:7px 10px;border-radius:7px}
 .knowledge-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#dbe8f5;border-top:1px solid #dbe8f5;border-bottom:1px solid #dbe8f5}.knowledge-metrics div{display:flex;flex-direction:column;gap:3px;padding:13px 18px;background:#f8fbff}.knowledge-metrics strong{font-size:20px;color:#174f88}.knowledge-metrics span{font-size:11px;color:#60758b}.selected-row{background:#eef6ff}.knowledge-inspector>.card-header{align-items:flex-end}.knowledge-inspector .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.inspector-tabs{display:flex;gap:5px}.inspector-tabs button{border:0;border-radius:8px;background:#edf3f9;color:#49657f;padding:8px 13px;cursor:pointer}.inspector-tabs button.active{background:#1769c2;color:white}.document-facts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:13px}.document-facts span{padding:6px 9px;border:1px solid #d7e5f2;border-radius:7px;background:#f5f9fd;color:#49657f;font-size:11px}.document-text{max-height:560px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:20px;border:1px solid #d5e4f2;border-radius:10px;background:white;color:#263f57;font:13px/1.85 "Microsoft YaHei",sans-serif}.chunk-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;color:#60758b;font-size:11px}.chunk-toolbar>div{display:flex;gap:6px}.chunk-list{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}.chunk-card{border:1px solid #d6e3ef;border-left:4px solid #65a3df;border-radius:10px;padding:13px 15px;background:#fff}.chunk-card.parent{border-left-color:#254f78;background:#f8fbff}.chunk-card header,.chunk-card footer{display:flex;align-items:center;justify-content:space-between;gap:10px}.chunk-card header>div,.chunk-card footer{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.chunk-card header span,.chunk-card footer{font-size:10px;color:#687f95}.chunk-card p{white-space:pre-wrap;color:#2f4b65;font-size:12px;line-height:1.7}.chunk-level{padding:3px 7px;border-radius:999px;background:#e7f2fc;color:#1769c2!important}.parent .chunk-level{background:#dce8f3;color:#254f78!important}.vector-ready{color:#13835c!important}.vector-missing{color:#9a6b1c!important}.strategy-panel h3{margin-top:22px}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:7px}.strategy-flow>div{min-width:0;padding:14px;border:1px solid #d6e4f1;border-radius:10px;background:linear-gradient(180deg,#fff,#f5f9fd)}.strategy-flow b{display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:#1769c2;color:white;margin-bottom:8px}.strategy-flow strong{display:block;color:#244e75}.strategy-flow p{font-size:10px;line-height:1.5;color:#60758b}.strategy-flow i{align-self:center;color:#72a6d5}.strategy-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}.strategy-grid>div{padding:13px;border-radius:9px;background:#edf5fc}.strategy-grid label{display:block;font-size:10px;color:#60758b;margin-bottom:5px}.strategy-grid strong{font-size:12px;color:#234f78}.citation-policy{font-size:11px;color:#60758b;margin:14px 0 0}@media(max-width:1200px){.strategy-flow{grid-template-columns:1fr}.strategy-flow i{display:none}.strategy-grid{grid-template-columns:repeat(2,1fr)}}
+.question-row{display:flex;gap:9px}.question-row .input{flex:1}.question-row .btn{min-width:92px}.retrieval-process{margin-top:14px;padding:13px 15px;border:1px solid #cfe1f1;border-radius:11px;background:linear-gradient(180deg,#f8fcff,#f1f7fd)}.retrieval-process.failed{border-color:#e8caca;background:#fff9f9}.process-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.process-head strong{font-size:12px;color:#234f75}.process-head span{font-size:10px;color:#1769c2}.failed .process-head span{color:#b13f3f}.process-steps{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:8px}.process-steps>div{display:flex;align-items:center;gap:9px;min-width:0;padding:9px 10px;border:1px solid #d8e6f2;border-radius:9px;background:#fff}.process-steps>div.running{border-color:#7fb5e4;box-shadow:0 0 0 2px #dceeff}.process-steps b{display:grid;place-items:center;flex:0 0 auto;width:23px;height:23px;border-radius:50%;background:#1769c2;color:#fff;font-size:10px}.process-steps span{display:flex;min-width:0;flex-direction:column;gap:3px}.process-steps strong{font-size:11px;color:#2a5073}.process-steps small{overflow:hidden;color:#6b8093;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.process-steps i{color:#74a6d2;font-style:normal}.process-error{margin:10px 0 0;color:#b13f3f;font-size:10px}.answer-card{margin-top:16px;white-space:pre-wrap;line-height:1.8}.result-list{margin-top:14px}.result-content{font-size:12px;color:#385570;line-height:1.7}@media(max-width:1100px){.process-steps{grid-template-columns:1fr 1fr}.process-steps>i{display:none}}
 </style>
