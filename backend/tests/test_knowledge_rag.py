@@ -237,6 +237,67 @@ def test_knowledge_group_crud_and_scoped_retrieval(client):
     assert client.get(f"/api/knowledge-bases/{medicine['id']}/documents").status_code == 200
 
 
+def test_knowledge_internal_crud_rebuilds_indexes(client):
+    base = _new_base(client)
+    renamed = f"可编辑知识库-{uuid.uuid4()}"
+    base_update = client.patch(
+        f"/api/knowledge-bases/{base['id']}",
+        json={"name": renamed, "discipline": "材料学", "description": "CRUD 测试"},
+    )
+    assert base_update.status_code == 200
+    assert base_update.json()["name"] == renamed
+
+    created = client.post(
+        f"/api/knowledge-bases/{base['id']}/documents/text",
+        json={"title": "旧标题", "source": "旧来源", "content": "旧正文描述金属材料。" * 20},
+    )
+    assert created.status_code == 201
+    old_document_id = created.json()["id"]
+
+    metadata_update = client.patch(
+        f"/api/knowledge-documents/{old_document_id}",
+        json={"title": "材料规范", "source": "实验室规范"},
+    )
+    assert metadata_update.status_code == 200
+    assert metadata_update.json()["title"] == "材料规范"
+
+    content_update = client.patch(
+        f"/api/knowledge-documents/{old_document_id}",
+        json={
+            "title": "材料规范新版",
+            "source": "实验室规范 V2",
+            "content": "钛合金疲劳裂纹扩展速率需要通过循环载荷试验评价。" * 20,
+        },
+    )
+    assert content_update.status_code == 200, content_update.text
+    new_document_id = content_update.json()["id"]
+    assert new_document_id != old_document_id
+    assert client.get(f"/api/knowledge-documents/{old_document_id}").status_code == 404
+    detail = client.get(f"/api/knowledge-documents/{new_document_id}").json()
+    assert "钛合金疲劳裂纹" in detail["cleaned_content"]
+    assert detail["embedding_count"] >= 1
+
+    source_created = client.post(
+        f"/api/knowledge-bases/{base['id']}/sources/web",
+        json={"name": "待编辑网页", "url": "https://example.com/source", "sync_now": False},
+    ).json()["source"]
+    source_updated = client.patch(
+        f"/api/knowledge-sources/{source_created['id']}",
+        json={"name": "已编辑网页", "uri": "https://example.com/new-source?token=hidden"},
+    )
+    assert source_updated.status_code == 200
+    assert source_updated.json()["name"] == "已编辑网页"
+    assert "token=" not in source_updated.json()["uri"]
+    assert client.delete(f"/api/knowledge-sources/{source_created['id']}").status_code == 204
+
+    assert client.delete(f"/api/knowledge-documents/{new_document_id}").status_code == 204
+    overview = client.get(f"/api/knowledge-bases/{base['id']}/overview").json()
+    assert overview["statistics"]["documents"] == 0
+    assert overview["statistics"]["embeddings"] == 0
+    assert client.delete(f"/api/knowledge-bases/{base['id']}").status_code == 204
+    assert client.get(f"/api/knowledge-bases/{base['id']}/overview").status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_siliconflow_embedding_and_rerank_payloads(monkeypatch):
     calls = []

@@ -10,6 +10,7 @@ import { useAppStore } from './stores/app'
 const route = useRoute()
 const store = useAppStore()
 const pageTitle = computed(() => String(route.meta.title || 'EvoAgent'))
+const detached = computed(() => Boolean(route.meta.detached))
 const nav = [
   { to: '/', label: '运行总览', icon: LayoutDashboard },
   { to: '/agents', label: 'Agent 工厂', icon: Bot },
@@ -27,7 +28,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="detached" class="detached-page"><RouterView /></div>
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark"><Sparkles :size="21" /></div>
@@ -61,9 +63,13 @@ onMounted(() => {
       <main class="content"><RouterView /></main>
     </section>
 
-    <transition name="toast">
-      <div v-if="store.toast" class="toast-message" :class="store.toast.type">{{ store.toast.message }}</div>
-    </transition>
-    <div v-if="store.loadingCount" class="global-progress"><span /></div>
   </div>
+  <transition name="toast">
+    <div v-if="store.toast" class="toast-message" :class="store.toast.type">{{ store.toast.message }}</div>
+  </transition>
+  <div v-if="store.loadingCount" class="global-progress"><span /></div>
 </template>
+
+<style scoped>
+.detached-page{min-height:100vh;background:#f3f8fd;padding:22px;overflow:auto}
+</style>

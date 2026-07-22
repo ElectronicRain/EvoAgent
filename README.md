@@ -49,7 +49,7 @@ cd EvoAgent
 - 审批策略：内置“稳健默认”“严格只读”“演示自动化”，支持自定义 JSON 规则。
 - 自定义模型 API：OpenAI Chat Completions 兼容 Endpoint、独立模型名、请求头、附加参数和连通性测试。
 - 密钥保护：API Key 加密落盘，列表接口与界面不回传明文。
-- 知识库：PDF/DOCX/PPTX 等文档、网页、数据库和第三方 API 接入；多对多知识库分组与全库/分组/单库检索；清洗去重、结构化父子切分、SiliconFlow Embedding、SQLite 向量 + FTS5 混合检索、Rerank 与带引用生成。
+- 知识库：PDF/DOCX/PPTX 等文档、网页、数据库和第三方 API 接入；点击卡片打开独立管理窗口，可查看并增删改查文档、正文、分块、向量和数据源；多对多知识库分组与全库/分组/单库检索；清洗去重、结构化父子切分、SiliconFlow Embedding、SQLite 向量 + FTS5 混合检索、Rerank 与带引用生成。
 - 扩展中心：MCP Streamable HTTP / stdio、插件清单和 `SKILL.md` 同步。
 - 内置扩展：Office 文档解析、Citation Guard、成果导出、工作区 MCP、知识库 MCP，以及五项科研 Skills。
 - 受控进化：围绕 Agent 目标任务自动联网检索改进方法，按来源可信度整理并封装为候选版本专属 `SKILL.md`，同步优化系统提示词和目标任务提示词；支持自定义基准用例、实时过程、基线/候选逐用例评测、Markdown 进化成果、人工批准和旧版本保留。

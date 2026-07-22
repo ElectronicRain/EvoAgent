@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { BookOpen, Database, FileText, FolderTree, Globe2, Plus, Search, Settings2, Trash2, Upload } from 'lucide-vue-next'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Entity } from '../services/api'
@@ -33,6 +34,19 @@ const showConfig = ref(false)
 const showGroupEditor = ref(false)
 const editingGroupId = ref('')
 const baseForm = reactive({ name: '', discipline: '', description: '' })
+const initialSourceType = ref<'none' | 'files' | 'web' | 'database' | 'api'>('none')
+const initialSourceOptions = [
+  { id: 'none', label: '暂不添加' },
+  { id: 'files', label: 'PPT / PDF / Word' },
+  { id: 'web', label: '网页' },
+  { id: 'database', label: '数据库' },
+  { id: 'api', label: 'API / 第三方' },
+] as const
+const initialFiles = ref<File[]>([])
+const initialSource = reactive({
+  name: '', url: '', max_pages: 1, method: 'GET', headers: '{}', response_path: '',
+  connection_url: '', query: 'SELECT * FROM your_table', row_limit: 5000,
+})
 const docForm = reactive({ title: '', source: '用户录入', content: '' })
 const groupForm = reactive({ name: '', description: '', color: '#1769c2', knowledge_base_ids: [] as string[] })
 const sourceForm = reactive({
@@ -53,6 +67,31 @@ const filteredBases = computed(() => {
 
 function groupsForBase(baseId: string) {
   return groups.value.filter(group => (group.knowledge_base_ids || []).includes(baseId))
+}
+
+async function openKnowledgeWindow(item: Entity) {
+  const routeUrl = `/#/knowledge/${item.id}`
+  if ('__TAURI_INTERNALS__' in window) {
+    const label = `knowledge-${String(item.id).replace(/[^a-zA-Z0-9-]/g, '-')}`
+    const existing = await WebviewWindow.getByLabel(label)
+    if (existing) {
+      await existing.setFocus()
+      return
+    }
+    const detailWindow = new WebviewWindow(label, {
+      url: routeUrl,
+      title: `EvoAgent · ${item.name}`,
+      width: 1380,
+      height: 860,
+      minWidth: 980,
+      minHeight: 680,
+      center: true,
+      resizable: true,
+    })
+    detailWindow.once('tauri://error', () => window.open(routeUrl, '_blank'))
+    return
+  }
+  window.open(routeUrl, '_blank', 'width=1380,height=860')
 }
 
 async function load() {
@@ -194,15 +233,40 @@ async function saveBase() {
   store.loading(true)
   try {
     const item = await api.post<Entity>('/knowledge-bases', baseForm)
+    if (initialSourceType.value === 'files') {
+      for (const file of initialFiles.value) {
+        await api.upload(`/knowledge-bases/${item.id}/documents/upload`, file)
+      }
+    } else if (initialSourceType.value === 'web') {
+      await api.post(`/knowledge-bases/${item.id}/sources/web`, {
+        name: initialSource.name || '初始网页', url: initialSource.url,
+        max_pages: initialSource.max_pages, sync_now: true,
+      })
+    } else if (initialSourceType.value === 'database') {
+      await api.post(`/knowledge-bases/${item.id}/sources/database`, {
+        name: initialSource.name || '初始数据库', connection_url: initialSource.connection_url,
+        query: initialSource.query, row_limit: initialSource.row_limit, sync_now: true,
+      })
+    } else if (initialSourceType.value === 'api') {
+      await api.post(`/knowledge-bases/${item.id}/sources/api`, {
+        name: initialSource.name || '初始 API', url: initialSource.url,
+        method: initialSource.method, headers: JSON.parse(initialSource.headers || '{}'),
+        response_path: initialSource.response_path, sync_now: true,
+      })
+    }
     createBase.value = false
     await load()
-    await choose(item)
-    store.notify('知识库已创建')
+    store.notify('知识库及初始数据源已创建')
+    await openKnowledgeWindow(item)
   } catch (error: any) {
     store.notify(error.message, 'error')
   } finally {
     store.loading(false)
   }
+}
+
+function selectInitialFiles(event: Event) {
+  initialFiles.value = Array.from((event.target as HTMLInputElement).files || [])
 }
 
 async function saveText() {
@@ -366,7 +430,7 @@ onMounted(load)
     <section class="card">
       <div class="card-header"><h2>知识库</h2><span>{{ bases.length }} 个</span></div>
       <div class="card-body grid grid-2">
-        <button v-for="item in filteredBases" :key="item.id" class="list-item" :class="{ active: selected?.id === item.id }" @click="choose(item)">
+        <button v-for="item in filteredBases" :key="item.id" class="list-item" :class="{ active: selected?.id === item.id }" @click="openKnowledgeWindow(item)">
           <div style="display:flex;gap:11px;text-align:left"><div class="metric-icon"><Database :size="18" /></div><div><strong>{{ item.name }}</strong><p>{{ item.discipline }} · {{ item.document_count }} 份资料</p><div class="base-groups"><span v-for="group in groupsForBase(item.id)" :key="group.id" :style="{borderColor:group.color,color:group.color}">{{ group.name }}</span></div></div></div>
         </button>
         <div v-if="!filteredBases.length" class="empty">该分组还没有知识库，可点击分组“设置”添加成员。</div>
@@ -380,7 +444,7 @@ onMounted(load)
 
   <section v-if="createBase" class="card" style="margin-top:20px">
     <div class="card-header"><h2>新建知识库</h2><button class="btn btn-sm" @click="createBase=false">取消</button></div>
-    <div class="card-body form-grid"><div class="field"><label>名称</label><input v-model="baseForm.name" class="input"></div><div class="field"><label>学科</label><input v-model="baseForm.discipline" class="input"></div><div class="field full"><label>说明</label><input v-model="baseForm.description" class="input"></div><div class="field full"><button class="btn btn-primary" @click="saveBase">创建</button></div></div>
+    <div class="card-body form-grid"><div class="field"><label>名称</label><input v-model="baseForm.name" class="input"></div><div class="field"><label>学科</label><input v-model="baseForm.discipline" class="input"></div><div class="field full"><label>说明</label><input v-model="baseForm.description" class="input"></div><div class="field full"><label>创建时加入初始数据</label><div class="initial-source-types"><button v-for="item in initialSourceOptions" :key="item.id" class="btn" :class="{'btn-primary':initialSourceType===item.id}" @click="initialSourceType=item.id">{{ item.label }}</button></div></div><div v-if="initialSourceType==='files'" class="field full"><label class="upload-zone">选择一个或多个文档<input type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html" @change="selectInitialFiles"><span>已选择 {{ initialFiles.length }} 个文件</span></label></div><template v-else-if="initialSourceType==='web'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>抓取页数</label><input v-model.number="initialSource.max_pages" type="number" min="1" max="20" class="input"></div><div class="field full"><label>网页 URL</label><input v-model="initialSource.url" class="input"></div></template><template v-else-if="initialSourceType==='database'"><div class="field full"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field full"><label>数据库连接地址</label><input v-model="initialSource.connection_url" class="input" placeholder="sqlite:///D:/data/source.db"></div><div class="field full"><label>只读查询</label><textarea v-model="initialSource.query" class="textarea"></textarea></div></template><template v-else-if="initialSourceType==='api'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>请求方法</label><select v-model="initialSource.method" class="input"><option>GET</option><option>POST</option></select></div><div class="field full"><label>API URL</label><input v-model="initialSource.url" class="input"></div><div class="field"><label>响应路径</label><input v-model="initialSource.response_path" class="input" placeholder="data.items"></div><div class="field full"><label>请求头 JSON</label><textarea v-model="initialSource.headers" class="textarea"></textarea></div></template><div class="field full"><button class="btn btn-primary" @click="saveBase">创建知识库并导入初始数据</button></div></div>
   </section>
 
   <section v-if="showGroupEditor" class="card" style="margin-top:20px"><div class="card-header"><h2>{{ editingGroupId ? '编辑知识库分组' : '新建知识库分组' }}</h2><button class="btn btn-sm" @click="showGroupEditor=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>分组名称</label><input v-model="groupForm.name" class="input" placeholder="例如：计算流体力学"></div><div class="field"><label>标识颜色</label><input v-model="groupForm.color" type="color" class="input" style="height:40px"></div><div class="field full"><label>说明</label><input v-model="groupForm.description" class="input"></div><div class="field full"><label>选择分组中的知识库</label><div class="member-grid"><label v-for="item in bases" :key="item.id"><input v-model="groupForm.knowledge_base_ids" type="checkbox" :value="item.id"><span><strong>{{ item.name }}</strong><small>{{ item.discipline }} · {{ item.document_count }} 份资料</small></span></label><div v-if="!bases.length" class="empty">请先创建知识库</div></div></div><div class="field full"><button class="btn btn-primary" @click="saveGroup">保存分组与成员</button></div></div></section>
@@ -423,6 +487,7 @@ onMounted(load)
 </template>
 
 <style scoped>
+.initial-source-types{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}.upload-zone{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px;border:1px dashed #83afd6;border-radius:9px;background:#f4f9fe;color:#315b7e;cursor:pointer}.upload-zone span{font-size:11px;color:#1769c2}
 .group-bar{margin-bottom:20px}.group-bar .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.group-pills{display:flex;flex-wrap:wrap;gap:8px}.group-pills button{display:flex;align-items:center;gap:7px;border:1px solid #d5e3f0;border-radius:9px;background:#fff;color:#3c5d79;padding:8px 10px;cursor:pointer}.group-pills button.active{border-color:var(--group-color,#1769c2);background:#eaf4fe;color:#174f88;box-shadow:inset 0 0 0 1px var(--group-color,#1769c2)}.group-pills button>i{width:9px;height:9px;border-radius:50%}.group-pills button>span{display:grid;place-items:center;min-width:19px;height:19px;border-radius:10px;background:#edf3f8;font-size:10px}.group-pills button>em{font-style:normal;font-size:10px;color:#1769c2;margin-left:3px}.base-groups{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.base-groups span{border:1px solid;border-radius:999px;padding:2px 6px;font-size:9px;background:#fff}.member-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid #d7e4f0;border-radius:9px;background:#f8fbfe}.member-grid>label{display:flex;align-items:flex-start;gap:8px;padding:9px;border-radius:7px;background:#fff;cursor:pointer}.member-grid input{margin-top:3px}.member-grid span{display:flex;flex-direction:column}.member-grid small{margin-top:3px;color:#6a8094}.search-scope{display:flex;align-items:center;gap:8px;margin-bottom:10px}.search-scope label{font-size:11px;color:#60758b;white-space:nowrap}.search-scope select{max-width:240px}.search-scope>span{font-size:11px;color:#1769c2;background:#edf6ff;padding:7px 10px;border-radius:7px}
 .knowledge-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#dbe8f5;border-top:1px solid #dbe8f5;border-bottom:1px solid #dbe8f5}.knowledge-metrics div{display:flex;flex-direction:column;gap:3px;padding:13px 18px;background:#f8fbff}.knowledge-metrics strong{font-size:20px;color:#174f88}.knowledge-metrics span{font-size:11px;color:#60758b}.selected-row{background:#eef6ff}.knowledge-inspector>.card-header{align-items:flex-end}.knowledge-inspector .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.inspector-tabs{display:flex;gap:5px}.inspector-tabs button{border:0;border-radius:8px;background:#edf3f9;color:#49657f;padding:8px 13px;cursor:pointer}.inspector-tabs button.active{background:#1769c2;color:white}.document-facts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:13px}.document-facts span{padding:6px 9px;border:1px solid #d7e5f2;border-radius:7px;background:#f5f9fd;color:#49657f;font-size:11px}.document-text{max-height:560px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:20px;border:1px solid #d5e4f2;border-radius:10px;background:white;color:#263f57;font:13px/1.85 "Microsoft YaHei",sans-serif}.chunk-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;color:#60758b;font-size:11px}.chunk-toolbar>div{display:flex;gap:6px}.chunk-list{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}.chunk-card{border:1px solid #d6e3ef;border-left:4px solid #65a3df;border-radius:10px;padding:13px 15px;background:#fff}.chunk-card.parent{border-left-color:#254f78;background:#f8fbff}.chunk-card header,.chunk-card footer{display:flex;align-items:center;justify-content:space-between;gap:10px}.chunk-card header>div,.chunk-card footer{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.chunk-card header span,.chunk-card footer{font-size:10px;color:#687f95}.chunk-card p{white-space:pre-wrap;color:#2f4b65;font-size:12px;line-height:1.7}.chunk-level{padding:3px 7px;border-radius:999px;background:#e7f2fc;color:#1769c2!important}.parent .chunk-level{background:#dce8f3;color:#254f78!important}.vector-ready{color:#13835c!important}.vector-missing{color:#9a6b1c!important}.strategy-panel h3{margin-top:22px}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:7px}.strategy-flow>div{min-width:0;padding:14px;border:1px solid #d6e4f1;border-radius:10px;background:linear-gradient(180deg,#fff,#f5f9fd)}.strategy-flow b{display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:#1769c2;color:white;margin-bottom:8px}.strategy-flow strong{display:block;color:#244e75}.strategy-flow p{font-size:10px;line-height:1.5;color:#60758b}.strategy-flow i{align-self:center;color:#72a6d5}.strategy-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}.strategy-grid>div{padding:13px;border-radius:9px;background:#edf5fc}.strategy-grid label{display:block;font-size:10px;color:#60758b;margin-bottom:5px}.strategy-grid strong{font-size:12px;color:#234f78}.citation-policy{font-size:11px;color:#60758b;margin:14px 0 0}@media(max-width:1200px){.strategy-flow{grid-template-columns:1fr}.strategy-flow i{display:none}.strategy-grid{grid-template-columns:repeat(2,1fr)}}
 </style>

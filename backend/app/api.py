@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -53,12 +53,15 @@ from .schemas import (
     EvolutionDecision,
     ExtensionCreate,
     KnowledgeBaseCreate,
+    KnowledgeBaseUpdate,
     KnowledgeBaseGroupCreate,
     KnowledgeBaseGroupMembersUpdate,
     KnowledgeBaseGroupUpdate,
     KnowledgeProviderConfigUpdate,
     KnowledgeQueryRequest,
     KnowledgeSearchRequest,
+    KnowledgeDocumentUpdate,
+    KnowledgeSourceUpdate,
     WebKnowledgeSourceCreate,
     DatabaseKnowledgeSourceCreate,
     APIKnowledgeSourceCreate,
@@ -1016,7 +1019,9 @@ async def create_knowledge_group(
         group.id,
         {"knowledge_base_count": len(base_ids)},
     )
-    return await _knowledge_group_row(db, group)
+    result = await _knowledge_group_row(db, group)
+    await db.commit()
+    return result
 
 
 @router.patch("/knowledge-groups/{group_id}")
@@ -1040,7 +1045,9 @@ async def update_knowledge_group(
             setattr(group, key, value)
     await db.flush()
     await audit(db, "knowledge.group_updated", "knowledge_base_group", group.id)
-    return await _knowledge_group_row(db, group)
+    result = await _knowledge_group_row(db, group)
+    await db.commit()
+    return result
 
 
 @router.put("/knowledge-groups/{group_id}/members")
@@ -1073,7 +1080,9 @@ async def update_knowledge_group_members(
         group.id,
         {"knowledge_base_count": len(base_ids)},
     )
-    return await _knowledge_group_row(db, group)
+    result = await _knowledge_group_row(db, group)
+    await db.commit()
+    return result
 
 
 @router.delete("/knowledge-groups/{group_id}", status_code=204)
@@ -1085,6 +1094,7 @@ async def delete_knowledge_group(
         raise HTTPException(status_code=404, detail="知识库分组不存在")
     await db.delete(group)
     await audit(db, "knowledge.group_deleted", "knowledge_base_group", group_id)
+    await db.commit()
     return Response(status_code=204)
 
 
@@ -1096,7 +1106,75 @@ async def create_knowledge_base(
     db.add(item)
     await db.flush()
     await audit(db, "knowledge.created", "knowledge_base", item.id)
+    await db.commit()
     return row(item)
+
+
+@router.patch("/knowledge-bases/{knowledge_base_id}")
+async def update_knowledge_base(
+    knowledge_base_id: str,
+    payload: KnowledgeBaseUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    item = await db.get(KnowledgeBase, knowledge_base_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    if payload.name and await db.scalar(
+        select(KnowledgeBase.id).where(
+            KnowledgeBase.name == payload.name,
+            KnowledgeBase.id != knowledge_base_id,
+        )
+    ):
+        raise HTTPException(status_code=409, detail="知识库名称已存在")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(item, key, value)
+    await audit(db, "knowledge.updated", "knowledge_base", item.id)
+    await db.commit()
+    return row(item)
+
+
+@router.delete("/knowledge-bases/{knowledge_base_id}", status_code=204)
+async def delete_knowledge_base(
+    knowledge_base_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    item = await db.get(KnowledgeBase, knowledge_base_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    document_ids = list(
+        (
+            await db.scalars(
+                select(KnowledgeDocument.id).where(
+                    KnowledgeDocument.knowledge_base_id == knowledge_base_id
+                )
+            )
+        ).all()
+    )
+    for document_id in document_ids:
+        await knowledge_service.delete_document(db, document_id, audit_event=False)
+    await db.execute(
+        delete(KnowledgeIngestionJob).where(
+            KnowledgeIngestionJob.knowledge_base_id == knowledge_base_id
+        )
+    )
+    await db.execute(
+        delete(KnowledgeSource).where(KnowledgeSource.knowledge_base_id == knowledge_base_id)
+    )
+    await db.execute(
+        delete(KnowledgeBaseGroupMember).where(
+            KnowledgeBaseGroupMember.knowledge_base_id == knowledge_base_id
+        )
+    )
+    await db.delete(item)
+    await audit(
+        db,
+        "knowledge.deleted",
+        "knowledge_base",
+        knowledge_base_id,
+        {"documents": len(document_ids)},
+    )
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/knowledge-bases/{knowledge_base_id}/documents")
@@ -1305,6 +1383,42 @@ async def list_knowledge_document_chunks(
     }
 
 
+@router.patch("/knowledge-documents/{document_id}")
+async def update_knowledge_document(
+    document_id: str,
+    payload: KnowledgeDocumentUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        document = await knowledge_service.update_document(
+            db,
+            document_id,
+            title=payload.title,
+            source=payload.source,
+            content=payload.content,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await db.commit()
+    return row(document)
+
+
+@router.delete("/knowledge-documents/{document_id}", status_code=204)
+async def delete_knowledge_document(
+    document_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    try:
+        await knowledge_service.delete_document(db, document_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await db.commit()
+    return Response(status_code=204)
+
+
 @router.post("/knowledge-bases/{knowledge_base_id}/documents/text", status_code=201)
 async def add_text_document(
     knowledge_base_id: str,
@@ -1323,6 +1437,7 @@ async def add_text_document(
         raise not_found("知识库") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await db.commit()
     return row(item)
 
 
@@ -1364,6 +1479,7 @@ async def upload_document(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if item is None:
         raise HTTPException(status_code=400, detail="文档清洗后没有可用内容")
+    await db.commit()
     return {**row(item), "ingestion": result, "source_id": source.id}
 
 
@@ -1422,6 +1538,7 @@ async def update_knowledge_provider_config(
             setattr(config, key, value)
     await db.flush()
     await audit(db, "knowledge.config_updated", "knowledge_provider_config", config.id)
+    await db.commit()
     return knowledge_config_row(config)
 
 
@@ -1474,6 +1591,7 @@ async def _create_and_optionally_sync_source(
         except Exception as exc:
             result["sync_error"] = str(exc)
             result["source"] = knowledge_source_service.public_row(source)
+    await db.commit()
     return result
 
 
@@ -1483,6 +1601,66 @@ async def list_knowledge_sources(
 ) -> list[dict[str, Any]]:
     items = await knowledge_source_service.list_for_base(db, knowledge_base_id)
     return [knowledge_source_service.public_row(item) for item in items]
+
+
+@router.patch("/knowledge-sources/{source_id}")
+async def update_knowledge_source(
+    source_id: str,
+    payload: KnowledgeSourceUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        source = await knowledge_source_service.update(
+            db,
+            source_id,
+            name=payload.name,
+            uri=payload.uri,
+            config=payload.config,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await db.commit()
+    return knowledge_source_service.public_row(source)
+
+
+@router.delete("/knowledge-sources/{source_id}", status_code=204)
+async def delete_knowledge_source(
+    source_id: str,
+    delete_documents: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    source = await db.get(KnowledgeSource, source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+    documents = (
+        await db.scalars(
+            select(KnowledgeDocument).where(KnowledgeDocument.source_id == source_id)
+        )
+    ).all()
+    if delete_documents:
+        for document in documents:
+            await knowledge_service.delete_document(db, document.id)
+    else:
+        await db.execute(
+            update(KnowledgeDocument)
+            .where(KnowledgeDocument.source_id == source_id)
+            .values(source_id=None)
+        )
+    await db.execute(
+        update(KnowledgeIngestionJob)
+        .where(KnowledgeIngestionJob.source_id == source_id)
+        .values(source_id=None)
+    )
+    await db.delete(source)
+    await audit(
+        db,
+        "knowledge.source_deleted",
+        "knowledge_source",
+        source_id,
+        {"documents_deleted": len(documents) if delete_documents else 0},
+    )
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.post("/knowledge-bases/{knowledge_base_id}/sources/web", status_code=201)
@@ -1551,11 +1729,13 @@ async def sync_knowledge_source(
 ) -> dict[str, Any]:
     try:
         job = await knowledge_source_service.sync(db, source_id)
+        await db.commit()
         return row(job)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         source = await db.get(KnowledgeSource, source_id)
+        await db.commit()
         return {
             "status": "failed",
             "source_id": source_id,
@@ -1581,7 +1761,9 @@ async def reindex_knowledge_base(
     if not await db.get(KnowledgeBase, knowledge_base_id):
         raise HTTPException(status_code=404, detail="知识库不存在")
     try:
-        return await knowledge_service.reindex(db, knowledge_base_id)
+        result = await knowledge_service.reindex(db, knowledge_base_id)
+        await db.commit()
+        return result
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

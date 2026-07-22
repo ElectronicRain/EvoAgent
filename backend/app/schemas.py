@@ -109,6 +109,12 @@ class KnowledgeBaseCreate(BaseModel):
     description: str = ""
 
 
+class KnowledgeBaseUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    discipline: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=4000)
+
+
 class KnowledgeBaseGroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
@@ -130,6 +136,18 @@ class TextDocumentCreate(BaseModel):
     title: str
     content: str = Field(min_length=1)
     source: str = "用户录入"
+
+
+class KnowledgeDocumentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    source: str | None = Field(default=None, max_length=4000)
+    content: str | None = Field(default=None, min_length=1)
+
+
+class KnowledgeSourceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    uri: str | None = Field(default=None, max_length=4096)
+    config: dict[str, Any] | None = None
 
 
 class KnowledgeSearchRequest(BaseModel):

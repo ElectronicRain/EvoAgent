@@ -5,7 +5,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
@@ -13,6 +13,7 @@ from ..models import (
     KnowledgeBaseGroupMember,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeEmbedding,
     KnowledgeProviderConfig,
     ModelEndpoint,
 )
@@ -227,6 +228,110 @@ class KnowledgeService:
             content_hash=hashlib.sha256(draft.content.encode("utf-8")).hexdigest(),
             metadata_json=dumps(draft.metadata),
         )
+
+    async def update_document(
+        self,
+        db: AsyncSession,
+        document_id: str,
+        *,
+        title: str | None = None,
+        source: str | None = None,
+        content: str | None = None,
+    ) -> KnowledgeDocument:
+        document = await db.get(KnowledgeDocument, document_id)
+        if not document:
+            raise LookupError("知识文档不存在")
+        next_title = title or document.title
+        next_source = source if source is not None else document.source
+        if content is not None:
+            knowledge_base_id = document.knowledge_base_id
+            mime_type = document.mime_type
+            source_id = document.source_id
+            metadata = loads(document.metadata_json, {})
+            await self.delete_document(db, document_id, audit_event=False)
+            replacement, _result = await self.add_sections(
+                db,
+                knowledge_base_id,
+                title=next_title,
+                sections=[ExtractedSection(content)],
+                source=next_source,
+                mime_type=mime_type,
+                source_id=source_id,
+                metadata={**metadata, "edited_from_document_id": document_id},
+            )
+            if replacement is None:
+                raise ValueError("修改后的正文没有可索引内容")
+            await audit(
+                db,
+                "knowledge.document_updated",
+                "knowledge_document",
+                replacement.id,
+                {"replaced_document_id": document_id, "content_changed": True},
+            )
+            return replacement
+
+        document.title = next_title
+        document.source = next_source
+        chunks = (
+            await db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
+        ).all()
+        for chunk in chunks:
+            chunk.title = next_title
+            locator = loads(chunk.metadata_json, {}).get("locator") or f"片段 {chunk.chunk_index + 1}"
+            chunk.citation = f"{next_title}，{locator}，来源：{next_source}"
+            await db.execute(
+                text("UPDATE knowledge_chunks_fts SET title=:title WHERE chunk_id=:chunk_id"),
+                {"title": next_title, "chunk_id": chunk.id},
+            )
+        await audit(
+            db,
+            "knowledge.document_updated",
+            "knowledge_document",
+            document.id,
+            {"content_changed": False},
+        )
+        return document
+
+    async def delete_document(
+        self,
+        db: AsyncSession,
+        document_id: str,
+        *,
+        audit_event: bool = True,
+    ) -> None:
+        document = await db.get(KnowledgeDocument, document_id)
+        if not document:
+            raise LookupError("知识文档不存在")
+        chunk_ids = list(
+            (
+                await db.scalars(
+                    select(KnowledgeChunk.id).where(KnowledgeChunk.document_id == document_id)
+                )
+            ).all()
+        )
+        for chunk_id in chunk_ids:
+            await db.execute(
+                text("DELETE FROM knowledge_chunks_fts WHERE chunk_id=:chunk_id"),
+                {"chunk_id": chunk_id},
+            )
+        if chunk_ids:
+            await db.execute(
+                delete(KnowledgeEmbedding).where(KnowledgeEmbedding.chunk_id.in_(chunk_ids))
+            )
+        await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
+        knowledge_base = await db.get(KnowledgeBase, document.knowledge_base_id)
+        await db.delete(document)
+        if knowledge_base:
+            knowledge_base.document_count = max(0, knowledge_base.document_count - 1)
+        if audit_event:
+            await audit(
+                db,
+                "knowledge.document_deleted",
+                "knowledge_document",
+                document_id,
+                {"chunks": len(chunk_ids)},
+            )
+        await db.flush()
 
     async def search(
         self,

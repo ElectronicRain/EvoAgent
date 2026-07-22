@@ -7,6 +7,7 @@ const router = createRouter({
     { path: '/agents', component: () => import('./views/AgentsView.vue'), meta: { title: 'Agent 工厂' } },
     { path: '/workflows', component: () => import('./views/WorkflowsView.vue'), meta: { title: '协作工作流' } },
     { path: '/knowledge', component: () => import('./views/KnowledgeView.vue'), meta: { title: '学科知识库' } },
+    { path: '/knowledge/:id', component: () => import('./views/KnowledgeDetailView.vue'), meta: { title: '知识库详情', detached: true } },
     { path: '/extensions', component: () => import('./views/ExtensionsView.vue'), meta: { title: '扩展与模型' } },
     { path: '/evolution', component: () => import('./views/EvolutionView.vue'), meta: { title: '进化实验室' } },
     { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { title: '安全治理' } },
@@ -14,4 +15,3 @@ const router = createRouter({
 })
 
 export default router
-

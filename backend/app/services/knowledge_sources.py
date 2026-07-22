@@ -125,6 +125,38 @@ class KnowledgeSourceService:
             "updated_at": source.updated_at,
         }
 
+    async def update(
+        self,
+        db: AsyncSession,
+        source_id: str,
+        *,
+        name: str | None = None,
+        uri: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> KnowledgeSource:
+        source = await db.get(KnowledgeSource, source_id)
+        if source is None:
+            raise LookupError("数据源不存在")
+        current_config = loads(secret_store.decrypt(source.config_ciphertext), {})
+        if name is not None:
+            source.name = name
+        if uri is not None:
+            source.uri = (
+                _safe_database_uri(uri)
+                if source.source_type == "database"
+                else _safe_http_uri(uri) if source.source_type in {"web", "api"} else uri
+            )
+            config_key = "connection_url" if source.source_type == "database" else "url"
+            current_config[config_key] = uri
+        if config is not None:
+            current_config = config
+        source.config_ciphertext = secret_store.encrypt(dumps(current_config))
+        source.metadata_json = dumps({"config_fields": sorted(current_config.keys())})
+        source.status = "pending"
+        source.last_error = ""
+        await audit(db, "knowledge.source_updated", "knowledge_source", source.id)
+        return source
+
     async def sync(self, db: AsyncSession, source_id: str) -> KnowledgeIngestionJob:
         source = await db.get(KnowledgeSource, source_id)
         if source is None:

@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for the EvoAgent main window",
-  "windows": ["main"],
+  "description": "Default permissions for the EvoAgent main and knowledge detail windows",
+  "windows": ["main", "knowledge-*"],
   "permissions": [
     "core:default",
+    "core:window:allow-create",
+    "core:webview:allow-create-webview-window",
     "shell:allow-spawn",
     "shell:allow-kill"
   ]
 }
-

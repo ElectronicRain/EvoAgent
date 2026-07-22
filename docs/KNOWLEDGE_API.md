@@ -69,6 +69,11 @@
 
 列出知识库。
 
+### 知识库修改与删除
+
+- `PATCH /api/knowledge-bases/{knowledge_base_id}`：修改名称、学科和说明。
+- `DELETE /api/knowledge-bases/{knowledge_base_id}`：删除知识库，并级联清理文档、父子分块、向量、全文索引、数据源、导入任务和分组关系。
+
 ### 知识库分组
 
 知识库与分组采用多对多关系：一个知识库可以进入多个分组，删除分组不会删除知识库或文档。
@@ -113,6 +118,11 @@ curl -F "file=@paper.pdf" http://127.0.0.1:8000/api/knowledge-bases/{id}/documen
 - `GET /api/knowledge-documents/{document_id}/chunks?level=all&offset=0&limit=100`：分页返回父块/子块正文、父块关系、页码或章节、Token 估算、内容哈希，以及向量 provider、模型和维度。`level` 支持 `all`、`parent`、`child`。
 
 前端“知识库内部检查器”直接使用这些只读接口展示真实数据库状态，不在浏览器端推测分块或检索参数。
+
+### 文档修改与删除
+
+- `PATCH /api/knowledge-documents/{document_id}`：修改标题、来源或正文。修改正文时会清理旧全文/向量索引，并重新执行去噪、去重、父子切分和向量化；响应中的 `id` 可能是重建后的新文档 ID。
+- `DELETE /api/knowledge-documents/{document_id}`：删除文档及其分块、向量和 FTS5 索引。
 
 ## 4. 外部数据源
 
@@ -174,6 +184,8 @@ curl -F "file=@paper.pdf" http://127.0.0.1:8000/api/knowledge-bases/{id}/documen
 ### 数据源管理
 
 - `GET /api/knowledge-bases/{knowledge_base_id}/sources`：脱敏列出数据源。
+- `PATCH /api/knowledge-sources/{source_id}`：修改数据源名称、连接 URI，或用 `config` 整体替换加密连接配置；修改后状态变为 `pending`，需重新同步。
+- `DELETE /api/knowledge-sources/{source_id}?delete_documents=false`：删除连接；将 `delete_documents` 设为 `true` 时同时删除该来源已导入的文档和索引。
 - `POST /api/knowledge-sources/{source_id}/sync`：重新同步。
 - `GET /api/knowledge-ingestion-jobs/{job_id}`：查询同步阶段、进度、文档/片段/重复数和错误。
 - `POST /api/knowledge-bases/{knowledge_base_id}/reindex`：模型切换后重新生成全部子块向量。
