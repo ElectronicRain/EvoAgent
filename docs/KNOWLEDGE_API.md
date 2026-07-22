@@ -87,6 +87,14 @@ curl -F "file=@paper.pdf" http://127.0.0.1:8000/api/knowledge-bases/{id}/documen
 
 列出文档及其状态、哈希、字符数、清洗统计元数据。
 
+### 知识库内部检查接口
+
+- `GET /api/knowledge-bases/{knowledge_base_id}/overview`：返回文档、父块、检索子块、向量和数据源统计；同时返回当前 Dense/BM25/RRF/Rerank、Top-K、上下文扩展和引用策略。
+- `GET /api/knowledge-documents/{document_id}`：返回文档清洗统计、重建后的清洗正文、父子块数量和已向量化数量。
+- `GET /api/knowledge-documents/{document_id}/chunks?level=all&offset=0&limit=100`：分页返回父块/子块正文、父块关系、页码或章节、Token 估算、内容哈希，以及向量 provider、模型和维度。`level` 支持 `all`、`parent`、`child`。
+
+前端“知识库内部检查器”直接使用这些只读接口展示真实数据库状态，不在浏览器端推测分块或检索参数。
+
 ## 4. 外部数据源
 
 数据源的请求头、数据库连接地址、参数和请求体整体加密保存；列表接口只返回脱敏 URI 和配置字段名称。

@@ -10,6 +10,13 @@ const bases = ref<Entity[]>([])
 const selected = ref<Entity | null>(null)
 const documents = ref<Entity[]>([])
 const sources = ref<Entity[]>([])
+const overview = ref<Entity | null>(null)
+const documentDetail = ref<Entity | null>(null)
+const documentChunks = ref<Entity[]>([])
+const chunkTotal = ref(0)
+const inspectorTab = ref<'content' | 'chunks' | 'strategy'>('content')
+const chunkLevel = ref<'all' | 'parent' | 'child'>('all')
+const chunkLevels = ['all', 'parent', 'child'] as const
 const answer = ref('')
 const results = ref<Entity[]>([])
 const citations = ref<Entity[]>([])
@@ -52,12 +59,51 @@ async function load() {
 
 async function choose(item: Entity) {
   selected.value = item
-  const [documentRows, sourceRows] = await Promise.all([
+  const [documentRows, sourceRows, overviewData] = await Promise.all([
     api.get<Entity[]>(`/knowledge-bases/${item.id}/documents`),
     api.get<Entity[]>(`/knowledge-bases/${item.id}/sources`),
+    api.get<Entity>(`/knowledge-bases/${item.id}/overview`),
   ])
   documents.value = documentRows
   sources.value = sourceRows
+  overview.value = overviewData
+  if (documentRows.length) {
+    const current = documentRows.find(row => row.id === documentDetail.value?.id) || documentRows[0]
+    await inspectDocument(current)
+  } else {
+    documentDetail.value = null
+    documentChunks.value = []
+    chunkTotal.value = 0
+  }
+}
+
+async function inspectDocument(item: Entity) {
+  store.loading(true)
+  try {
+    const [detail, chunks] = await Promise.all([
+      api.get<Entity>(`/knowledge-documents/${item.id}`),
+      api.get<Entity>(`/knowledge-documents/${item.id}/chunks?level=${chunkLevel.value}&limit=500`),
+    ])
+    documentDetail.value = detail
+    documentChunks.value = chunks.items || []
+    chunkTotal.value = chunks.total || 0
+  } catch (error: any) {
+    store.notify(error.message, 'error')
+  } finally {
+    store.loading(false)
+  }
+}
+
+async function changeChunkLevel(level: 'all' | 'parent' | 'child') {
+  chunkLevel.value = level
+  if (!documentDetail.value) return
+  const chunks = await api.get<Entity>(`/knowledge-documents/${documentDetail.value.id}/chunks?level=${level}&limit=500`)
+  documentChunks.value = chunks.items || []
+  chunkTotal.value = chunks.total || 0
+}
+
+function shortHash(value?: string) {
+  return value ? `${value.slice(0, 10)}…${value.slice(-6)}` : '—'
 }
 
 async function saveBase() {
@@ -244,8 +290,30 @@ onMounted(load)
 
   <section v-if="selected" class="card" style="margin-top:20px">
     <div class="card-header"><h2>{{ selected.name }} · 数据源</h2><div style="display:flex;gap:8px"><button class="btn btn-sm" @click="addSource=true"><Globe2 :size="14" />网页 / 数据库 / API</button><button class="btn btn-sm" @click="addText=true"><FileText :size="14" />粘贴文本</button><label class="btn btn-sm"><Upload :size="14" />上传文档<input type="file" accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html" hidden @change="upload"></label><button class="btn btn-sm" @click="reindex">重新向量化</button></div></div>
-    <div class="table-wrap"><table><thead><tr><th>资料名称</th><th>来源</th><th>类型</th><th>状态</th><th>字符数</th></tr></thead><tbody><tr v-for="item in documents" :key="item.id"><td>{{ item.title }}</td><td>{{ item.source }}</td><td>{{ item.mime_type }}</td><td>{{ item.status }}</td><td>{{ item.char_count }}</td></tr></tbody></table><div v-if="!documents.length" class="empty"><FileText :size="28" /><br>还没有资料</div></div>
+    <div v-if="overview" class="knowledge-metrics"><div><strong>{{ overview.statistics.documents }}</strong><span>文档</span></div><div><strong>{{ overview.statistics.parent_chunks }}</strong><span>父块</span></div><div><strong>{{ overview.statistics.child_chunks }}</strong><span>检索子块</span></div><div><strong>{{ overview.statistics.embeddings }}</strong><span>已向量化</span></div><div><strong>{{ overview.statistics.sources }}</strong><span>数据源</span></div></div>
+    <div class="table-wrap"><table><thead><tr><th>资料名称</th><th>来源</th><th>类型</th><th>状态</th><th>字符数</th><th>内部结构</th></tr></thead><tbody><tr v-for="item in documents" :key="item.id" :class="{ 'selected-row': documentDetail?.id === item.id }"><td>{{ item.title }}</td><td>{{ item.source }}</td><td>{{ item.mime_type }}</td><td>{{ item.status }}</td><td>{{ item.char_count }}</td><td><button class="btn btn-sm" @click="inspectDocument(item)">查看内容与索引</button></td></tr></tbody></table><div v-if="!documents.length" class="empty"><FileText :size="28" /><br>还没有资料</div></div>
     <div v-if="sources.length" class="card-body"><div class="list-stack"><div v-for="item in sources" :key="item.id" class="list-item"><div><strong>{{ item.name }}</strong><p>{{ item.source_type }} · {{ item.uri }}</p></div><span>{{ item.status }}</span></div></div></div>
+  </section>
+
+  <section v-if="selected && (documentDetail || overview)" class="card knowledge-inspector" style="margin-top:20px">
+    <div class="card-header"><div><h2>知识库内部检查器</h2><p v-if="documentDetail">当前文档：{{ documentDetail.title }}</p></div><div class="inspector-tabs"><button :class="{active:inspectorTab==='content'}" @click="inspectorTab='content'">文字内容</button><button :class="{active:inspectorTab==='chunks'}" @click="inspectorTab='chunks'">分块索引 {{ documentDetail?.child_chunk_count || 0 }}</button><button :class="{active:inspectorTab==='strategy'}" @click="inspectorTab='strategy'">检索策略</button></div></div>
+
+    <div v-if="inspectorTab==='content' && documentDetail" class="card-body inspector-content">
+      <div class="document-facts"><span>原始字符 {{ documentDetail.cleaning_stats?.original_chars ?? documentDetail.char_count }}</span><span>清洗后 {{ documentDetail.cleaning_stats?.cleaned_chars ?? documentDetail.char_count }}</span><span>去除噪声行 {{ documentDetail.cleaning_stats?.noise_lines_removed || 0 }}</span><span>去除重复行 {{ documentDetail.cleaning_stats?.repeated_lines_removed || 0 }}</span><span>内容哈希 {{ shortHash(documentDetail.content_hash) }}</span></div>
+      <pre class="document-text">{{ documentDetail.cleaned_content || '该文档没有可显示的清洗后正文。' }}</pre>
+    </div>
+
+    <div v-else-if="inspectorTab==='chunks' && documentDetail" class="card-body">
+      <div class="chunk-toolbar"><div><button v-for="level in chunkLevels" :key="level" class="btn btn-sm" :class="{'btn-primary':chunkLevel===level}" @click="changeChunkLevel(level)">{{ level === 'all' ? '全部' : level === 'parent' ? '父块' : '检索子块' }}</button></div><span>显示 {{ documentChunks.length }} / {{ chunkTotal }}</span></div>
+      <div class="chunk-list"><article v-for="item in documentChunks" :key="item.id" class="chunk-card" :class="item.level"><header><div><span class="chunk-level">{{ item.level === 'parent' ? '父块' : '子块' }}</span><strong>#{{ item.chunk_index }}</strong><span v-if="item.metadata?.locator">{{ item.metadata.locator }}</span></div><span :class="item.embedding?.indexed ? 'vector-ready' : 'vector-missing'">{{ item.embedding?.indexed ? `${item.embedding.dimensions} 维 · 已索引` : item.level === 'parent' ? '上下文块' : '未向量化' }}</span></header><p>{{ item.content }}</p><footer><span>Token 估算 {{ item.token_count }}</span><span v-if="item.parent_chunk_id">父块 {{ shortHash(item.parent_chunk_id) }}</span><span>Hash {{ shortHash(item.content_hash) }}</span><span v-if="item.embedding?.model">{{ item.embedding.provider }} · {{ item.embedding.model }}</span></footer></article><div v-if="!documentChunks.length" class="empty">当前筛选条件下没有分块</div></div>
+    </div>
+
+    <div v-else-if="inspectorTab==='strategy' && overview" class="card-body strategy-panel">
+      <div class="strategy-flow"><div><b>1</b><strong>查询改写</strong><p>{{ overview.retrieval_strategy.query_rewrite }}</p></div><i>→</i><div><b>2</b><strong>多路召回</strong><p>{{ overview.retrieval_strategy.retrievers.join(' + ') }}</p></div><i>→</i><div><b>3</b><strong>候选融合</strong><p>{{ overview.retrieval_strategy.fusion }}</p></div><i>→</i><div><b>4</b><strong>重排序</strong><p>{{ overview.retrieval_strategy.rerank_model }}</p></div><i>→</i><div><b>5</b><strong>上下文生成</strong><p>{{ overview.retrieval_strategy.context_expansion }}</p></div></div>
+      <div class="strategy-grid"><div><label>初筛候选</label><strong>Top {{ overview.retrieval_strategy.candidate_k }}</strong></div><div><label>最终片段</label><strong>Top {{ overview.retrieval_strategy.top_k }}</strong></div><div><label>上下文预算</label><strong>{{ overview.retrieval_strategy.context_char_budget }} 字符</strong></div><div><label>多样性约束</label><strong>{{ overview.retrieval_strategy.diversity }}</strong></div></div>
+      <h3>当前向量索引</h3><div v-if="overview.vector_indexes.length" class="list-stack"><div v-for="item in overview.vector_indexes" :key="`${item.model}-${item.dimensions}`" class="list-item"><div><strong>{{ item.model }}</strong><p>{{ item.provider }} · {{ item.dimensions }} 维</p></div><span>{{ item.count }} 个向量</span></div></div><div v-else class="notice">尚未生成向量索引。配置模型后上传资料或点击“重新向量化”。</div>
+      <p class="citation-policy">引用策略：{{ overview.retrieval_strategy.citation_policy }}</p>
+    </div>
   </section>
 
   <section v-if="addText" class="card" style="margin-top:20px"><div class="card-header"><h2>录入资料</h2><button class="btn btn-sm" @click="addText=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>标题</label><input v-model="docForm.title" class="input"></div><div class="field"><label>来源</label><input v-model="docForm.source" class="input"></div><div class="field full"><label>正文</label><textarea v-model="docForm.content" class="textarea" style="min-height:220px" /></div><div class="field full"><button class="btn btn-primary" @click="saveText">清洗、切分并向量化</button></div></div></section>
@@ -256,3 +324,7 @@ onMounted(load)
 
   <section v-if="showConfig" class="card" style="margin-top:20px"><div class="card-header"><h2>知识库模型配置</h2><button class="btn btn-sm" @click="showConfig=false">取消</button></div><div class="card-body form-grid"><div class="field full"><label>SiliconFlow API Key（留空表示保持不变）</label><input v-model="providerConfig.api_key" type="password" class="input" :placeholder="providerConfig.has_api_key ? '已安全保存' : 'sk-...'" autocomplete="new-password"></div><div class="field"><label>Embedding 模型</label><input v-model="providerConfig.embedding_model" class="input"></div><div class="field"><label>Embedding URL</label><input v-model="providerConfig.embedding_base_url" class="input"></div><div class="field"><label>Rerank 模型</label><input v-model="providerConfig.rerank_model" class="input"></div><div class="field"><label>Rerank URL</label><input v-model="providerConfig.rerank_base_url" class="input"></div><div class="field"><label>答案生成模型端点</label><select v-model="providerConfig.llm_endpoint_id" class="input"><option :value="null">离线摘要</option><option v-for="item in endpoints" :key="item.id" :value="item.id">{{ item.name }} · {{ item.default_model }}</option></select></div><div class="field"><label>最终 Top-K</label><input v-model.number="providerConfig.top_k" type="number" min="1" max="20" class="input"></div><div class="field"><label>候选数量</label><input v-model.number="providerConfig.candidate_k" type="number" min="5" max="100" class="input"></div><div class="field full" style="display:flex;gap:8px"><button class="btn" @click="testConfig">测试连接</button><button class="btn btn-primary" @click="saveConfig">保存配置</button></div></div></section>
 </template>
+
+<style scoped>
+.knowledge-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#dbe8f5;border-top:1px solid #dbe8f5;border-bottom:1px solid #dbe8f5}.knowledge-metrics div{display:flex;flex-direction:column;gap:3px;padding:13px 18px;background:#f8fbff}.knowledge-metrics strong{font-size:20px;color:#174f88}.knowledge-metrics span{font-size:11px;color:#60758b}.selected-row{background:#eef6ff}.knowledge-inspector>.card-header{align-items:flex-end}.knowledge-inspector .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.inspector-tabs{display:flex;gap:5px}.inspector-tabs button{border:0;border-radius:8px;background:#edf3f9;color:#49657f;padding:8px 13px;cursor:pointer}.inspector-tabs button.active{background:#1769c2;color:white}.document-facts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:13px}.document-facts span{padding:6px 9px;border:1px solid #d7e5f2;border-radius:7px;background:#f5f9fd;color:#49657f;font-size:11px}.document-text{max-height:560px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:20px;border:1px solid #d5e4f2;border-radius:10px;background:white;color:#263f57;font:13px/1.85 "Microsoft YaHei",sans-serif}.chunk-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;color:#60758b;font-size:11px}.chunk-toolbar>div{display:flex;gap:6px}.chunk-list{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}.chunk-card{border:1px solid #d6e3ef;border-left:4px solid #65a3df;border-radius:10px;padding:13px 15px;background:#fff}.chunk-card.parent{border-left-color:#254f78;background:#f8fbff}.chunk-card header,.chunk-card footer{display:flex;align-items:center;justify-content:space-between;gap:10px}.chunk-card header>div,.chunk-card footer{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.chunk-card header span,.chunk-card footer{font-size:10px;color:#687f95}.chunk-card p{white-space:pre-wrap;color:#2f4b65;font-size:12px;line-height:1.7}.chunk-level{padding:3px 7px;border-radius:999px;background:#e7f2fc;color:#1769c2!important}.parent .chunk-level{background:#dce8f3;color:#254f78!important}.vector-ready{color:#13835c!important}.vector-missing{color:#9a6b1c!important}.strategy-panel h3{margin-top:22px}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:7px}.strategy-flow>div{min-width:0;padding:14px;border:1px solid #d6e4f1;border-radius:10px;background:linear-gradient(180deg,#fff,#f5f9fd)}.strategy-flow b{display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:#1769c2;color:white;margin-bottom:8px}.strategy-flow strong{display:block;color:#244e75}.strategy-flow p{font-size:10px;line-height:1.5;color:#60758b}.strategy-flow i{align-self:center;color:#72a6d5}.strategy-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}.strategy-grid>div{padding:13px;border-radius:9px;background:#edf5fc}.strategy-grid label{display:block;font-size:10px;color:#60758b;margin-bottom:5px}.strategy-grid strong{font-size:12px;color:#234f78}.citation-policy{font-size:11px;color:#60758b;margin:14px 0 0}@media(max-width:1200px){.strategy-flow{grid-template-columns:1fr}.strategy-flow i{display:none}.strategy-grid{grid-template-columns:repeat(2,1fr)}}
+</style>

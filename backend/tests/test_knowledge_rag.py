@@ -74,6 +74,26 @@ def test_full_text_ingestion_and_rag_query(client):
         json={"title": "网格质量指南", "content": content, "source": "测试标准"},
     )
     assert uploaded.status_code == 201
+    document_id = uploaded.json()["id"]
+
+    overview = client.get(f"/api/knowledge-bases/{base['id']}/overview")
+    assert overview.status_code == 200
+    overview_data = overview.json()
+    assert overview_data["statistics"]["parent_chunks"] >= 1
+    assert overview_data["statistics"]["child_chunks"] >= 1
+    assert overview_data["statistics"]["embeddings"] >= 1
+    assert overview_data["retrieval_strategy"]["fusion"].startswith("Reciprocal Rank Fusion")
+
+    detail = client.get(f"/api/knowledge-documents/{document_id}")
+    assert detail.status_code == 200
+    assert "雅可比" in detail.json()["cleaned_content"]
+    assert detail.json()["cleaning_stats"]["cleaned_chars"] > 0
+
+    chunks = client.get(f"/api/knowledge-documents/{document_id}/chunks?level=child")
+    assert chunks.status_code == 200
+    assert chunks.json()["total"] >= 1
+    assert all(item["level"] == "child" for item in chunks.json()["items"])
+    assert all(item["embedding"]["indexed"] for item in chunks.json()["items"])
 
     response = client.post(
         "/api/knowledge/query",

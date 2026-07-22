@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +25,9 @@ from .models import (
     EvolutionProposal,
     Extension,
     KnowledgeBase,
+    KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeEmbedding,
     KnowledgeIngestionJob,
     KnowledgeProviderConfig,
     KnowledgeSource,
@@ -977,6 +979,198 @@ async def list_documents(
         )
     ).all()
     return [row(item) for item in items]
+
+
+@router.get("/knowledge-bases/{knowledge_base_id}/overview")
+async def knowledge_base_overview(
+    knowledge_base_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    knowledge_base = await db.get(KnowledgeBase, knowledge_base_id)
+    if not knowledge_base:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    config = await get_knowledge_config(db)
+    level_rows = (
+        await db.execute(
+            select(KnowledgeChunk.level, func.count(KnowledgeChunk.id))
+            .where(KnowledgeChunk.knowledge_base_id == knowledge_base_id)
+            .group_by(KnowledgeChunk.level)
+        )
+    ).all()
+    level_counts = {str(level): int(count) for level, count in level_rows}
+    embedding_rows = (
+        await db.execute(
+            select(
+                KnowledgeEmbedding.provider,
+                KnowledgeEmbedding.model,
+                KnowledgeEmbedding.dimensions,
+                func.count(KnowledgeEmbedding.chunk_id),
+            )
+            .where(KnowledgeEmbedding.knowledge_base_id == knowledge_base_id)
+            .group_by(
+                KnowledgeEmbedding.provider,
+                KnowledgeEmbedding.model,
+                KnowledgeEmbedding.dimensions,
+            )
+        )
+    ).all()
+    source_rows = (
+        await db.execute(
+            select(KnowledgeSource.source_type, KnowledgeSource.status, func.count(KnowledgeSource.id))
+            .where(KnowledgeSource.knowledge_base_id == knowledge_base_id)
+            .group_by(KnowledgeSource.source_type, KnowledgeSource.status)
+        )
+    ).all()
+    return {
+        "knowledge_base": row(knowledge_base),
+        "statistics": {
+            "documents": int(
+                await db.scalar(
+                    select(func.count(KnowledgeDocument.id)).where(
+                        KnowledgeDocument.knowledge_base_id == knowledge_base_id
+                    )
+                )
+                or 0
+            ),
+            "parent_chunks": level_counts.get("parent", 0),
+            "child_chunks": level_counts.get("child", 0),
+            "embeddings": sum(int(item[3]) for item in embedding_rows),
+            "sources": sum(int(item[2]) for item in source_rows),
+        },
+        "source_summary": [
+            {"source_type": item[0], "status": item[1], "count": int(item[2])}
+            for item in source_rows
+        ],
+        "vector_indexes": [
+            {
+                "provider": item[0],
+                "model": item[1],
+                "dimensions": item[2],
+                "count": int(item[3]),
+            }
+            for item in embedding_rows
+        ],
+        "retrieval_strategy": {
+            "query_rewrite": "LLM 多查询改写；未配置生成模型时进行术语规范化",
+            "retrievers": ["Dense cosine", "SQLite FTS5 BM25", "中文二元词项覆盖"],
+            "fusion": "Reciprocal Rank Fusion (RRF, k=60)",
+            "candidate_k": config.candidate_k,
+            "rerank_model": config.rerank_model,
+            "top_k": config.top_k,
+            "diversity": "内容哈希去重，每份文档最多 3 个最终片段",
+            "context_expansion": "命中子块后扩展到父块",
+            "context_char_budget": config.context_char_budget,
+            "citation_policy": "资料编号 + 文档 + 页码/幻灯片/章节 + 原始来源",
+        },
+    }
+
+
+@router.get("/knowledge-documents/{document_id}")
+async def get_knowledge_document(
+    document_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    document = await db.get(KnowledgeDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="知识文档不存在")
+    parents = (
+        await db.scalars(
+            select(KnowledgeChunk)
+            .where(
+                KnowledgeChunk.document_id == document_id,
+                KnowledgeChunk.level == "parent",
+            )
+            .order_by(KnowledgeChunk.chunk_index)
+        )
+    ).all()
+    content_chunks = parents
+    if not content_chunks:
+        # Knowledge bases created before hierarchical chunking only contain child chunks.
+        content_chunks = (
+            await db.scalars(
+                select(KnowledgeChunk)
+                .where(KnowledgeChunk.document_id == document_id)
+                .order_by(KnowledgeChunk.chunk_index)
+            )
+        ).all()
+    child_count = int(
+        await db.scalar(
+            select(func.count(KnowledgeChunk.id)).where(
+                KnowledgeChunk.document_id == document_id,
+                KnowledgeChunk.level == "child",
+            )
+        )
+        or 0
+    )
+    embedding_count = int(
+        await db.scalar(
+            select(func.count(KnowledgeEmbedding.chunk_id))
+            .join(KnowledgeChunk, KnowledgeChunk.id == KnowledgeEmbedding.chunk_id)
+            .where(KnowledgeChunk.document_id == document_id)
+        )
+        or 0
+    )
+    data = row(document)
+    data.update(
+        {
+            "metadata": loads(document.metadata_json, {}),
+            "cleaning_stats": loads(document.cleaning_stats_json, {}),
+            "cleaned_content": "\n\n".join(item.content for item in content_chunks),
+            "parent_chunk_count": len(parents),
+            "child_chunk_count": child_count,
+            "embedding_count": embedding_count,
+        }
+    )
+    return data
+
+
+@router.get("/knowledge-documents/{document_id}/chunks")
+async def list_knowledge_document_chunks(
+    document_id: str,
+    level: str = Query(default="all", pattern="^(all|parent|child)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if not await db.get(KnowledgeDocument, document_id):
+        raise HTTPException(status_code=404, detail="知识文档不存在")
+    filters = [KnowledgeChunk.document_id == document_id]
+    if level != "all":
+        filters.append(KnowledgeChunk.level == level)
+    total = int(
+        await db.scalar(select(func.count(KnowledgeChunk.id)).where(*filters)) or 0
+    )
+    rows = (
+        await db.execute(
+            select(KnowledgeChunk, KnowledgeEmbedding)
+            .outerjoin(KnowledgeEmbedding, KnowledgeEmbedding.chunk_id == KnowledgeChunk.id)
+            .where(*filters)
+            .order_by(KnowledgeChunk.chunk_index)
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": [
+            {
+                **row(chunk),
+                "metadata": loads(chunk.metadata_json, {}),
+                "embedding": (
+                    {
+                        "indexed": True,
+                        "provider": embedding.provider,
+                        "model": embedding.model,
+                        "dimensions": embedding.dimensions,
+                        "content_hash": embedding.content_hash,
+                    }
+                    if embedding
+                    else {"indexed": False}
+                ),
+            }
+            for chunk, embedding in rows
+        ],
+    }
 
 
 @router.post("/knowledge-bases/{knowledge_base_id}/documents/text", status_code=201)
