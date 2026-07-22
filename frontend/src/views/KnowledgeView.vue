@@ -4,6 +4,13 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { BookOpen, Database, FolderTree, Plus, Search, Settings2, Trash2 } from 'lucide-vue-next'
 import PageHeader from '../components/PageHeader.vue'
 import { api, type Entity } from '../services/api'
+import {
+  importKnowledgeFiles,
+  KNOWLEDGE_FILE_ACCEPT,
+  selectKnowledgeFiles,
+  type KnowledgeFileSelection,
+  type KnowledgeImportProgress,
+} from '../services/knowledgeFiles'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
@@ -27,15 +34,19 @@ const showConfig = ref(false)
 const showGroupEditor = ref(false)
 const editingGroupId = ref('')
 const baseForm = reactive({ name: '', discipline: '', description: '' })
-const initialSourceType = ref<'none' | 'files' | 'web' | 'database' | 'api'>('none')
+const initialSourceType = ref<'none' | 'files' | 'folder' | 'web' | 'database' | 'api'>('none')
 const initialSourceOptions = [
   { id: 'none', label: '暂不添加' },
   { id: 'files', label: 'PPT / PDF / Word' },
+  { id: 'folder', label: '整个文件夹' },
   { id: 'web', label: '网页' },
   { id: 'database', label: '数据库' },
   { id: 'api', label: 'API / 第三方' },
 ] as const
-const initialFiles = ref<File[]>([])
+const initialFileSelection = ref<KnowledgeFileSelection>({ files: [], skipped: [], rootName: '' })
+const initialImportProgress = reactive<KnowledgeImportProgress>({
+  total: 0, completed: 0, imported: 0, duplicates: 0, failed: 0, skipped: 0, current: '',
+})
 const initialSource = reactive({
   name: '', url: '', max_pages: 1, method: 'GET', headers: '{}', response_path: '',
   connection_url: '', query: 'SELECT * FROM your_table', row_limit: 5000,
@@ -169,13 +180,22 @@ async function removeGroup(group: Entity) {
 }
 
 async function saveBase() {
+  if (
+    (initialSourceType.value === 'files' || initialSourceType.value === 'folder')
+    && !initialFileSelection.value.files.length
+  ) {
+    store.notify('请选择至少一个支持的文档', 'error')
+    return
+  }
   store.loading(true)
   try {
     const item = await api.post<Entity>('/knowledge-bases', baseForm)
-    if (initialSourceType.value === 'files') {
-      for (const file of initialFiles.value) {
-        await api.upload(`/knowledge-bases/${item.id}/documents/upload`, file)
-      }
+    let importSummary = ''
+    if (initialSourceType.value === 'files' || initialSourceType.value === 'folder') {
+      const result = await importKnowledgeFiles(item.id, initialFileSelection.value, progress => {
+        Object.assign(initialImportProgress, progress)
+      })
+      importSummary = `导入 ${result.imported}，重复 ${result.duplicates}，失败 ${result.failed}，跳过 ${result.skipped}`
     } else if (initialSourceType.value === 'web') {
       await api.post(`/knowledge-bases/${item.id}/sources/web`, {
         name: initialSource.name || '初始网页', url: initialSource.url,
@@ -195,7 +215,7 @@ async function saveBase() {
     }
     createBase.value = false
     await load()
-    store.notify('知识库及初始数据源已创建')
+    store.notify(importSummary ? `知识库已创建；${importSummary}` : '知识库及初始数据源已创建')
     await openKnowledgeWindow(item)
   } catch (error: any) {
     store.notify(error.message, 'error')
@@ -205,7 +225,13 @@ async function saveBase() {
 }
 
 function selectInitialFiles(event: Event) {
-  initialFiles.value = Array.from((event.target as HTMLInputElement).files || [])
+  const input = event.target as HTMLInputElement
+  initialFileSelection.value = selectKnowledgeFiles(input.files || [])
+}
+
+function selectInitialFolder(event: Event) {
+  const input = event.target as HTMLInputElement
+  initialFileSelection.value = selectKnowledgeFiles(input.files || [])
 }
 
 async function saveConfig() {
@@ -309,7 +335,19 @@ onMounted(load)
 
   <section v-if="createBase" class="card" style="margin-top:20px">
     <div class="card-header"><h2>新建知识库</h2><button class="btn btn-sm" @click="createBase=false">取消</button></div>
-    <div class="card-body form-grid"><div class="field"><label>名称</label><input v-model="baseForm.name" class="input"></div><div class="field"><label>学科</label><input v-model="baseForm.discipline" class="input"></div><div class="field full"><label>说明</label><input v-model="baseForm.description" class="input"></div><div class="field full"><label>创建时加入初始数据</label><div class="initial-source-types"><button v-for="item in initialSourceOptions" :key="item.id" class="btn" :class="{'btn-primary':initialSourceType===item.id}" @click="initialSourceType=item.id">{{ item.label }}</button></div></div><div v-if="initialSourceType==='files'" class="field full"><label class="upload-zone">选择一个或多个文档<input type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html" @change="selectInitialFiles"><span>已选择 {{ initialFiles.length }} 个文件</span></label></div><template v-else-if="initialSourceType==='web'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>抓取页数</label><input v-model.number="initialSource.max_pages" type="number" min="1" max="20" class="input"></div><div class="field full"><label>网页 URL</label><input v-model="initialSource.url" class="input"></div></template><template v-else-if="initialSourceType==='database'"><div class="field full"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field full"><label>数据库连接地址</label><input v-model="initialSource.connection_url" class="input" placeholder="sqlite:///D:/data/source.db"></div><div class="field full"><label>只读查询</label><textarea v-model="initialSource.query" class="textarea"></textarea></div></template><template v-else-if="initialSourceType==='api'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>请求方法</label><select v-model="initialSource.method" class="input"><option>GET</option><option>POST</option></select></div><div class="field full"><label>API URL</label><input v-model="initialSource.url" class="input"></div><div class="field"><label>响应路径</label><input v-model="initialSource.response_path" class="input" placeholder="data.items"></div><div class="field full"><label>请求头 JSON</label><textarea v-model="initialSource.headers" class="textarea"></textarea></div></template><div class="field full"><button class="btn btn-primary" @click="saveBase">创建知识库并导入初始数据</button></div></div>
+    <div class="card-body form-grid">
+      <div class="field"><label>名称</label><input v-model="baseForm.name" class="input"></div>
+      <div class="field"><label>学科</label><input v-model="baseForm.discipline" class="input"></div>
+      <div class="field full"><label>说明</label><input v-model="baseForm.description" class="input"></div>
+      <div class="field full"><label>创建时加入初始数据</label><div class="initial-source-types"><button v-for="item in initialSourceOptions" :key="item.id" class="btn" :class="{'btn-primary':initialSourceType===item.id}" @click="initialSourceType=item.id">{{ item.label }}</button></div></div>
+      <div v-if="initialSourceType==='files'" class="field full"><label class="upload-zone">选择一个或多个文档<input type="file" multiple :accept="KNOWLEDGE_FILE_ACCEPT" @change="selectInitialFiles"><span>已选择 {{ initialFileSelection.files.length }} 个，跳过 {{ initialFileSelection.skipped.length }} 个</span></label></div>
+      <div v-else-if="initialSourceType==='folder'" class="field full"><label class="upload-zone">选择文件夹并递归导入<input type="file" multiple webkitdirectory directory @change="selectInitialFolder"><span>{{ initialFileSelection.rootName || '尚未选择' }} · 可导入 {{ initialFileSelection.files.length }} 个，跳过 {{ initialFileSelection.skipped.length }} 个</span></label><p class="folder-hint">支持递归读取子文件夹；目录层级会作为文档来源路径保留。</p></div>
+      <div v-if="initialImportProgress.total" class="field full"><div class="folder-progress"><span>导入 {{ initialImportProgress.completed }}/{{ initialImportProgress.total }}</span><span>成功 {{ initialImportProgress.imported }}</span><span>重复 {{ initialImportProgress.duplicates }}</span><span>失败 {{ initialImportProgress.failed }}</span><small>{{ initialImportProgress.current }}</small></div></div>
+      <template v-if="initialSourceType==='web'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>抓取页数</label><input v-model.number="initialSource.max_pages" type="number" min="1" max="20" class="input"></div><div class="field full"><label>网页 URL</label><input v-model="initialSource.url" class="input"></div></template>
+      <template v-else-if="initialSourceType==='database'"><div class="field full"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field full"><label>数据库连接地址</label><input v-model="initialSource.connection_url" class="input" placeholder="sqlite:///D:/data/source.db"></div><div class="field full"><label>只读查询</label><textarea v-model="initialSource.query" class="textarea"></textarea></div></template>
+      <template v-else-if="initialSourceType==='api'"><div class="field"><label>数据源名称</label><input v-model="initialSource.name" class="input"></div><div class="field"><label>请求方法</label><select v-model="initialSource.method" class="input"><option>GET</option><option>POST</option></select></div><div class="field full"><label>API URL</label><input v-model="initialSource.url" class="input"></div><div class="field"><label>响应路径</label><input v-model="initialSource.response_path" class="input" placeholder="data.items"></div><div class="field full"><label>请求头 JSON</label><textarea v-model="initialSource.headers" class="textarea"></textarea></div></template>
+      <div class="field full"><button class="btn btn-primary" @click="saveBase">创建知识库并导入初始数据</button></div>
+    </div>
   </section>
 
   <section v-if="showGroupEditor" class="card" style="margin-top:20px"><div class="card-header"><h2>{{ editingGroupId ? '编辑知识库分组' : '新建知识库分组' }}</h2><button class="btn btn-sm" @click="showGroupEditor=false">取消</button></div><div class="card-body form-grid"><div class="field"><label>分组名称</label><input v-model="groupForm.name" class="input" placeholder="例如：计算流体力学"></div><div class="field"><label>标识颜色</label><input v-model="groupForm.color" type="color" class="input" style="height:40px"></div><div class="field full"><label>说明</label><input v-model="groupForm.description" class="input"></div><div class="field full"><label>选择分组中的知识库</label><div class="member-grid"><label v-for="item in bases" :key="item.id"><input v-model="groupForm.knowledge_base_ids" type="checkbox" :value="item.id"><span><strong>{{ item.name }}</strong><small>{{ item.discipline }} · {{ item.document_count }} 份资料</small></span></label><div v-if="!bases.length" class="empty">请先创建知识库</div></div></div><div class="field full"><button class="btn btn-primary" @click="saveGroup">保存分组与成员</button></div></div></section>
@@ -377,7 +415,7 @@ onMounted(load)
 </template>
 
 <style scoped>
-.initial-source-types{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}.upload-zone{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px;border:1px dashed #83afd6;border-radius:9px;background:#f4f9fe;color:#315b7e;cursor:pointer}.upload-zone span{font-size:11px;color:#1769c2}
+.initial-source-types{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}.upload-zone{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px;border:1px dashed #83afd6;border-radius:9px;background:#f4f9fe;color:#315b7e;cursor:pointer}.upload-zone span{font-size:11px;color:#1769c2}.folder-hint{margin:7px 2px 0;color:#60758b;font-size:10px}.folder-progress{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:10px 12px;border:1px solid #cfe1f1;border-radius:9px;background:#f5faff}.folder-progress span{padding:4px 7px;border-radius:6px;background:#e6f1fb;color:#285a85;font-size:10px}.folder-progress small{flex:1;min-width:180px;overflow:hidden;color:#60758b;text-align:right;text-overflow:ellipsis;white-space:nowrap}
 .group-bar{margin-bottom:20px}.group-bar .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.group-pills{display:flex;flex-wrap:wrap;gap:8px}.group-pills button{display:flex;align-items:center;gap:7px;border:1px solid #d5e3f0;border-radius:9px;background:#fff;color:#3c5d79;padding:8px 10px;cursor:pointer}.group-pills button.active{border-color:var(--group-color,#1769c2);background:#eaf4fe;color:#174f88;box-shadow:inset 0 0 0 1px var(--group-color,#1769c2)}.group-pills button>i{width:9px;height:9px;border-radius:50%}.group-pills button>span{display:grid;place-items:center;min-width:19px;height:19px;border-radius:10px;background:#edf3f8;font-size:10px}.group-pills button>em{font-style:normal;font-size:10px;color:#1769c2;margin-left:3px}.base-groups{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.base-groups span{border:1px solid;border-radius:999px;padding:2px 6px;font-size:9px;background:#fff}.member-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:10px;border:1px solid #d7e4f0;border-radius:9px;background:#f8fbfe}.member-grid>label{display:flex;align-items:flex-start;gap:8px;padding:9px;border-radius:7px;background:#fff;cursor:pointer}.member-grid input{margin-top:3px}.member-grid span{display:flex;flex-direction:column}.member-grid small{margin-top:3px;color:#6a8094}.search-scope{display:flex;align-items:center;gap:8px;margin-bottom:10px}.search-scope label{font-size:11px;color:#60758b;white-space:nowrap}.search-scope select{max-width:240px}.search-scope>span{font-size:11px;color:#1769c2;background:#edf6ff;padding:7px 10px;border-radius:7px}
 .knowledge-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:#dbe8f5;border-top:1px solid #dbe8f5;border-bottom:1px solid #dbe8f5}.knowledge-metrics div{display:flex;flex-direction:column;gap:3px;padding:13px 18px;background:#f8fbff}.knowledge-metrics strong{font-size:20px;color:#174f88}.knowledge-metrics span{font-size:11px;color:#60758b}.selected-row{background:#eef6ff}.knowledge-inspector>.card-header{align-items:flex-end}.knowledge-inspector .card-header p{margin:4px 0 0;font-size:11px;color:#60758b}.inspector-tabs{display:flex;gap:5px}.inspector-tabs button{border:0;border-radius:8px;background:#edf3f9;color:#49657f;padding:8px 13px;cursor:pointer}.inspector-tabs button.active{background:#1769c2;color:white}.document-facts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:13px}.document-facts span{padding:6px 9px;border:1px solid #d7e5f2;border-radius:7px;background:#f5f9fd;color:#49657f;font-size:11px}.document-text{max-height:560px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;padding:20px;border:1px solid #d5e4f2;border-radius:10px;background:white;color:#263f57;font:13px/1.85 "Microsoft YaHei",sans-serif}.chunk-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;color:#60758b;font-size:11px}.chunk-toolbar>div{display:flex;gap:6px}.chunk-list{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}.chunk-card{border:1px solid #d6e3ef;border-left:4px solid #65a3df;border-radius:10px;padding:13px 15px;background:#fff}.chunk-card.parent{border-left-color:#254f78;background:#f8fbff}.chunk-card header,.chunk-card footer{display:flex;align-items:center;justify-content:space-between;gap:10px}.chunk-card header>div,.chunk-card footer{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.chunk-card header span,.chunk-card footer{font-size:10px;color:#687f95}.chunk-card p{white-space:pre-wrap;color:#2f4b65;font-size:12px;line-height:1.7}.chunk-level{padding:3px 7px;border-radius:999px;background:#e7f2fc;color:#1769c2!important}.parent .chunk-level{background:#dce8f3;color:#254f78!important}.vector-ready{color:#13835c!important}.vector-missing{color:#9a6b1c!important}.strategy-panel h3{margin-top:22px}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:stretch;gap:7px}.strategy-flow>div{min-width:0;padding:14px;border:1px solid #d6e4f1;border-radius:10px;background:linear-gradient(180deg,#fff,#f5f9fd)}.strategy-flow b{display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:#1769c2;color:white;margin-bottom:8px}.strategy-flow strong{display:block;color:#244e75}.strategy-flow p{font-size:10px;line-height:1.5;color:#60758b}.strategy-flow i{align-self:center;color:#72a6d5}.strategy-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}.strategy-grid>div{padding:13px;border-radius:9px;background:#edf5fc}.strategy-grid label{display:block;font-size:10px;color:#60758b;margin-bottom:5px}.strategy-grid strong{font-size:12px;color:#234f78}.citation-policy{font-size:11px;color:#60758b;margin:14px 0 0}@media(max-width:1200px){.strategy-flow{grid-template-columns:1fr}.strategy-flow i{display:none}.strategy-grid{grid-template-columns:repeat(2,1fr)}}
 .question-row{display:flex;gap:9px}.question-row .input{flex:1}.question-row .btn{min-width:92px}.retrieval-process{margin-top:14px;padding:13px 15px;border:1px solid #cfe1f1;border-radius:11px;background:linear-gradient(180deg,#f8fcff,#f1f7fd)}.retrieval-process.failed{border-color:#e8caca;background:#fff9f9}.process-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px}.process-head strong{font-size:12px;color:#234f75}.process-head span{font-size:10px;color:#1769c2}.failed .process-head span{color:#b13f3f}.process-steps{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:8px}.process-steps>div{display:flex;align-items:center;gap:9px;min-width:0;padding:9px 10px;border:1px solid #d8e6f2;border-radius:9px;background:#fff}.process-steps>div.running{border-color:#7fb5e4;box-shadow:0 0 0 2px #dceeff}.process-steps b{display:grid;place-items:center;flex:0 0 auto;width:23px;height:23px;border-radius:50%;background:#1769c2;color:#fff;font-size:10px}.process-steps span{display:flex;min-width:0;flex-direction:column;gap:3px}.process-steps strong{font-size:11px;color:#2a5073}.process-steps small{overflow:hidden;color:#6b8093;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.process-steps i{color:#74a6d2;font-style:normal}.process-error{margin:10px 0 0;color:#b13f3f;font-size:10px}.answer-card{margin-top:16px;white-space:pre-wrap;line-height:1.8}.result-list{margin-top:14px}.result-content{font-size:12px;color:#385570;line-height:1.7}@media(max-width:1100px){.process-steps{grid-template-columns:1fr 1fr}.process-steps>i{display:none}}

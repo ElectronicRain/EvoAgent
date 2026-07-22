@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1445,6 +1445,7 @@ async def add_text_document(
 async def upload_document(
     knowledge_base_id: str,
     file: UploadFile = File(...),
+    relative_path: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     data = await file.read()
@@ -1452,24 +1453,34 @@ async def upload_document(
         raise HTTPException(status_code=413, detail="文件不能超过 25MB")
     try:
         filename = file.filename or "document.txt"
+        path_parts = [
+            part.strip()
+            for part in relative_path.replace("\\", "/").split("/")[:-1]
+            if part.strip() not in {"", ".", ".."}
+        ]
+        display_path = "/".join([*path_parts, filename])[-2000:]
         sections, mime = extract_sections(filename, data)
         source = await knowledge_source_service.create(
             db,
             knowledge_base_id,
-            name=filename,
+            name=display_path,
             source_type="file",
-            uri=filename,
-            config={"filename": filename},
+            uri=display_path,
+            config={"filename": filename, "relative_path": display_path},
         )
         item, result = await knowledge_service.add_sections(
             db,
             knowledge_base_id,
-            title=filename,
+            title=display_path,
             sections=sections,
-            source=f"本地文件：{filename}",
+            source=f"本地文件：{display_path}",
             mime_type=mime,
             source_id=source.id,
-            metadata={"filename": filename, "source_type": "file"},
+            metadata={
+                "filename": filename,
+                "relative_path": display_path,
+                "source_type": "file",
+            },
         )
         source.status = "ready"
         source.last_synced_at = datetime.now(timezone.utc)
@@ -1479,6 +1490,10 @@ async def upload_document(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if item is None:
         raise HTTPException(status_code=400, detail="文档清洗后没有可用内容")
+    if result.get("duplicate"):
+        await db.delete(source)
+        await db.commit()
+        return {**row(item), "ingestion": result, "source_id": item.source_id}
     await db.commit()
     return {**row(item), "ingestion": result, "source_id": source.id}
 

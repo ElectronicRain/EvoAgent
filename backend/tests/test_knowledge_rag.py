@@ -125,6 +125,33 @@ def test_duplicate_document_is_not_counted_twice(client):
     assert current["document_count"] == 1
 
 
+def test_folder_upload_preserves_relative_path_and_cleans_duplicate_source(client):
+    base = _new_base(client)
+    content = ("文件夹批量导入需要保留相对目录，并对重复资料进行内容去重。\n" * 20).encode()
+    upload = {
+        "files": {"file": ("guide.md", content, "text/markdown")},
+        "data": {"relative_path": "课程资料/第一章/guide.md"},
+    }
+
+    first = client.post(
+        f"/api/knowledge-bases/{base['id']}/documents/upload", **upload
+    )
+    duplicate = client.post(
+        f"/api/knowledge-bases/{base['id']}/documents/upload", **upload
+    )
+
+    assert first.status_code == duplicate.status_code == 201
+    assert first.json()["title"] == "课程资料/第一章/guide.md"
+    assert first.json()["source"] == "本地文件：课程资料/第一章/guide.md"
+    assert duplicate.json()["id"] == first.json()["id"]
+    assert duplicate.json()["ingestion"]["duplicate"] is True
+    detail = client.get(f"/api/knowledge-documents/{first.json()['id']}").json()
+    assert detail["metadata"]["relative_path"] == "课程资料/第一章/guide.md"
+    sources = client.get(f"/api/knowledge-bases/{base['id']}/sources").json()
+    assert len(sources) == 1
+    assert sources[0]["uri"] == "课程资料/第一章/guide.md"
+
+
 def test_database_source_full_sync(client, tmp_path):
     path = tmp_path / "source.db"
     connection = sqlite3.connect(path)

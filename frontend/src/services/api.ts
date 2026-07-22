@@ -111,9 +111,10 @@ export const api = {
   delete: <T = any>(path: string) => request<T>(path, { method: 'DELETE' }),
   stream,
   blob,
-  upload: <T = any>(path: string, file: File) => {
+  upload: <T = any>(path: string, file: File, fields: Record<string, string> = {}) => {
     const form = new FormData()
     form.append('file', file)
+    for (const [key, value] of Object.entries(fields)) form.append(key, value)
     return request<T>(path, { method: 'POST', body: form })
   },
 }

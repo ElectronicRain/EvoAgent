@@ -95,11 +95,17 @@
 
 ### `POST /api/knowledge-bases/{knowledge_base_id}/documents/upload`
 
-`multipart/form-data`，字段名 `file`，最大 25MB。支持 PDF、DOCX、PPTX、TXT、Markdown、CSV、JSON 和 HTML。PDF 保留页码，PPTX 保留幻灯片页码，DOCX 优先保留标题和表格结构。
+`multipart/form-data`，字段名 `file`，最大 25MB；可选字段 `relative_path` 用于保留文件夹层级。支持 PDF、DOCX、PPTX、TXT、Markdown、CSV、JSON 和 HTML。PDF 保留页码，PPTX 保留幻灯片页码，DOCX 优先保留标题和表格结构。
 
 ```bash
 curl -F "file=@paper.pdf" http://127.0.0.1:8000/api/knowledge-bases/{id}/documents/upload
+
+# 文件夹批量导入时，前端递归枚举文件并逐个调用本接口
+curl -F "file=@paper.pdf" -F "relative_path=课程资料/第一章/paper.pdf" \
+  http://127.0.0.1:8000/api/knowledge-bases/{id}/documents/upload
 ```
+
+桌面端的“导入文件夹”会过滤支持格式、保留相对路径并顺序写入 SQLite，以避免大批量向量化时出现数据库写锁竞争；界面实时统计新增、重复、失败和跳过数量。
 
 ### `POST /api/knowledge-bases/{knowledge_base_id}/documents/text`
 

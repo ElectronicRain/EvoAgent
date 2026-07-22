@@ -3,6 +3,13 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { BookOpen, Database, FileText, Layers3, Pencil, Plus, RefreshCw, Save, Settings2, Trash2, Upload, X } from 'lucide-vue-next'
 import { api, type Entity } from '../services/api'
+import {
+  importKnowledgeFiles,
+  KNOWLEDGE_FILE_ACCEPT,
+  selectKnowledgeFiles,
+  type KnowledgeFileSelection,
+  type KnowledgeImportProgress,
+} from '../services/knowledgeFiles'
 import { useAppStore } from '../stores/app'
 
 const route = useRoute()
@@ -20,6 +27,17 @@ const chunkLevels = ['all', 'parent', 'child'] as const
 const showAddText = ref(false)
 const showAddSource = ref(false)
 const editingDocument = ref(false)
+const fileImportActive = ref(false)
+const fileImportErrors = ref<string[]>([])
+const fileImportProgress = reactive<KnowledgeImportProgress>({
+  total: 0,
+  completed: 0,
+  imported: 0,
+  duplicates: 0,
+  failed: 0,
+  skipped: 0,
+  current: '',
+})
 const docForm = reactive({ title: '', source: '用户录入', content: '' })
 const editDocForm = reactive({ title: '', source: '', content: '' })
 const baseForm = reactive({ name: '', discipline: '', description: '' })
@@ -83,22 +101,51 @@ async function changeChunkLevel(level: 'all' | 'parent' | 'child') {
   chunks.value = result.items || []
 }
 
-async function uploadFiles(event: Event) {
-  const input = event.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  if (!files.length) return
-  store.loading(true)
+async function importFileSelection(input: HTMLInputElement, selection: KnowledgeFileSelection) {
+  if (!selection.files.length) {
+    store.notify(
+      selection.skipped.length ? '所选内容中没有支持的文档格式' : '请选择要导入的文件或文件夹',
+      'error',
+    )
+    input.value = ''
+    return
+  }
+  fileImportActive.value = true
+  fileImportErrors.value = []
+  Object.assign(fileImportProgress, {
+    total: selection.files.length,
+    completed: 0,
+    imported: 0,
+    duplicates: 0,
+    failed: 0,
+    skipped: selection.skipped.length,
+    current: '',
+  })
   try {
-    let last: Entity | undefined
-    for (const file of files) last = await api.upload(`/knowledge-bases/${baseId.value}/documents/upload`, file)
-    await load(last?.id)
-    store.notify(`${files.length} 个文档已完成解析和索引`)
+    const result = await importKnowledgeFiles(baseId.value, selection, progress => {
+      Object.assign(fileImportProgress, progress)
+    })
+    fileImportErrors.value = result.errors
+    await load(result.last?.id)
+    const summary = `完成 ${result.completed}/${result.total}：新增 ${result.imported}，重复 ${result.duplicates}，失败 ${result.failed}，跳过 ${result.skipped}`
+    if (result.failed) store.notify(summary, 'error')
+    else store.notify(summary)
   } catch (error: any) {
     store.notify(error.message, 'error')
   } finally {
     input.value = ''
-    store.loading(false)
+    fileImportActive.value = false
   }
+}
+
+async function uploadFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  await importFileSelection(input, selectKnowledgeFiles(input.files || []))
+}
+
+async function uploadFolder(event: Event) {
+  const input = event.target as HTMLInputElement
+  await importFileSelection(input, selectKnowledgeFiles(input.files || []))
 }
 
 async function addTextDocument() {
@@ -263,7 +310,28 @@ onMounted(load)
     <nav class="detail-tabs"><button :class="{active:activeTab==='documents'}" @click="activeTab='documents'"><FileText :size="15" />文档管理</button><button :class="{active:activeTab==='content'}" @click="activeTab='content'"><BookOpen :size="15" />正文编辑</button><button :class="{active:activeTab==='chunks'}" @click="activeTab='chunks'"><Layers3 :size="15" />分块索引</button><button :class="{active:activeTab==='sources'}" @click="activeTab='sources'"><Database :size="15" />数据源</button><button :class="{active:activeTab==='strategy'}" @click="activeTab='strategy'"><RefreshCw :size="15" />检索策略</button><button :class="{active:activeTab==='settings'}" @click="activeTab='settings'"><Settings2 :size="15" />设置</button></nav>
 
     <main class="detail-content">
-      <section v-if="activeTab==='documents'" class="panel"><div class="panel-head"><div><h2>文档与资料</h2><p>支持 PDF、PPTX、DOCX、Markdown、CSV、JSON 和 HTML，可多选上传。</p></div><div><button class="btn" @click="showAddText=!showAddText"><Plus :size="14" />录入文字</button><label class="btn btn-primary"><Upload :size="14" />上传文档<input type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.csv,.json,.html" hidden @change="uploadFiles"></label></div></div><div v-if="showAddText" class="editor-form"><input v-model="docForm.title" class="input" placeholder="资料标题"><input v-model="docForm.source" class="input" placeholder="来源"><textarea v-model="docForm.content" class="textarea" placeholder="正文内容"></textarea><button class="btn btn-primary" @click="addTextDocument">创建并索引</button></div><div class="document-grid"><button v-for="item in documents" :key="item.id" :class="{active:selectedDocument?.id===item.id}" @click="selectDocument(item)"><FileText :size="19" /><span><strong>{{ item.title }}</strong><small>{{ item.mime_type }} · {{ item.char_count }} 字符</small><small>{{ item.source }}</small></span></button><div v-if="!documents.length" class="empty">还没有文档，请上传或录入资料。</div></div></section>
+      <section v-if="activeTab==='documents'" class="panel">
+        <div class="panel-head">
+          <div><h2>文档与资料</h2><p>可上传单个/多个文档，也可递归导入整个文件夹及其子文件夹。</p></div>
+          <div>
+            <button class="btn" :disabled="fileImportActive" @click="showAddText=!showAddText"><Plus :size="14" />录入文字</button>
+            <label class="btn btn-primary" :class="{disabled:fileImportActive}"><Upload :size="14" />上传文档<input type="file" multiple :accept="KNOWLEDGE_FILE_ACCEPT" hidden :disabled="fileImportActive" @change="uploadFiles"></label>
+            <label class="btn btn-primary" :class="{disabled:fileImportActive}"><Database :size="14" />导入文件夹<input type="file" multiple webkitdirectory directory hidden :disabled="fileImportActive" @change="uploadFolder"></label>
+          </div>
+        </div>
+        <div v-if="fileImportActive || fileImportProgress.completed" class="folder-import-progress">
+          <div class="progress-track"><i :style="{width:`${fileImportProgress.total ? fileImportProgress.completed / fileImportProgress.total * 100 : 0}%`}"></i></div>
+          <div class="facts">
+            <span>{{ fileImportActive ? '正在导入' : '导入完成' }} {{ fileImportProgress.completed }}/{{ fileImportProgress.total }}</span>
+            <span>新增 {{ fileImportProgress.imported }}</span><span>重复 {{ fileImportProgress.duplicates }}</span>
+            <span>失败 {{ fileImportProgress.failed }}</span><span>跳过 {{ fileImportProgress.skipped }}</span>
+          </div>
+          <p v-if="fileImportProgress.current">当前：{{ fileImportProgress.current }}</p>
+          <details v-if="fileImportErrors.length"><summary>查看 {{ fileImportErrors.length }} 条失败信息</summary><p v-for="error in fileImportErrors" :key="error">{{ error }}</p></details>
+        </div>
+        <div v-if="showAddText" class="editor-form"><input v-model="docForm.title" class="input" placeholder="资料标题"><input v-model="docForm.source" class="input" placeholder="来源"><textarea v-model="docForm.content" class="textarea" placeholder="正文内容"></textarea><button class="btn btn-primary" @click="addTextDocument">创建并索引</button></div>
+        <div class="document-grid"><button v-for="item in documents" :key="item.id" :class="{active:selectedDocument?.id===item.id}" @click="selectDocument(item)"><FileText :size="19" /><span><strong>{{ item.title }}</strong><small>{{ item.mime_type }} · {{ item.char_count }} 字符</small><small>{{ item.source }}</small></span></button><div v-if="!documents.length" class="empty">还没有文档，请上传、导入文件夹或录入资料。</div></div>
+      </section>
 
       <section v-else-if="activeTab==='content'" class="panel"><div v-if="selectedDocument"><div class="panel-head"><div><h2>清洗后正文</h2><p>保存修改后将删除旧索引并重新执行清洗、父子切分和向量化。</p></div><div><button class="btn" @click="editingDocument=!editingDocument"><Pencil :size="14" />{{ editingDocument ? '取消编辑' : '编辑' }}</button><button class="btn danger" @click="deleteDocument"><Trash2 :size="14" />删除文档</button></div></div><div class="facts"><span>原始 {{ selectedDocument.cleaning_stats?.original_chars ?? selectedDocument.char_count }} 字符</span><span>清洗后 {{ selectedDocument.cleaning_stats?.cleaned_chars ?? selectedDocument.char_count }}</span><span>父块 {{ selectedDocument.parent_chunk_count }}</span><span>子块 {{ selectedDocument.child_chunk_count }}</span><span>向量 {{ selectedDocument.embedding_count }}</span><span>Hash {{ shortHash(selectedDocument.content_hash) }}</span></div><div v-if="editingDocument" class="editor-form full-editor"><input v-model="editDocForm.title" class="input"><input v-model="editDocForm.source" class="input"><textarea v-model="editDocForm.content" class="textarea"></textarea><button class="btn btn-primary" @click="saveDocument"><Save :size="14" />保存并重建索引</button></div><pre v-else class="document-content">{{ selectedDocument.cleaned_content }}</pre></div><div v-else class="empty">请先在“文档管理”中选择文档。</div></section>
 
@@ -279,5 +347,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.detail-shell{max-width:1500px;margin:auto}.detail-header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border:1px solid #d6e4f1;border-radius:14px;background:#fff;box-shadow:0 8px 30px #194f7912}.detail-brand{display:flex;align-items:center;gap:14px;color:#1769c2}.detail-brand span{font-size:9px;letter-spacing:1.8px}.detail-brand h1{margin:2px 0;font-size:22px;color:#173d61}.detail-brand p{margin:0;color:#6a8093;font-size:11px}.detail-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0}.detail-metrics div{display:flex;align-items:baseline;gap:8px;padding:13px 17px;border:1px solid #d8e5f1;border-radius:10px;background:#fff}.detail-metrics b{font-size:21px;color:#1769c2}.detail-metrics span{font-size:11px;color:#63798d}.detail-tabs{display:flex;gap:5px;padding:6px;border:1px solid #d6e4f1;border-radius:11px;background:#fff}.detail-tabs button{display:flex;align-items:center;gap:6px;border:0;border-radius:8px;background:transparent;padding:9px 13px;color:#4d687f;cursor:pointer}.detail-tabs button.active{background:#1769c2;color:#fff}.detail-content{margin-top:13px}.panel{border:1px solid #d6e4f1;border-radius:13px;background:#fff;min-height:430px;padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}.panel-head h2{margin:0;color:#244d72}.panel-head p{margin:4px 0 0;font-size:11px;color:#6a8093}.panel-head>div:last-child{display:flex;gap:7px}.document-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.document-grid>button{display:flex;text-align:left;gap:10px;border:1px solid #d7e4ef;border-radius:10px;background:#fff;padding:13px;color:#1769c2;cursor:pointer}.document-grid>button.active{border-color:#1769c2;background:#edf6ff}.document-grid span{display:flex;min-width:0;flex-direction:column;gap:4px}.document-grid strong{color:#2b4f70}.document-grid small{color:#6a8093;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.editor-form,.source-editor,.settings-form{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:17px;padding:14px;border:1px solid #d8e5f0;border-radius:10px;background:#f7fbff}.editor-form textarea,.editor-form button,.wide{grid-column:1/-1}.editor-form textarea{min-height:160px}.full-editor textarea{min-height:420px}.facts{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}.facts span{padding:6px 9px;border-radius:7px;background:#edf5fc;color:#567087;font-size:10px}.document-content{max-height:590px;overflow:auto;white-space:pre-wrap;margin:0;padding:20px;border:1px solid #d9e5ef;border-radius:9px;font:13px/1.85 "Microsoft YaHei",sans-serif;color:#294760}.level-buttons{display:flex;gap:6px}.chunk-list{display:grid;gap:9px;max-height:610px;overflow:auto}.chunk{border:1px solid #d8e4ef;border-left:4px solid #63a2df;border-radius:9px;padding:12px 14px}.chunk.parent{border-left-color:#254f78;background:#f7fbff}.chunk header{display:flex;gap:10px;align-items:center}.chunk header span,.chunk footer{font-size:10px;color:#718598}.chunk header em{margin-left:auto;font-style:normal;font-size:10px;color:#15805d}.chunk p{white-space:pre-wrap;font-size:12px;line-height:1.7;color:#34516b}.source-editor{grid-template-columns:180px 1fr}.source-list{display:grid;gap:9px}.source-list article{display:flex;align-items:center;gap:11px;padding:13px;border:1px solid #d8e4ef;border-radius:10px}.source-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:9px;background:#eaf4fd;color:#1769c2}.source-list article>div:nth-child(2){flex:1}.source-list strong{color:#294e70}.source-list p{margin:4px 0;font-size:11px;color:#667d92}.source-list small.ready,.source-list small.completed{color:#14805d}.source-list small.failed{color:#b13f3f}.source-actions{display:flex;gap:6px}.danger{color:#b13f3f!important;border-color:#ebcaca!important;background:#fff8f8!important}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:8px;margin-bottom:25px}.strategy-flow article{min-height:105px;padding:14px;border:1px solid #d8e5f0;border-radius:10px;background:#f8fbfe}.strategy-flow article b{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#1769c2;color:#fff}.strategy-flow article strong{display:block;margin-top:8px;color:#285173}.strategy-flow article p{font-size:10px;line-height:1.5;color:#647b90}.strategy-flow i{color:#77a9d5}.settings-form label{display:grid;gap:6px;color:#4a667f;font-size:11px}.settings-form .actions{display:flex;justify-content:space-between}.empty{grid-column:1/-1;padding:40px;text-align:center;color:#7b8fa2}@media(max-width:1100px){.document-grid{grid-template-columns:repeat(2,1fr)}.strategy-flow{grid-template-columns:1fr}.strategy-flow>i{display:none}}
+.detail-shell{max-width:1500px;margin:auto}.detail-header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border:1px solid #d6e4f1;border-radius:14px;background:#fff;box-shadow:0 8px 30px #194f7912}.detail-brand{display:flex;align-items:center;gap:14px;color:#1769c2}.detail-brand span{font-size:9px;letter-spacing:1.8px}.detail-brand h1{margin:2px 0;font-size:22px;color:#173d61}.detail-brand p{margin:0;color:#6a8093;font-size:11px}.detail-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0}.detail-metrics div{display:flex;align-items:baseline;gap:8px;padding:13px 17px;border:1px solid #d8e5f1;border-radius:10px;background:#fff}.detail-metrics b{font-size:21px;color:#1769c2}.detail-metrics span{font-size:11px;color:#63798d}.detail-tabs{display:flex;gap:5px;padding:6px;border:1px solid #d6e4f1;border-radius:11px;background:#fff}.detail-tabs button{display:flex;align-items:center;gap:6px;border:0;border-radius:8px;background:transparent;padding:9px 13px;color:#4d687f;cursor:pointer}.detail-tabs button.active{background:#1769c2;color:#fff}.detail-content{margin-top:13px}.panel{border:1px solid #d6e4f1;border-radius:13px;background:#fff;min-height:430px;padding:20px}.panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px}.panel-head h2{margin:0;color:#244d72}.panel-head p{margin:4px 0 0;font-size:11px;color:#6a8093}.panel-head>div:last-child{display:flex;gap:7px}.disabled{pointer-events:none;opacity:.55}.folder-import-progress{margin:-4px 0 17px;padding:12px 14px;border:1px solid #cfe1f1;border-radius:10px;background:#f5faff}.folder-import-progress .progress-track{height:5px;margin-bottom:10px;overflow:hidden;border-radius:5px;background:#dceaf6}.folder-import-progress .progress-track i{display:block;height:100%;border-radius:5px;background:#1769c2;transition:width .2s}.folder-import-progress p,.folder-import-progress details{margin:6px 0 0;font-size:10px;color:#5c7489}.folder-import-progress details p{color:#a34242}.document-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.document-grid>button{display:flex;text-align:left;gap:10px;border:1px solid #d7e4ef;border-radius:10px;background:#fff;padding:13px;color:#1769c2;cursor:pointer}.document-grid>button.active{border-color:#1769c2;background:#edf6ff}.document-grid span{display:flex;min-width:0;flex-direction:column;gap:4px}.document-grid strong{color:#2b4f70}.document-grid small{color:#6a8093;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.editor-form,.source-editor,.settings-form{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:17px;padding:14px;border:1px solid #d8e5f0;border-radius:10px;background:#f7fbff}.editor-form textarea,.editor-form button,.wide{grid-column:1/-1}.editor-form textarea{min-height:160px}.full-editor textarea{min-height:420px}.facts{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}.facts span{padding:6px 9px;border-radius:7px;background:#edf5fc;color:#567087;font-size:10px}.document-content{max-height:590px;overflow:auto;white-space:pre-wrap;margin:0;padding:20px;border:1px solid #d9e5ef;border-radius:9px;font:13px/1.85 "Microsoft YaHei",sans-serif;color:#294760}.level-buttons{display:flex;gap:6px}.chunk-list{display:grid;gap:9px;max-height:610px;overflow:auto}.chunk{border:1px solid #d8e4ef;border-left:4px solid #63a2df;border-radius:9px;padding:12px 14px}.chunk.parent{border-left-color:#254f78;background:#f7fbff}.chunk header{display:flex;gap:10px;align-items:center}.chunk header span,.chunk footer{font-size:10px;color:#718598}.chunk header em{margin-left:auto;font-style:normal;font-size:10px;color:#15805d}.chunk p{white-space:pre-wrap;font-size:12px;line-height:1.7;color:#34516b}.source-editor{grid-template-columns:180px 1fr}.source-list{display:grid;gap:9px}.source-list article{display:flex;align-items:center;gap:11px;padding:13px;border:1px solid #d8e4ef;border-radius:10px}.source-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:9px;background:#eaf4fd;color:#1769c2}.source-list article>div:nth-child(2){flex:1}.source-list strong{color:#294e70}.source-list p{margin:4px 0;font-size:11px;color:#667d92}.source-list small.ready,.source-list small.completed{color:#14805d}.source-list small.failed{color:#b13f3f}.source-actions{display:flex;gap:6px}.danger{color:#b13f3f!important;border-color:#ebcaca!important;background:#fff8f8!important}.strategy-flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:8px;margin-bottom:25px}.strategy-flow article{min-height:105px;padding:14px;border:1px solid #d8e5f0;border-radius:10px;background:#f8fbfe}.strategy-flow article b{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#1769c2;color:#fff}.strategy-flow article strong{display:block;margin-top:8px;color:#285173}.strategy-flow article p{font-size:10px;line-height:1.5;color:#647b90}.strategy-flow i{color:#77a9d5}.settings-form label{display:grid;gap:6px;color:#4a667f;font-size:11px}.settings-form .actions{display:flex;justify-content:space-between}.empty{grid-column:1/-1;padding:40px;text-align:center;color:#7b8fa2}@media(max-width:1100px){.document-grid{grid-template-columns:repeat(2,1fr)}.strategy-flow{grid-template-columns:1fr}.strategy-flow>i{display:none}}
 </style>
