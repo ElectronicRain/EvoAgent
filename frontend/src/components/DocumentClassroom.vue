@@ -415,7 +415,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.classroom { border:1px solid #d5e3ee; border-radius:8px; overflow:hidden; background:#fff; }
+.classroom { container-type:inline-size; border:1px solid #d5e3ee; border-radius:8px; overflow:hidden; background:#fff; }
 .classroom.enlarged { position:fixed; inset:18px; z-index:1000; display:grid; grid-template-rows:auto auto auto minmax(0,1fr) auto; box-shadow:0 20px 70px rgba(10,38,65,.3); }
 .classroom-toolbar { min-height:45px; padding:0 10px; display:flex; align-items:center; justify-content:space-between; gap:8px; color:#214d73; background:#edf6fd; border-bottom:1px solid #d5e3ee; }
 .classroom-toolbar>div:first-child { display:flex; align-items:center; gap:6px; }
@@ -448,5 +448,5 @@ onBeforeUnmount(() => {
 canvas { position:absolute; inset:0; pointer-events:none; z-index:5; } canvas.auto-ink{z-index:4} canvas.enabled{pointer-events:auto;cursor:crosshair}
 .teacher-chat { padding:9px; display:grid; grid-template-columns:auto minmax(180px,1fr) auto; align-items:center; gap:7px; border-top:1px solid #d5e3ee; background:#f6faff; }
 .teacher-chat input { height:34px;padding:0 9px;border:1px solid #cbdbe7;border-radius:6px;outline:none;font-size:10px}.teacher-chat button{height:34px;padding:0 10px;border:0;border-radius:6px;display:flex;align-items:center;gap:5px;color:#fff;background:#1769c2;font-size:9px}.teacher-chat span{grid-column:2/-1;display:flex;align-items:center;gap:5px;color:#16805c;font-size:8px}
-@media(max-width:980px){.lesson-stage{grid-template-columns:1fr}.auto-board{min-height:210px;max-height:260px;border-left:0;border-top:1px solid #d5e3ee}.teaching-options{flex-wrap:wrap}.teaching-options label{margin-left:0}}
+@container(max-width:680px){.classroom-toolbar{align-items:flex-start;padding:8px;flex-direction:column}.toolbar-actions{width:100%;overflow-x:auto;padding-bottom:2px}.teaching-options{flex-wrap:wrap}.teaching-options label{margin-left:0}.lesson-stage{grid-template-columns:1fr}.auto-board{display:none}.teacher-chat{grid-template-columns:auto minmax(0,1fr)}.teacher-chat button{grid-column:2}.teacher-chat span{grid-column:1/-1}}
 </style>

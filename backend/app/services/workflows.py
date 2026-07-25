@@ -7,10 +7,12 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Workflow, WorkflowRun
+from ..models import KnowledgeBase, Workflow, WorkflowRun
 from .agents import agent_engine
 from .common import audit, dumps, loads
+from .knowledge import knowledge_service
 from .tools import tool_runtime
+from .security import runtime_security_service
 
 
 TOKEN_PATTERN = re.compile(r"\{\{\s*([^}]+?)\s*\}\}")
@@ -121,13 +123,65 @@ class WorkflowEngine:
                             f"Agent 节点“{node_label}”执行失败："
                             f"{agent_run.error or '模型请求未返回错误详情'}"
                         )
+                elif node_type == "knowledge":
+                    knowledge_base_id = str(config.get("knowledge_base_id") or "")
+                    knowledge_base = (
+                        await db.get(KnowledgeBase, knowledge_base_id)
+                        if knowledge_base_id
+                        else None
+                    )
+                    if not knowledge_base:
+                        raise LookupError(f"知识库节点“{node_label}”绑定的知识库不存在")
+                    query = str(
+                        config.get("query")
+                        or config.get("input")
+                        or workflow_input.get("task", "")
+                    ).strip()
+                    if not query:
+                        raise ValueError(f"知识库节点“{node_label}”没有可检索的问题")
+                    try:
+                        top_k = max(1, min(int(config.get("top_k", 5)), 20))
+                    except (TypeError, ValueError):
+                        top_k = 5
+                    chunks = await knowledge_service.search(
+                        db,
+                        query,
+                        knowledge_base_ids=[knowledge_base.id],
+                        top_k=top_k,
+                    )
+                    excerpts = []
+                    for index, chunk in enumerate(chunks, 1):
+                        title = str(chunk.get("title") or f"片段 {index}")
+                        content = str(chunk.get("content") or "").strip()
+                        citation = str(chunk.get("citation") or "").strip()
+                        excerpt = f"[{index}] {title}\n{content}"
+                        if citation:
+                            excerpt += f"\n来源：{citation}"
+                        excerpts.append(excerpt)
+                    result = {
+                        "status": "completed",
+                        "knowledge_base_id": knowledge_base.id,
+                        "knowledge_base_name": knowledge_base.name,
+                        "query": query,
+                        "chunk_count": len(chunks),
+                        "chunks": chunks,
+                        "output": (
+                            "\n\n".join(excerpts)
+                            if excerpts
+                            else f"知识库“{knowledge_base.name}”没有检索到相关内容。"
+                        ),
+                    }
                 elif node_type == "tool":
+                    security = await runtime_security_service.resolve(
+                        db, str(config.get("security_profile", "default"))
+                    )
                     result = await tool_runtime.execute(
                         db,
                         str(config["tool"]),
                         dict(config.get("arguments", {})),
                         run_id=run.id,
                         permission_mode=str(config.get("permission_mode", "ask")),
+                        security_context=security,
                     )
                 elif node_type == "condition":
                     left = config.get("left")

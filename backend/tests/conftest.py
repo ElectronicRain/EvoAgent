@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
+import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
 
 
 TEST_DB = Path("data/test_evoagent.db")
+TEST_RUNTIME_ROOT = Path(tempfile.gettempdir()) / "evoagent-next-tests"
 os.environ["EVO_DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_evoagent.db"
+os.environ["EVO_WORKSPACE_ROOT"] = str(TEST_RUNTIME_ROOT / "workspace")
+os.environ["EVO_SKILLS_ROOT"] = str(TEST_RUNTIME_ROOT / "skills")
+os.environ["EVO_PLUGINS_ROOT"] = str(TEST_RUNTIME_ROOT / "plugins")
+shutil.rmtree(TEST_RUNTIME_ROOT, ignore_errors=True)
 for candidate in (TEST_DB, Path(f"{TEST_DB}-shm"), Path(f"{TEST_DB}-wal")):
     candidate.unlink(missing_ok=True)
 
@@ -24,4 +31,4 @@ def client():
 def pytest_sessionfinish(session, exitstatus):
     for candidate in (TEST_DB, Path(f"{TEST_DB}-shm"), Path(f"{TEST_DB}-wal")):
         candidate.unlink(missing_ok=True)
-
+    shutil.rmtree(TEST_RUNTIME_ROOT, ignore_errors=True)

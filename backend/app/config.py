@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EvoAgent"
-    version: str = "0.1.0"
+    version: str = "0.3.2"
     debug: bool = True
     database_url: str = f"sqlite+aiosqlite:///{(DATA_ROOT / 'evoagent.db').as_posix()}"
     workspace_root: Path = DATA_ROOT / "workspace"
@@ -35,6 +35,8 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
             "tauri://localhost",
             # Tauri 2 uses this origin for the Windows WebView2 frontend.
             "http://tauri.localhost",

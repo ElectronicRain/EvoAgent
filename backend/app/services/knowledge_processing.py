@@ -143,6 +143,7 @@ def extract_sections(filename: str, data: bytes) -> tuple[list[ExtractedSection]
         heading = ""
         buffer: list[str] = []
         section_index = 1
+        list_counter = 0
         for paragraph in document.paragraphs:
             text = paragraph.text.strip()
             if not text:
@@ -156,7 +157,16 @@ def extract_sections(filename: str, data: bytes) -> tuple[list[ExtractedSection]
                     section_index += 1
                     buffer = []
                 heading = text
+                list_counter = 0
             else:
+                paragraph_properties = getattr(paragraph._p, "pPr", None)
+                numbering = getattr(paragraph_properties, "numPr", None)
+                is_list = numbering is not None or "list" in style_name or "列表" in style_name
+                if is_list:
+                    list_counter += 1
+                    text = f"{list_counter}. {text}"
+                else:
+                    list_counter = 0
                 buffer.append(text)
         if buffer or heading:
             sections.append(ExtractedSection("\n".join(buffer), heading, f"章节 {section_index}"))
@@ -205,6 +215,238 @@ def _sentences(text: str) -> list[str]:
     return [piece.strip() for piece in pieces if piece.strip()]
 
 
+LIST_ITEM_PATTERN = re.compile(
+    r"^\s*(?P<marker>(?:\d{1,3}|[一二三四五六七八九十百]+)[、.．)]|"
+    r"（(?:\d{1,3}|[一二三四五六七八九十百]+)）|[①②③④⑤⑥⑦⑧⑨⑩]|[-•·])\s*(?P<body>.+)$"
+)
+
+
+@dataclass
+class StructuredBlock:
+    kind: str
+    text: str = ""
+    intro: str = ""
+    items: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class StructuredEntry:
+    block: StructuredBlock
+    start_section_index: int
+    end_section_index: int
+
+
+@dataclass
+class NumberedListSpan:
+    content: str
+    intro: str
+    items: list[tuple[str, str]]
+    start_section_index: int
+    end_section_index: int
+    locators: list[str]
+
+
+_CIRCLED_ORDINALS = {value: index for index, value in enumerate("①②③④⑤⑥⑦⑧⑨⑩", 1)}
+_CHINESE_DIGITS = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _marker_ordinal(marker: str) -> int | None:
+    """Return a comparable ordinal for common list markers; bullets have no ordinal."""
+
+    marker = marker.strip()
+    if marker in _CIRCLED_ORDINALS:
+        return _CIRCLED_ORDINALS[marker]
+    digits = re.search(r"\d{1,3}", marker)
+    if digits:
+        return int(digits.group())
+    value = re.sub(r"[、.．()（）\s]", "", marker)
+    if not value or any(char not in _CHINESE_DIGITS and char not in {"十", "百"} for char in value):
+        return None
+    if value == "十":
+        return 10
+    if "百" in value:
+        head, _, tail = value.partition("百")
+        hundreds = _CHINESE_DIGITS.get(head, 1) if head else 1
+        remainder = _marker_ordinal(tail) if tail else 0
+        return hundreds * 100 + (remainder or 0)
+    if "十" in value:
+        head, _, tail = value.partition("十")
+        tens = _CHINESE_DIGITS.get(head, 1) if head else 1
+        ones = _CHINESE_DIGITS.get(tail, 0) if tail else 0
+        return tens * 10 + ones
+    return _CHINESE_DIGITS.get(value)
+
+
+def _nested_intro_start(lines: list[str]) -> int | None:
+    """Locate a likely sub-section heading that was wrapped into the prior list item."""
+
+    for index, line in enumerate(lines[1:], 1):
+        value = line.strip()
+        if len(value) > 80:
+            continue
+        if "★" in value or re.search(
+            r"(?:原理|流程|机制|方法|管理|映射|算法|特点|优缺点|基本概念|经典问题)"
+            r"(?:[-—:：、（(]|$)",
+            value,
+        ):
+            return index
+    return None
+
+
+def _structured_blocks(text: str) -> list[StructuredBlock]:
+    """Preserve contiguous numbered lists instead of packing every line as plain prose."""
+
+    blocks: list[StructuredBlock] = []
+    normal_lines: list[str] = []
+    list_items: list[tuple[str, str]] = []
+    current_marker = ""
+    current_lines: list[str] = []
+    list_intro = ""
+    list_gap = False
+
+    def flush_normal() -> None:
+        value = "\n".join(normal_lines).strip()
+        if value:
+            blocks.append(StructuredBlock("text", text=value))
+        normal_lines.clear()
+
+    def flush_item() -> None:
+        nonlocal current_marker, current_lines, list_gap
+        value = "\n".join(current_lines).strip()
+        if current_marker and value:
+            list_items.append((current_marker, value))
+        current_marker = ""
+        current_lines = []
+        list_gap = False
+
+    def flush_list() -> None:
+        nonlocal list_intro, list_items
+        flush_item()
+        if len(list_items) >= 2:
+            blocks.append(StructuredBlock("numbered_list", intro=list_intro, items=list_items))
+        elif list_items:
+            marker, value = list_items[0]
+            blocks.append(StructuredBlock("text", text=f"{marker} {value}"))
+        list_intro = ""
+        list_items = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = LIST_ITEM_PATTERN.match(stripped)
+        if match:
+            next_marker = match.group("marker")
+            current_ordinal = _marker_ordinal(current_marker) if current_marker else None
+            next_ordinal = _marker_ordinal(next_marker)
+            if (
+                current_marker
+                and current_ordinal is not None
+                and next_ordinal is not None
+                and next_ordinal <= current_ordinal
+            ):
+                # A reset such as 1..4 followed by a nested/new 1..5 list must not
+                # become one oversized list. Preserve the trailing outer item as
+                # the new list's local introduction when it contains sub-section text.
+                nested_intro = ""
+                if len(current_lines) >= 2:
+                    intro_start = _nested_intro_start(current_lines)
+                    if intro_start is not None:
+                        nested_intro = "\n".join(current_lines[intro_start:]).strip()
+                        current_lines = current_lines[:intro_start]
+                    else:
+                        nested_intro = "\n".join(
+                            [f"{current_marker} {current_lines[0]}", *current_lines[1:]]
+                        ).strip()
+                flush_list()
+                list_intro = nested_intro
+            if not current_marker and not list_items:
+                if not list_intro:
+                    list_intro = next((item for item in reversed(normal_lines) if item.strip()), "")
+                flush_normal()
+            flush_item()
+            current_marker = next_marker
+            current_lines = [match.group("body").strip()]
+            continue
+        if current_marker:
+            if not stripped:
+                list_gap = True
+            elif list_gap:
+                flush_list()
+                normal_lines.append(line)
+            else:
+                current_lines.append(stripped)
+            continue
+        normal_lines.append(line)
+
+    if current_marker or list_items:
+        flush_list()
+    flush_normal()
+    return blocks
+
+
+def _structured_entries(sections: list[ExtractedSection]) -> list[StructuredEntry]:
+    """Parse all sections and stitch a numbered list continued on the next page/section."""
+
+    entries: list[StructuredEntry] = []
+    for section_index, section in enumerate(sections):
+        cleaned, _stats = clean_text(section.text)
+        if not cleaned:
+            continue
+        blocks = _structured_blocks(cleaned)
+        if (
+            entries
+            and blocks
+            and entries[-1].end_section_index == section_index - 1
+            and entries[-1].block.kind == "numbered_list"
+            and blocks[0].kind == "numbered_list"
+        ):
+            previous_items = entries[-1].block.items
+            current_items = blocks[0].items
+            previous_ordinal = _marker_ordinal(previous_items[-1][0]) if previous_items else None
+            current_ordinal = _marker_ordinal(current_items[0][0]) if current_items else None
+            if (
+                previous_ordinal is not None
+                and current_ordinal is not None
+                and current_ordinal == previous_ordinal + 1
+            ):
+                entries[-1].block.items.extend(current_items)
+                entries[-1].end_section_index = section_index
+                blocks = blocks[1:]
+        entries.extend(
+            StructuredEntry(block, section_index, section_index)
+            for block in blocks
+        )
+    return entries
+
+
+def numbered_list_spans(sections: list[ExtractedSection]) -> list[NumberedListSpan]:
+    """Expose focused, cross-section list contexts for exhaustive retrieval."""
+
+    spans: list[NumberedListSpan] = []
+    for entry in _structured_entries(sections):
+        if entry.block.kind != "numbered_list":
+            continue
+        rendered_items = "\n".join(f"{marker} {value}" for marker, value in entry.block.items)
+        content = "\n".join(
+            value for value in (entry.block.intro.strip(), rendered_items) if value
+        )
+        locators = [
+            sections[index].locator
+            for index in range(entry.start_section_index, entry.end_section_index + 1)
+            if sections[index].locator
+        ]
+        spans.append(
+            NumberedListSpan(
+                content=content,
+                intro=entry.block.intro.strip(),
+                items=list(entry.block.items),
+                start_section_index=entry.start_section_index,
+                end_section_index=entry.end_section_index,
+                locators=list(dict.fromkeys(locators)),
+            )
+        )
+    return spans
+
+
 def _pack_units(units: list[str], target: int, overlap: int) -> list[str]:
     chunks: list[str] = []
     buffer: list[str] = []
@@ -243,17 +485,93 @@ def hierarchical_chunks(
     drafts: list[ChunkDraft] = []
     fingerprints: set[str] = set()
     duplicate_chunks = 0
+    numbered_lists = 0
+    numbered_list_items = 0
     parent_index = 0
-    for section in sections:
-        cleaned, _stats = clean_text(section.text)
-        if not cleaned:
-            continue
+    list_numbers: Counter[int] = Counter()
+    for entry in _structured_entries(sections):
+        section_index = entry.start_section_index
+        section = sections[section_index]
+        block = entry.block
         prefix = f"# {section.heading}\n\n" if section.heading else ""
-        parents = _pack_units(_sentences(cleaned), parent_size, 0)
+        base_meta = {**section.metadata, "heading": section.heading, "locator": section.locator}
+        if entry.end_section_index > section_index:
+            end_section = sections[entry.end_section_index]
+            locators = [
+                sections[index].locator
+                for index in range(section_index, entry.end_section_index + 1)
+                if sections[index].locator
+            ]
+            unique_locators = list(dict.fromkeys(locators))
+            base_meta.update(
+                {
+                    "locator": " – ".join(unique_locators),
+                    "locators": unique_locators,
+                    "cross_section_continuation": True,
+                    "section_start": section_index + 1,
+                    "section_end": entry.end_section_index + 1,
+                }
+            )
+            if "page" in section.metadata and "page" in end_section.metadata:
+                base_meta.update(
+                    {
+                        "page_start": section.metadata["page"],
+                        "page_end": end_section.metadata["page"],
+                    }
+                )
+        if block.kind == "numbered_list":
+            list_numbers[section_index] += 1
+            numbered_lists += 1
+            numbered_list_items += len(block.items)
+            list_id = f"section-{section_index + 1}-list-{list_numbers[section_index]}"
+            rendered_items = "\n".join(f"{marker} {value}" for marker, value in block.items)
+            parent_body = "\n".join(
+                value for value in (block.intro.strip(), rendered_items) if value
+            )
+            parent_content = f"{prefix}{parent_body}".strip()
+            parent_meta = {
+                **base_meta,
+                "structure": "numbered_list",
+                "list_id": list_id,
+                "list_item_count": len(block.items),
+            }
+            drafts.append(ChunkDraft(parent_content, "parent", None, parent_meta))
+            intro = block.intro.strip()
+            for item_index, (marker, item_text) in enumerate(block.items, 1):
+                shared_prefix = "\n".join(value for value in (prefix.strip(), intro) if value)
+                available = max(160, child_size - len(shared_prefix) - len(marker) - 2)
+                item_parts = _pack_units(_sentences(item_text), available, child_overlap)
+                for part_index, part in enumerate(item_parts, 1):
+                    child_content = "\n".join(
+                        value for value in (shared_prefix, f"{marker} {part}") if value
+                    ).strip()
+                    fingerprint = hashlib.sha256(
+                        re.sub(r"[\W_]", "", child_content).lower().encode("utf-8")
+                    ).hexdigest()
+                    if fingerprint in fingerprints:
+                        duplicate_chunks += 1
+                        continue
+                    fingerprints.add(fingerprint)
+                    drafts.append(
+                        ChunkDraft(
+                            child_content,
+                            "child",
+                            parent_index,
+                            {
+                                **parent_meta,
+                                "list_item_index": item_index,
+                                "list_item_marker": marker,
+                                "list_item_part": part_index,
+                            },
+                        )
+                    )
+            parent_index += 1
+            continue
+
+        parents = _pack_units(_sentences(block.text), parent_size, 0)
         for parent in parents:
             parent_content = f"{prefix}{parent}".strip()
-            parent_meta = {**section.metadata, "heading": section.heading, "locator": section.locator}
-            drafts.append(ChunkDraft(parent_content, "parent", None, parent_meta))
+            drafts.append(ChunkDraft(parent_content, "parent", None, base_meta))
             children = _pack_units(_sentences(parent), child_size, child_overlap)
             for child in children:
                 child_content = f"{prefix}{child}".strip()
@@ -264,9 +582,13 @@ def hierarchical_chunks(
                     duplicate_chunks += 1
                     continue
                 fingerprints.add(fingerprint)
-                drafts.append(ChunkDraft(child_content, "child", parent_index, parent_meta))
+                drafts.append(ChunkDraft(child_content, "child", parent_index, base_meta))
             parent_index += 1
-    return drafts, {"duplicate_chunks_removed": duplicate_chunks}
+    return drafts, {
+        "duplicate_chunks_removed": duplicate_chunks,
+        "numbered_lists": numbered_lists,
+        "numbered_list_items": numbered_list_items,
+    }
 
 
 def estimate_tokens(text: str) -> int:

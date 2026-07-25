@@ -56,6 +56,29 @@ async def init_db() -> None:
         # create_all does not add columns to databases created by earlier EvoAgent versions.
         # These additive migrations keep existing local knowledge bases usable.
         migrations = {
+            "agents": {
+                "group_id": "VARCHAR(36)",
+            },
+            "agent_runs": {
+                "security_json": "TEXT NOT NULL DEFAULT '{}'",
+                "user_id": "VARCHAR(36)",
+            },
+            "agent_conversations": {
+                "user_id": "VARCHAR(36)",
+            },
+            "evolution_proposals": {
+                "goal_json": "TEXT NOT NULL DEFAULT '{}'",
+                "config_json": "TEXT NOT NULL DEFAULT '{}'",
+                "decision_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "evaluation_cases": {
+                "category": "VARCHAR(60) NOT NULL DEFAULT 'quality'",
+                "weight": "FLOAT NOT NULL DEFAULT 1.0",
+                "enabled": "BOOLEAN NOT NULL DEFAULT 1",
+            },
+            "approvals": {
+                "execution_result_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
             "knowledge_documents": {
                 "source_id": "VARCHAR(36)",
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -86,6 +109,24 @@ async def init_db() -> None:
                 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts
                 USING fts5(chunk_id UNINDEXED, title, content, tokenize='unicode61')
                 """
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_agents_group_id "
+                "ON agents(group_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_agent_runs_user_id "
+                "ON agent_runs(user_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_agent_conversations_user_id "
+                "ON agent_conversations(user_id)"
             )
         )
         await connection.execute(

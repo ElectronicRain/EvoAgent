@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import sqlite3
 import uuid
 
 import pytest
+from docx import Document
 from pptx import Presentation
 
 from backend.app.models import KnowledgeProviderConfig
@@ -40,6 +42,108 @@ def test_cleaning_and_hierarchical_chunking():
     assert chunk_stats["duplicate_chunks_removed"] >= 0
 
 
+def test_numbered_list_chunking_preserves_complete_structure():
+    content = (
+        "学科知识平台建设包含以下五点：\n"
+        "1. 建立统一的数据标准。\n"
+        "2. 汇聚经过审核的学科资料。\n"
+        "3. 建设可追溯的混合检索链路。\n"
+        "4. 引入专家复核与安全治理。\n"
+        "5. 持续开展质量评估与迭代。"
+    )
+    drafts, stats = hierarchical_chunks([ExtractedSection(content, "建设方案", "第 3 页")])
+    list_parents = [
+        item
+        for item in drafts
+        if item.level == "parent" and item.metadata.get("structure") == "numbered_list"
+    ]
+    list_children = [
+        item
+        for item in drafts
+        if item.level == "child" and item.metadata.get("structure") == "numbered_list"
+    ]
+    assert len(list_parents) == 1
+    assert "1. 建立统一" in list_parents[0].content
+    assert "5. 持续开展" in list_parents[0].content
+    assert {item.metadata["list_item_index"] for item in list_children} == {1, 2, 3, 4, 5}
+    assert all(item.metadata["list_item_count"] == 5 for item in list_children)
+    assert stats["numbered_lists"] == 1
+    assert stats["numbered_list_items"] == 5
+
+
+def test_numbered_list_reset_creates_a_new_focused_list():
+    content = (
+        "前三章复习要点：\n"
+        "1. 进程管理。\n"
+        "2. 处理机调度。\n"
+        "3. 死锁处理。\n"
+        "4. 内存管理。\n"
+        "虚拟内存用于扩展可用地址空间，具有以下五点：\n"
+        "1. 解决物理内存容量不足。\n"
+        "2. 实现进程地址空间隔离。\n"
+        "3. 简化内存管理并支持共享。\n"
+        "4. 程序编译时使用连续虚拟地址。\n"
+        "5. 按需加载页面。"
+    )
+    drafts, stats = hierarchical_chunks([ExtractedSection(content, "操作系统", "第 24 页")])
+    list_parents = [
+        item
+        for item in drafts
+        if item.level == "parent" and item.metadata.get("structure") == "numbered_list"
+    ]
+    assert [item.metadata["list_item_count"] for item in list_parents] == [4, 5]
+    assert "虚拟内存" in list_parents[1].content
+    assert "1. 解决物理内存容量不足" in list_parents[1].content
+    assert "5. 按需加载页面" in list_parents[1].content
+    assert stats["numbered_lists"] == 2
+    assert stats["numbered_list_items"] == 9
+
+
+def test_cross_page_numbered_list_is_stitched_before_chunking():
+    sections = [
+        ExtractedSection(
+            (
+                "虚拟内存具有以下五点：\n"
+                "1. 解决物理内存容量不足。\n"
+                "2. 实现进程地址空间隔离。\n"
+                "3. 简化内存管理并支持共享。"
+            ),
+            "内存管理",
+            "第 24 页",
+            {"page": 24},
+        ),
+        ExtractedSection(
+            (
+                "4. 程序编译时使用连续虚拟地址。\n"
+                "5. 按需加载页面。\n"
+                "实现原理包括：\n"
+                "1. 时间局部性。\n"
+                "2. 空间局部性。"
+            ),
+            "内存管理",
+            "第 25 页",
+            {"page": 25},
+        ),
+    ]
+    drafts, stats = hierarchical_chunks(sections)
+    list_parents = [
+        item
+        for item in drafts
+        if item.level == "parent" and item.metadata.get("structure") == "numbered_list"
+    ]
+    virtual_memory = next(item for item in list_parents if "虚拟内存" in item.content)
+    assert virtual_memory.metadata["list_item_count"] == 5
+    assert virtual_memory.metadata["cross_section_continuation"] is True
+    assert virtual_memory.metadata["page_start"] == 24
+    assert virtual_memory.metadata["page_end"] == 25
+    assert virtual_memory.metadata["locators"] == ["第 24 页", "第 25 页"]
+    assert "1. 解决物理内存容量不足" in virtual_memory.content
+    assert "5. 按需加载页面" in virtual_memory.content
+    assert any(item.metadata["list_item_count"] == 2 for item in list_parents)
+    assert stats["numbered_lists"] == 2
+    assert stats["numbered_list_items"] == 7
+
+
 def test_pptx_extraction():
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[1])
@@ -51,6 +155,29 @@ def test_pptx_extraction():
     assert mime.endswith("presentationml.presentation")
     assert sections[0].metadata["slide"] == 1
     assert "雅可比" in sections[0].text
+
+
+def test_docx_automatic_numbering_is_preserved_for_list_chunking():
+    document = Document()
+    document.add_heading("建设方案", level=1)
+    document.add_paragraph("平台建设包含以下五点：")
+    for value in ("统一标准", "汇聚资料", "混合检索", "专家复核", "持续评估"):
+        document.add_paragraph(value, style="List Number")
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    sections, _mime = extract_sections("plan.docx", buffer.getvalue())
+    assert "1. 统一标准" in sections[0].text
+    assert "5. 持续评估" in sections[0].text
+    drafts, stats = hierarchical_chunks(sections)
+    assert stats["numbered_lists"] == 1
+    assert stats["numbered_list_items"] == 5
+    assert any(
+        item.level == "parent"
+        and item.metadata.get("structure") == "numbered_list"
+        and "5. 持续评估" in item.content
+        for item in drafts
+    )
 
 
 def test_provider_config_is_safe_and_has_defaults(client):
@@ -95,6 +222,12 @@ def test_full_text_ingestion_and_rag_query(client):
     assert all(item["level"] == "child" for item in chunks.json()["items"])
     assert all(item["embedding"]["indexed"] for item in chunks.json()["items"])
 
+    reindexed = client.post(f"/api/knowledge-bases/{base['id']}/reindex")
+    assert reindexed.status_code == 200
+    assert reindexed.json()["embedded_chunks"] == chunks.json()["total"]
+    refreshed = client.get(f"/api/knowledge-bases/{base['id']}/overview").json()
+    assert refreshed["statistics"]["embeddings"] == chunks.json()["total"]
+
     response = client.post(
         "/api/knowledge/query",
         json={
@@ -111,6 +244,99 @@ def test_full_text_ingestion_and_rag_query(client):
     assert result["citations"][0]["document_id"]
     assert result["trace"]["embedding_model"] == "Qwen/Qwen3-VL-Embedding-8B"
     assert result["answer"]
+
+
+def test_exhaustive_query_expands_complete_numbered_list(client):
+    base = _new_base(client)
+    content = (
+        "学科知识平台建设包含以下五点：\n"
+        "1. 建立统一的数据标准和目录规范。\n"
+        "2. 汇聚经过审核的教材、论文和行业标准。\n"
+        "3. 建设支持引用追踪的混合检索链路。\n"
+        "4. 引入专家复核、权限控制和安全治理。\n"
+        "5. 持续开展质量评估、反馈收集和版本迭代。"
+    )
+    uploaded = client.post(
+        f"/api/knowledge-bases/{base['id']}/documents/text",
+        json={"title": "五点建设方案", "content": content, "source": "完整性测试"},
+    )
+    assert uploaded.status_code == 201
+    document_id = uploaded.json()["id"]
+    chunk_rows = client.get(
+        f"/api/knowledge-documents/{document_id}/chunks?level=all&limit=100"
+    ).json()["items"]
+    list_parent = next(
+        item
+        for item in chunk_rows
+        if item["level"] == "parent" and item["metadata"].get("structure") == "numbered_list"
+    )
+    assert list_parent["metadata"]["list_item_count"] == 5
+    assert "5. 持续开展" in list_parent["content"]
+
+    response = client.post(
+        "/api/knowledge/query",
+        json={
+            "query": "学科知识平台建设包含哪五点？请完整列出。",
+            "knowledge_base_ids": [base["id"]],
+            "top_k": 6,
+            "generate_answer": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["chunks"]
+    assert any("1. 建立统一" in item["context"] for item in result["chunks"])
+    assert any("5. 持续开展" in item["context"] for item in result["chunks"])
+    assert result["trace"]["exhaustive_query"] is True
+    assert result["trace"]["per_document_limit"] == 6
+    assert result["trace"]["list_contexts"][0]["item_count"] == 5
+
+
+def test_streamed_rag_query_reports_explicit_steps_in_order(client):
+    base = _new_base(client)
+    created = client.post(
+        f"/api/knowledge-bases/{base['id']}/documents/text",
+        json={
+            "title": "流式检索资料",
+            "content": "混合检索先进行查询改写，再执行向量与关键词召回、融合和重排序。" * 12,
+            "source": "流式测试",
+        },
+    )
+    assert created.status_code == 201
+
+    response = client.post(
+        "/api/knowledge/query/stream",
+        json={
+            "query": "混合检索如何工作？",
+            "knowledge_base_ids": [base["id"]],
+            "generate_answer": True,
+        },
+    )
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    step_types = [event["step"]["type"] for event in events if event["type"] == "step"]
+    expected = [
+        "stream_connected",
+        "scope_resolved",
+        "query_rewrite_started",
+        "query_rewritten",
+        "hybrid_retrieval_started",
+        "hybrid_retrieval_completed",
+        "fusion_completed",
+        "rerank_started",
+        "rerank_completed",
+        "context_assembled",
+        "answer_generation_started",
+        "answer_generated",
+    ]
+    assert [name for name in step_types if name != "knowledge_waiting"] == expected
+    result_event = next(event for event in events if event["type"] == "knowledge_result")
+    assert result_event["result"]["chunks"]
+    assert events[-1]["type"] == "done"
 
 
 def test_duplicate_document_is_not_counted_twice(client):

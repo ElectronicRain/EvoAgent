@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -10,10 +11,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..models import AgentArtifact, AgentDefinition, AgentRun, ModelEndpoint, Skill
+from ..db import SessionLocal
+from ..models import (
+    Approval,
+    AgentArtifact,
+    AgentDefinition,
+    AgentRun,
+    Extension,
+    ModelEndpoint,
+    Skill,
+)
 from .common import audit, dumps, loads
+from .extensions import extension_service
+from .intent import TaskIntent, intent_service
 from .knowledge import knowledge_service
 from .llm import get_provider, provider_from_endpoint
+from .security import RuntimeSecurityContext, runtime_security_service
 from .tools import tool_runtime
 from .web_research import web_research_service
 
@@ -23,6 +36,8 @@ class ExecutionContext:
     depth: int = 0
     agent_stack: list[str] = field(default_factory=list)
     parent_run_id: str | None = None
+    user_id: str | None = None
+    reply_style_prompt: str = ""
 
 
 class AgentEngine:
@@ -54,6 +69,62 @@ class AgentEngine:
             },
         }
 
+    async def _mcp_catalog(
+        self, db: AsyncSession, permissions: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, tuple[Extension, str]], list[str], list[str]]:
+        extensions = (
+            await db.scalars(
+                select(Extension).where(
+                    Extension.kind == "mcp", Extension.enabled.is_(True)
+                )
+            )
+        ).all()
+        selected = permissions.get("mcp_extensions")
+        if isinstance(selected, list):
+            selected_ids = {str(item) for item in selected}
+            extensions = [item for item in extensions if item.id in selected_ids]
+        else:
+            # Legacy Agents inherit the two local built-in MCP services. Custom remote
+            # services are opt-in so a stale endpoint cannot delay every conversation.
+            extensions = [
+                item for item in extensions if extension_service._builtin_endpoint(item)
+            ]
+        schemas: list[dict[str, Any]] = []
+        bindings: dict[str, tuple[Extension, str]] = {}
+        services: list[str] = []
+        errors: list[str] = []
+        for extension in extensions:
+            try:
+                result = await extension_service.list_mcp_tools(extension)
+                tools = list(result.get("tools") or [])
+            except Exception as exc:
+                errors.append(f"{extension.name}: {str(exc)[:160]}")
+                continue
+            services.append(extension.name)
+            extension_key = extension.id.replace("-", "")[:8]
+            for item in tools:
+                remote_name = str(item.get("name") or "").strip()
+                if not remote_name:
+                    continue
+                safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", remote_name).strip("_")
+                exposed_name = f"mcp_{extension_key}_{safe_name}"[:64]
+                bindings[exposed_name] = (extension, remote_name)
+                schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": exposed_name,
+                            "description": (
+                                f"通过 MCP“{extension.name}”调用 {remote_name}："
+                                f"{str(item.get('description') or '')}"
+                            ),
+                            "parameters": item.get("inputSchema")
+                            or {"type": "object", "properties": {}},
+                        },
+                    }
+                )
+        return schemas, bindings, services, errors
+
     async def run(
         self,
         db: AsyncSession,
@@ -65,6 +136,13 @@ class AgentEngine:
         on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> AgentRun:
         execution = execution or ExecutionContext()
+        if user_context:
+            execution.user_id = str(user_context.get("user_id") or execution.user_id or "") or None
+            execution.reply_style_prompt = str(
+                user_context.get("reply_style_prompt")
+                or execution.reply_style_prompt
+                or ""
+            )
         if execution.depth >= settings.max_agent_depth:
             raise RuntimeError("已达到 Agent 最大调用深度")
         agent = await db.get(AgentDefinition, agent_id)
@@ -74,11 +152,20 @@ class AgentEngine:
             chain = " -> ".join(execution.agent_stack + [agent.id])
             raise RuntimeError(f"检测到 Agent 循环调用: {chain}")
 
+        agent_permissions = loads(agent.permissions_json, {})
+        security_profile = str(
+            (user_context or {}).get("security_profile")
+            or agent_permissions.get("security_profile")
+            or "default"
+        )
+        security_context = await runtime_security_service.resolve(db, security_profile)
         run = AgentRun(
             agent_id=agent.id,
+            user_id=execution.user_id,
             parent_run_id=execution.parent_run_id,
             status="running",
             input_text=input_text,
+            security_json=dumps(security_context.as_dict()),
         )
         db.add(run)
         await db.flush()
@@ -101,17 +188,43 @@ class AgentEngine:
                     "run_id": run.id,
                     "agent": agent.slug,
                     "depth": execution.depth,
+                    "security": security_context.as_dict(),
                 }
             )
-            system_prompt = await self._build_system_prompt(db, agent, input_text)
+            intent = intent_service.classify(input_text)
+            local_request = intent.category in {
+                "command_execution",
+                "local_workspace_change",
+                "local_file_access",
+            }
+            permissions = agent_permissions
+            allowed_tools = set(loads(agent.tools_json, [])) | {"exec"}
+            mcp_schemas, mcp_bindings, mcp_services, mcp_errors = await self._mcp_catalog(
+                db, permissions
+            )
+            system_prompt = await self._build_system_prompt(
+                db,
+                agent,
+                input_text,
+                security_context,
+                local_request,
+                mcp_services,
+                intent,
+                execution.reply_style_prompt,
+            )
+            await emit({"type": "intent_detected", **intent.as_dict()})
             await emit(
                 {
                     "type": "context_ready",
                     "knowledge_attached": "【知识库检索结果】" in system_prompt,
                     "history_messages": len(conversation_messages or []),
+                    "capabilities": {
+                        "exec": True,
+                        "skills": "【已启用 Skills】" in system_prompt,
+                        "mcp_services": mcp_services,
+                    },
                 }
             )
-            allowed_tools = set(loads(agent.tools_json, []))
             schemas = [
                 item
                 for item in tool_runtime.schemas()
@@ -119,6 +232,9 @@ class AgentEngine:
             ]
             if "call_agent" in allowed_tools:
                 schemas.append(self.call_agent_schema())
+            schemas.extend(mcp_schemas)
+            if mcp_errors:
+                await emit({"type": "mcp_unavailable", "errors": mcp_errors})
             endpoint = (
                 await db.get(ModelEndpoint, agent.model_endpoint_id)
                 if agent.model_endpoint_id
@@ -130,8 +246,10 @@ class AgentEngine:
             model_name = endpoint.default_model if endpoint else agent.model
             total_tokens = 0
             final_content = ""
-            research_requested = web_research_service.should_research(input_text) or (
-                "web_research" in allowed_tools and self.is_research_agent(agent)
+            research_requested = (
+                not local_request
+                and intent.category == "web_research"
+                and "web_research" in allowed_tools
             )
             research_sources: list[dict[str, Any]] = []
             if research_requested:
@@ -156,6 +274,50 @@ class AgentEngine:
                         "sources": len(research_sources),
                     }
                 )
+
+            local_plan = None if intent.needs_clarification else tool_runtime.plan_local_request(input_text)
+            if local_plan:
+                planned_tool = str(local_plan["tool"])
+                await emit(
+                    {
+                        "type": "local_intent_detected",
+                        "tool": planned_tool,
+                        "arguments": local_plan["arguments"],
+                        "allowed": planned_tool in allowed_tools,
+                    }
+                )
+                if planned_tool in allowed_tools:
+                    try:
+                        local_result = await self._execute_tool(
+                            db,
+                            agent,
+                            run,
+                            planned_tool,
+                            local_plan["arguments"],
+                            execution,
+                            security_context,
+                            mcp_bindings,
+                        )
+                        local_result = await self._publish_tool_result(
+                            db, emit, planned_tool, local_result
+                        )
+                    except Exception as exc:
+                        local_result = {
+                            "status": "failed",
+                            "tool": planned_tool,
+                            "error": str(exc),
+                        }
+                    system_prompt += (
+                        "\n\n【本地请求预检结果】\n"
+                        f"工具：{planned_tool}\n结果：{dumps(local_result)}\n"
+                        "应优先依据该本地结果回答；如果路径被安全策略拒绝，明确告诉用户应切换的"
+                        "安全模式或需要添加的授权目录，不要改为联网搜索。"
+                    )
+                else:
+                    system_prompt += (
+                        "\n\n【本地工具权限不足】\n用户要求操作本地路径，但当前 Agent 未启用 "
+                        f"{planned_tool}。请明确提示用户在 Agent 工厂开启该工具，不要改为联网搜索。"
+                    )
 
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -210,6 +372,8 @@ class AgentEngine:
                             item["name"],
                             item["arguments"],
                             execution,
+                            security_context,
+                            mcp_bindings,
                         )
                     except Exception as exc:
                         # A recoverable tool problem (for example, a stale file path
@@ -223,14 +387,7 @@ class AgentEngine:
                             "tool": item["name"],
                             "recovery": "请检查参数；读取文件前先调用 list_directory，或跳过该文件继续任务。",
                         }
-                    await emit(
-                        {
-                            "type": "tool_result",
-                            "tool": item["name"],
-                            "status": result.get("status", "completed"),
-                            "error": result.get("error"),
-                        }
-                    )
+                    result = await self._publish_tool_result(db, emit, item["name"], result)
                     messages.append(
                         {
                             "role": "tool",
@@ -357,28 +514,55 @@ class AgentEngine:
         return run
 
     async def _build_system_prompt(
-        self, db: AsyncSession, agent: AgentDefinition, query: str
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+        query: str,
+        security: RuntimeSecurityContext,
+        local_request: bool,
+        mcp_services: list[str],
+        intent: TaskIntent,
+        reply_style_prompt: str = "",
     ) -> str:
         parts = [
             agent.system_prompt,
             "你运行在 EvoAgent 中。关键结论必须说明依据；不确定时明确标注。",
             "所有输出均为 AI 生成内容，涉及高风险领域必须建议人工复核。",
             (
-                "使用本地文件工具时，路径必须相对于工作区。不要猜测文件名；需要读取文件时先用 "
-                "list_directory 或 search_files 确认可用路径。若某个文件不存在，应改用实际存在的文件，"
-                "或说明缺失并继续完成其余任务，不得因此终止整个任务。"
+                "当用户提到桌面、本地路径、文件或目录时，必须优先使用 list_directory、read_file、"
+                "search_files 或 exec，禁止把本地请求改成网页搜索。不要猜测文件名；需要读取"
+                "文件时先确认实际路径。路径可以是绝对路径，但必须符合本轮安全配置。"
+            ),
+            (
+                f"本轮安全配置：文件系统模式 {security.filesystem_mode}；命令模式 "
+                f"{security.command_mode}；授权根目录：{'；'.join(security.roots)}。"
+            ),
+            (
+                "你已具备 exec 命令执行能力，但必须遵循本轮安全范围和审批方式。"
+                "需要操作项目、运行测试或检查环境时，应主动使用工具并依据真实结果回答。"
             ),
         ]
+        parts.append(intent_service.prompt(intent))
+        if reply_style_prompt:
+            parts.append(reply_style_prompt)
+        if mcp_services:
+            parts.append(
+                "【可用 MCP 服务】\n"
+                + "、".join(mcp_services)
+                + "。需要这些服务中的实时或结构化数据时，应优先调用对应 MCP 工具。"
+            )
+        if local_request:
+            parts.append("本轮已识别为本地文件任务，不得启动 web_research。")
         skill_ids = loads(agent.skills_json, [])
+        skill_query = select(Skill).where(Skill.enabled.is_(True))
         if skill_ids:
-            skills = (
-                await db.scalars(select(Skill).where(Skill.id.in_(skill_ids), Skill.enabled.is_(True)))
-            ).all()
-            if skills:
-                parts.append(
-                    "【已启用 Skills】\n"
-                    + "\n\n".join(f"## {skill.name}\n{skill.instructions}" for skill in skills)
-                )
+            skill_query = skill_query.where(Skill.id.in_(skill_ids))
+        skills = (await db.scalars(skill_query.order_by(Skill.name))).all()
+        if skills:
+            parts.append(
+                "【已启用 Skills】\n"
+                + "\n\n".join(f"## {skill.name}\n{skill.instructions}" for skill in skills)
+            )
         knowledge_base_ids = loads(agent.knowledge_bases_json, [])
         if knowledge_base_ids:
             results = await knowledge_service.search(db, query, knowledge_base_ids, top_k=5)
@@ -400,6 +584,8 @@ class AgentEngine:
         name: str,
         arguments: dict[str, Any],
         execution: ExecutionContext,
+        security_context: RuntimeSecurityContext,
+        mcp_bindings: dict[str, tuple[Extension, str]],
     ) -> dict[str, Any]:
         if name == "call_agent":
             target = await db.scalar(
@@ -423,7 +609,14 @@ class AgentEngine:
                     depth=execution.depth + 1,
                     agent_stack=execution.agent_stack + [agent.id],
                     parent_run_id=run.id,
+                    user_id=execution.user_id,
+                    reply_style_prompt=execution.reply_style_prompt,
                 ),
+                user_context={
+                    "security_profile": security_context.profile,
+                    "user_id": execution.user_id,
+                    "reply_style_prompt": execution.reply_style_prompt,
+                },
             )
             return {
                 "status": child.status,
@@ -432,6 +625,23 @@ class AgentEngine:
                 "output": child.output_text,
                 "error": child.error,
             }
+        if name in mcp_bindings:
+            extension, remote_name = mcp_bindings[name]
+            result = await extension_service.call_mcp_tool(
+                extension,
+                remote_name,
+                arguments,
+                db=db,
+                security_context=security_context,
+            )
+            await audit(
+                db,
+                "mcp.tool_executed",
+                "extension",
+                extension.id,
+                {"agent_id": agent.id, "tool": remote_name},
+            )
+            return {"status": "completed", "mcp": extension.name, "result": result}
         permissions = loads(agent.permissions_json, {})
         mode = str(permissions.get("tool_mode", "ask"))
         return await tool_runtime.execute(
@@ -442,7 +652,60 @@ class AgentEngine:
             agent_id=agent.id,
             policy_id=permissions.get("approval_policy_id"),
             permission_mode=mode,
+            security_context=security_context,
         )
+
+    async def _publish_tool_result(
+        self,
+        db: AsyncSession,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+        tool: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        await emit(
+            {
+                "type": "tool_result",
+                "tool": tool,
+                "status": result.get("status", "completed"),
+                "error": result.get("error") or result.get("message"),
+                "approval_id": result.get("approval_id"),
+            }
+        )
+        if result.get("status") != "approval_required":
+            return result
+        approval_id = str(result["approval_id"])
+        await emit(
+            {
+                "type": "approval_required",
+                "approval_id": approval_id,
+                "tool": tool,
+                "risk": result.get("risk"),
+                "message": result.get("message"),
+            }
+        )
+        resolved = await self._wait_for_approval(approval_id)
+        await emit(
+            {
+                "type": "approval_resolved",
+                "approval_id": approval_id,
+                "tool": tool,
+                "status": resolved.get("status"),
+            }
+        )
+        return resolved
+
+    @staticmethod
+    async def _wait_for_approval(approval_id: str) -> dict[str, Any]:
+        for _attempt in range(1200):
+            async with SessionLocal() as session:
+                approval = await session.get(Approval, approval_id)
+                if approval and approval.status != "pending":
+                    if approval.status == "approved":
+                        result = loads(approval.execution_result_json, {})
+                        return result or {"status": "completed", "message": "操作已批准"}
+                    return {"status": "denied", "message": "用户拒绝了该操作"}
+            await asyncio.sleep(0.5)
+        return {"status": "denied", "message": "等待用户审批超时"}
 
 
 agent_engine = AgentEngine()

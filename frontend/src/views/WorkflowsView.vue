@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
-  Bot, CircleStop, GitBranch, GripVertical, Maximize2, Minus, MousePointer2,
-  Play, Plus, Save, Search, Trash2, Workflow, ZoomIn,
+  Bot, ChevronDown, ChevronRight, CircleStop, Database, GitBranch,
+  GripVertical, Library, Maximize2, Minimize2, Minus, MousePointer2,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
+  Play, Plus, Save, Search, Settings2, Trash2, Workflow, ZoomIn,
 } from 'lucide-vue-next'
 import PageHeader from '../components/PageHeader.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -13,18 +15,29 @@ type CanvasNode = Entity & { position: { x: number; y: number } }
 type CanvasEdge = { source: string; target: string }
 
 const store = useAppStore()
-const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), runs = ref<Entity[]>([])
+const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), knowledgeBases = ref<Entity[]>([]), runs = ref<Entity[]>([])
 const currentWorkflow = ref<Entity | null>(null), nodes = ref<CanvasNode[]>([]), edges = ref<CanvasEdge[]>([])
 const selectedNodeId = ref(''), selectedEdgeIndex = ref<number | null>(null), connectingFrom = ref(''), pointer = reactive({ x: 0, y: 0 })
-const canvas = ref<HTMLElement | null>(null), search = ref(''), task = ref('围绕真实教学科研痛点，形成一份可验证的解决方案。'), output = ref('')
+const studio = ref<HTMLElement | null>(null), canvas = ref<HTMLElement | null>(null), search = ref(''), task = ref('围绕真实教学科研痛点，形成一份可验证的解决方案。'), output = ref('')
 const workflowForm = reactive({ name: '', description: '' })
 const nodeWidth = 168, nodeHeight = 82, canvasWidth = 1600, canvasHeight = 900
 const zoom = ref(1), workflowRunning = ref(false), workflowRunStatus = ref('idle')
-const paletteDrag = reactive({ agent: null as Entity | null, active: false, startX: 0, startY: 0, x: 0, y: 0 })
+const resourceTab = ref<'agents' | 'knowledge'>('agents')
+const paletteCollapsed = ref(false), inspectorCollapsed = ref(false), runCollapsed = ref(true), fullScreen = ref(false)
+const paletteDrag = reactive({ item: null as Entity | null, kind: 'agent' as 'agent' | 'knowledge', active: false, startX: 0, startY: 0, x: 0, y: 0 })
 const selectedNode = computed(() => nodes.value.find(node => node.id === selectedNodeId.value) || null)
 const selectedEdge = computed(() => selectedEdgeIndex.value === null ? null : edges.value[selectedEdgeIndex.value] || null)
-const visibleAgents = computed(() => agents.value.filter(agent => agent.status === 'active' && agent.name.toLowerCase().includes(search.value.toLowerCase())))
+const visibleAgents = computed(() => agents.value
+  .filter(agent => `${agent.name} ${agent.description || ''} ${agent.slug || ''}`.toLowerCase().includes(search.value.toLowerCase()))
+  .sort((left, right) => {
+    const rank: Record<string, number> = { active: 0, candidate: 1, archived: 2, rejected: 3 }
+    return (rank[left.status] ?? 4) - (rank[right.status] ?? 4) || left.name.localeCompare(right.name, 'zh-CN')
+  }))
+const visibleKnowledgeBases = computed(() => knowledgeBases.value.filter(base =>
+  `${base.name} ${base.discipline || ''} ${base.description || ''}`.toLowerCase().includes(search.value.toLowerCase())))
 const zoomLabel = computed(() => `${Math.round(zoom.value * 100)}%`)
+const executableAgent = (agent: Entity) => ['active', 'candidate'].includes(agent.status)
+const statusLabel = (status: string) => ({ active: '启用', candidate: '候选', archived: '归档', rejected: '拒绝' } as Record<string, string>)[status] || status
 
 function parseDefinition(value: string) {
   try { return JSON.parse(value) } catch { return { nodes: [], edges: [] } }
@@ -42,7 +55,12 @@ function normalizeNodes(definition: Entity): CanvasNode[] {
 async function load() {
   store.loading(true)
   try {
-    [workflows.value, agents.value, runs.value] = await Promise.all([api.get('/workflows'), api.get('/agents'), api.get('/workflow-runs')])
+    [workflows.value, agents.value, knowledgeBases.value, runs.value] = await Promise.all([
+      api.get('/workflows'),
+      api.get('/agents'),
+      api.get('/knowledge-bases'),
+      api.get('/workflow-runs'),
+    ])
     if (currentWorkflow.value) {
       const refreshed = workflows.value.find(item => item.id === currentWorkflow.value?.id)
       if (refreshed) openWorkflow(refreshed)
@@ -79,6 +97,10 @@ function newWorkflow() {
 }
 
 function addAgentAt(agent: Entity, point: { x: number; y: number }) {
+  if (!executableAgent(agent)) {
+    store.notify(`“${agent.name}”当前为${statusLabel(agent.status)}版本，不能加入运行工作流`, 'error')
+    return
+  }
   const id = `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
   nodes.value.push({
     id,
@@ -94,15 +116,42 @@ function addAgentAt(agent: Entity, point: { x: number; y: number }) {
   selectedEdgeIndex.value = null
 }
 
+function addKnowledgeAt(base: Entity, point: { x: number; y: number }) {
+  const id = `knowledge_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
+  nodes.value.push({
+    id,
+    type: 'knowledge',
+    label: base.name,
+    config: {
+      knowledge_base_id: base.id,
+      query: '{{input.task}}',
+      top_k: 5,
+    },
+    position: {
+      x: Math.max(8, Math.min(canvasWidth - nodeWidth - 8, point.x - nodeWidth / 2)),
+      y: Math.max(8, Math.min(canvasHeight - nodeHeight - 8, point.y - nodeHeight / 2)),
+    },
+  })
+  selectedNodeId.value = id
+  selectedEdgeIndex.value = null
+}
+
+function addResourceAt(kind: 'agent' | 'knowledge', item: Entity, point: { x: number; y: number }) {
+  if (kind === 'knowledge') addKnowledgeAt(item, point)
+  else addAgentAt(item, point)
+}
+
 function stopPaletteTracking() {
   window.removeEventListener('pointermove', movePaletteDrag)
   window.removeEventListener('pointerup', finishPaletteDrag)
   window.removeEventListener('pointercancel', cancelPaletteDrag)
 }
 
-function startPalettePointer(event: PointerEvent, agent: Entity) {
+function startPalettePointer(event: PointerEvent, item: Entity, kind: 'agent' | 'knowledge') {
   if (event.button !== 0) return
-  paletteDrag.agent = agent
+  if (kind === 'agent' && !executableAgent(item)) return
+  paletteDrag.item = item
+  paletteDrag.kind = kind
   paletteDrag.active = false
   paletteDrag.startX = paletteDrag.x = event.clientX
   paletteDrag.startY = paletteDrag.y = event.clientY
@@ -112,36 +161,37 @@ function startPalettePointer(event: PointerEvent, agent: Entity) {
 }
 
 function movePaletteDrag(event: PointerEvent) {
-  if (!paletteDrag.agent) return
+  if (!paletteDrag.item) return
   paletteDrag.x = event.clientX
   paletteDrag.y = event.clientY
   if (Math.hypot(event.clientX - paletteDrag.startX, event.clientY - paletteDrag.startY) > 4) paletteDrag.active = true
 }
 
 function finishPaletteDrag(event: PointerEvent) {
-  const agent = paletteDrag.agent
+  const item = paletteDrag.item
+  const kind = paletteDrag.kind
   const rect = canvas.value?.getBoundingClientRect()
-  if (agent && paletteDrag.active && rect && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) {
-    addAgentAt(agent, canvasPoint(event))
-    store.notify(`已将“${agent.name}”加入画板`)
+  if (item && paletteDrag.active && rect && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) {
+    addResourceAt(kind, item, canvasPoint(event))
+    store.notify(`已将“${item.name}”加入画板`)
   }
   cancelPaletteDrag()
 }
 
 function cancelPaletteDrag() {
   stopPaletteTracking()
-  paletteDrag.agent = null
+  paletteDrag.item = null
   paletteDrag.active = false
 }
 
-function addAgentToCenter(agent: Entity) {
+function addResourceToCenter(kind: 'agent' | 'knowledge', item: Entity) {
   const target = canvas.value
   if (!target) return
-  addAgentAt(agent, {
+  addResourceAt(kind, item, {
     x: (target.scrollLeft + target.clientWidth / 2) / zoom.value,
     y: (target.scrollTop + target.clientHeight / 2) / zoom.value,
   })
-  store.notify(`已将“${agent.name}”加入画板`)
+  if (kind === 'knowledge' || executableAgent(item)) store.notify(`已将“${item.name}”加入画板`)
 }
 
 function canvasPoint(event: { clientX: number; clientY: number }) {
@@ -284,6 +334,11 @@ function buildDefinition() {
       const upstream = parents.map(source => source === 'input' ? '原始任务：{{input.task}}' : `上游 ${nodes.value.find(item => item.id === source)?.label || source}：{{nodes.${source}.output}}`)
       copy.config.input = upstream.join('\n\n') || '{{input.task}}'
     }
+    if (copy.type === 'knowledge') {
+      const parents = edges.value.filter(edge => edge.target === copy.id).map(edge => edge.source)
+      const upstream = parents.map(source => source === 'input' ? '{{input.task}}' : `{{nodes.${source}.output}}`)
+      copy.config.query = upstream.join('\n\n') || copy.config.query || '{{input.task}}'
+    }
     if (copy.type === 'output') {
       const parent = edges.value.find(edge => edge.target === copy.id)?.source
       copy.config.value = { result: parent && parent !== 'input' ? `{{nodes.${parent}.output}}` : '{{input.task}}' }
@@ -298,8 +353,8 @@ function validateWorkflow() {
   if (!nodes.value.some(node => node.type === 'agent')) return '请从左侧拖入至少一个 Agent'
   if (!edges.value.some(edge => edge.source === 'input')) return '任务输入节点尚未连接'
   if (!edges.value.some(edge => edge.target === 'output')) return '结果输出节点尚未连接'
-  const isolated = nodes.value.filter(node => node.type === 'agent' && (!edges.value.some(edge => edge.target === node.id) || !edges.value.some(edge => edge.source === node.id)))
-  if (isolated.length) return `Agent 节点“${isolated[0].label}”尚未完整连接`
+  const isolated = nodes.value.filter(node => ['agent', 'knowledge'].includes(node.type) && (!edges.value.some(edge => edge.target === node.id) || !edges.value.some(edge => edge.source === node.id)))
+  if (isolated.length) return `${isolated[0].type === 'knowledge' ? '知识库' : 'Agent'}节点“${isolated[0].label}”尚未完整连接`
   return ''
 }
 
@@ -365,41 +420,102 @@ async function runWorkflow() {
   } finally { workflowRunning.value = false }
 }
 
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement === studio.value) await document.exitFullscreen()
+    else if (studio.value) await studio.value.requestFullscreen()
+  } catch {
+    fullScreen.value = !fullScreen.value
+  }
+  await nextTick()
+  fitCanvas()
+}
+
+function syncFullscreen() {
+  fullScreen.value = document.fullscreenElement === studio.value
+  void nextTick().then(fitCanvas)
+}
+
 function keyboardDelete(event: KeyboardEvent) {
   const target = event.target as HTMLElement
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return
   if (event.key === 'Delete' || event.key === 'Backspace') deleteSelection()
 }
 
-onMounted(() => { void load(); window.addEventListener('keydown', keyboardDelete) })
-onBeforeUnmount(() => { stopPaletteTracking(); window.removeEventListener('keydown', keyboardDelete) })
+onMounted(() => {
+  void load()
+  window.addEventListener('keydown', keyboardDelete)
+  document.addEventListener('fullscreenchange', syncFullscreen)
+})
+onBeforeUnmount(() => {
+  stopPaletteTracking()
+  window.removeEventListener('keydown', keyboardDelete)
+  document.removeEventListener('fullscreenchange', syncFullscreen)
+})
 </script>
 
 <template>
-  <PageHeader eyebrow="VISUAL ORCHESTRATION" title="协作工作流画板" description="从 Agent 工厂拖入节点，用鼠标连接端口形成可执行工作流。">
-    <div class="page-actions"><button class="btn" @click="newWorkflow"><Plus :size="15" />新建画板</button><button class="btn btn-primary" @click="saveWorkflow"><Save :size="15" />保存工作流</button></div>
+  <PageHeader eyebrow="VISUAL ORCHESTRATION" title="协作工作流画板" description="编排全部 Agent 与知识库资源，在同一工作台完成配置、运行和结果检查。">
+    <div class="page-actions">
+      <button class="btn" @click="newWorkflow"><Plus :size="15" />新建画板</button>
+      <button class="btn" @click="toggleFullscreen"><Maximize2 :size="15" />全屏编排</button>
+      <button class="btn btn-primary" @click="saveWorkflow"><Save :size="15" />保存工作流</button>
+    </div>
   </PageHeader>
 
-  <section class="workflow-studio card">
+  <section ref="studio" class="workflow-studio card" :class="{
+    'palette-collapsed': paletteCollapsed,
+    'inspector-collapsed': inspectorCollapsed,
+    'run-collapsed': runCollapsed,
+    'is-fullscreen': fullScreen,
+  }">
     <aside class="workflow-palette">
-      <div class="studio-pane-title"><Bot :size="16" /><span>Agent 工厂</span><small>{{ visibleAgents.length }}</small></div>
-      <div class="palette-search"><Search :size="13" /><input v-model="search" placeholder="筛选 Agent"></div>
-      <div class="palette-agents">
-        <article v-for="agent in visibleAgents" :key="agent.id" class="palette-agent" title="拖入画板；双击可添加到画布中央" @pointerdown.prevent="startPalettePointer($event,agent)" @dblclick="addAgentToCenter(agent)">
-          <GripVertical :size="15" /><div><strong>{{ agent.name }}</strong><span>{{ agent.description || '可编排智能体' }}</span></div>
-        </article>
+      <div class="studio-pane-title">
+        <Library :size="16" />
+        <span v-if="!paletteCollapsed">节点资源</span>
+        <small v-if="!paletteCollapsed">{{ agents.length + knowledgeBases.length }}</small>
+        <button class="pane-toggle" :title="paletteCollapsed ? '展开资源栏' : '收起资源栏'" @click="paletteCollapsed=!paletteCollapsed">
+          <PanelLeftOpen v-if="paletteCollapsed" :size="15" /><PanelLeftClose v-else :size="15" />
+        </button>
       </div>
-      <div class="palette-workflows">
-        <label>已保存工作流</label>
-        <button v-for="item in workflows" :key="item.id" :class="{ active: currentWorkflow?.id===item.id }" @click="openWorkflow(item)"><Workflow :size="13" /><span>{{ item.name }}</span></button>
-      </div>
+      <template v-if="!paletteCollapsed">
+        <nav class="resource-tabs">
+          <button :class="{active:resourceTab==='agents'}" @click="resourceTab='agents';search=''"><Bot :size="13" />全部 Agent <b>{{ agents.length }}</b></button>
+          <button :class="{active:resourceTab==='knowledge'}" @click="resourceTab='knowledge';search=''"><Database :size="13" />知识库 <b>{{ knowledgeBases.length }}</b></button>
+        </nav>
+        <div class="palette-search"><Search :size="13" /><input v-model="search" :placeholder="resourceTab==='agents'?'搜索名称、说明或标识':'搜索知识库'"></div>
+        <div v-if="resourceTab==='agents'" class="palette-agents resource-list">
+          <article v-for="agent in visibleAgents" :key="agent.id" class="palette-agent" :class="{disabled:!executableAgent(agent)}" :title="executableAgent(agent)?'拖入画板；双击可添加到画布中央':'历史版本仅展示，不能加入运行工作流'" @pointerdown.prevent="startPalettePointer($event,agent,'agent')" @dblclick="addResourceToCenter('agent',agent)">
+            <GripVertical :size="15" />
+            <div><strong>{{ agent.name }}</strong><span>v{{ agent.version }} · {{ agent.description || agent.slug || '可编排智能体' }}</span></div>
+            <em :class="agent.status">{{ statusLabel(agent.status) }}</em>
+          </article>
+          <div v-if="!visibleAgents.length" class="empty compact">没有匹配的 Agent</div>
+        </div>
+        <div v-else class="palette-agents resource-list knowledge-resources">
+          <article v-for="base in visibleKnowledgeBases" :key="base.id" class="palette-agent palette-knowledge" title="拖入画板；双击可添加到画布中央" @pointerdown.prevent="startPalettePointer($event,base,'knowledge')" @dblclick="addResourceToCenter('knowledge',base)">
+            <Database :size="15" />
+            <div><strong>{{ base.name }}</strong><span>{{ base.discipline || '通用' }} · {{ base.document_count || 0 }} 份文档</span></div>
+            <em>知识</em>
+          </article>
+          <div v-if="!visibleKnowledgeBases.length" class="empty compact">暂无知识库，可先在“学科知识库”中创建</div>
+        </div>
+        <div class="palette-workflows">
+          <label><Workflow :size="12" />已保存工作流 <span>{{ workflows.length }}</span></label>
+          <button v-for="item in workflows" :key="item.id" :class="{ active: currentWorkflow?.id===item.id }" @click="openWorkflow(item)"><Workflow :size="13" /><span>{{ item.name }}</span></button>
+          <div v-if="!workflows.length" class="empty compact">尚未保存工作流</div>
+        </div>
+      </template>
     </aside>
 
     <div class="workflow-canvas-shell">
       <div class="canvas-toolbar">
-        <div><strong>{{ workflowForm.name }}</strong><span>{{ nodes.length }} 节点 · {{ edges.length }} 连线</span></div>
+        <div class="canvas-title"><strong>{{ workflowForm.name }}</strong><span>{{ nodes.length }} 节点 · {{ edges.length }} 连线 · {{ nodes.filter(item=>item.type==='agent').length }} Agent · {{ nodes.filter(item=>item.type==='knowledge').length }} 知识库</span></div>
         <div class="canvas-tools">
           <button title="缩小" @click="zoomBy(-.1)"><Minus :size="13" /></button><span>{{ zoomLabel }}</span><button title="放大" @click="zoomBy(.1)"><ZoomIn :size="13" /></button><button title="适应画布" @click="fitCanvas"><Maximize2 :size="13" /></button>
+          <i />
+          <button :title="inspectorCollapsed?'展开属性栏':'收起属性栏'" @click="inspectorCollapsed=!inspectorCollapsed"><PanelRightOpen v-if="inspectorCollapsed" :size="13" /><PanelRightClose v-else :size="13" /></button>
+          <button :title="fullScreen?'退出全屏':'进入全屏'" @click="toggleFullscreen"><Minimize2 v-if="fullScreen" :size="13" /><Maximize2 v-else :size="13" /></button>
           <button class="danger" :disabled="!selectedNode && !selectedEdge" title="删除选中的节点或连线" @click="deleteSelection"><Trash2 :size="13" /></button>
         </div>
       </div>
@@ -413,9 +529,9 @@ onBeforeUnmount(() => { stopPaletteTracking(); window.removeEventListener('keydo
             </svg>
             <article v-for="node in nodes" :key="node.id" class="workflow-node" :class="[node.type,{selected:selectedNodeId===node.id}]" :style="{left:`${node.position.x}px`,top:`${node.position.y}px`}" @pointerdown="startMove(node,$event)" @click.stop="selectNode(node.id)">
               <button v-if="node.type!=='input'" class="node-port input-port" title="输入端口" @pointerup.stop="finishConnection(node.id)" />
-              <div class="node-icon"><Bot v-if="node.type==='agent'" :size="17" /><GitBranch v-else-if="node.type==='input'" :size="17" /><CircleStop v-else :size="17" /></div>
+              <div class="node-icon"><Bot v-if="node.type==='agent'" :size="17" /><Database v-else-if="node.type==='knowledge'" :size="17" /><GitBranch v-else-if="node.type==='input'" :size="17" /><CircleStop v-else :size="17" /></div>
               <div class="node-copy"><small>{{ node.type.toUpperCase() }}</small><strong>{{ node.label }}</strong></div>
-              <button v-if="node.type==='agent'" class="node-delete" title="删除此 Agent 节点" @pointerdown.stop @click.stop="removeNode(node.id)"><Trash2 :size="11" /></button>
+              <button v-if="['agent','knowledge'].includes(node.type)" class="node-delete" title="删除此节点" @pointerdown.stop @click.stop="removeNode(node.id)"><Trash2 :size="11" /></button>
               <button v-if="node.type!=='output'" class="node-port output-port" title="输出端口" @pointerdown.stop="startConnection(node.id,$event)" />
             </article>
           </div>
@@ -424,16 +540,24 @@ onBeforeUnmount(() => { stopPaletteTracking(); window.removeEventListener('keydo
     </div>
 
     <aside class="workflow-inspector">
-      <div class="studio-pane-title"><GitBranch :size="16" /><span>属性设置</span></div>
-      <div class="inspector-body">
+      <div class="studio-pane-title">
+        <Settings2 :size="16" /><span v-if="!inspectorCollapsed">属性设置</span>
+        <button class="pane-toggle" :title="inspectorCollapsed?'展开属性栏':'收起属性栏'" @click="inspectorCollapsed=!inspectorCollapsed"><PanelRightOpen v-if="inspectorCollapsed" :size="15" /><PanelRightClose v-else :size="15" /></button>
+      </div>
+      <div v-if="!inspectorCollapsed" class="inspector-body">
         <div class="field"><label>工作流名称</label><input v-model="workflowForm.name" class="input"></div>
         <div class="field"><label>工作流说明</label><textarea v-model="workflowForm.description" class="textarea inspector-textarea" /></div>
         <template v-if="selectedNode">
           <div class="inspector-divider" />
           <div class="field"><label>节点名称</label><input v-model="selectedNode.label" class="input"></div>
           <div class="field"><label>节点类型</label><input :value="selectedNode.type" class="input" disabled></div>
-          <div v-if="selectedNode.type==='agent'" class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option v-for="agent in agents.filter(item=>item.status==='active')" :key="agent.id" :value="agent.id">{{ agent.name }}</option></select></div>
+          <div v-if="selectedNode.type==='agent'" class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option v-for="agent in agents" :key="agent.id" :value="agent.id" :disabled="!executableAgent(agent)">{{ agent.name }} · v{{ agent.version }} · {{ statusLabel(agent.status) }}</option></select></div>
           <div v-if="selectedNode.type==='agent'" class="notice">节点输入会根据连线自动包含原始任务和上游 Agent 输出。</div>
+          <template v-if="selectedNode.type==='knowledge'">
+            <div class="field"><label>绑定知识库</label><select v-model="selectedNode.config.knowledge_base_id" class="select"><option v-for="base in knowledgeBases" :key="base.id" :value="base.id">{{ base.name }} · {{ base.document_count || 0 }} 份文档</option></select></div>
+            <div class="field"><label>召回片段数</label><input v-model.number="selectedNode.config.top_k" type="number" min="1" max="20" class="input"></div>
+            <div class="notice knowledge-notice">检索问题会根据入线自动生成；将知识库连到 Agent，可把可追溯资料作为 Agent 的上游输入。</div>
+          </template>
           <button v-if="!['input','output'].includes(selectedNode.type)" class="btn btn-danger" @click="removeSelectedNode"><Trash2 :size="14" />删除节点</button>
         </template>
         <template v-else-if="selectedEdge">
@@ -444,11 +568,28 @@ onBeforeUnmount(() => { stopPaletteTracking(); window.removeEventListener('keydo
         <div v-else class="empty compact">选中画布节点后配置属性；单击连线可删除。</div>
       </div>
     </aside>
-  </section>
 
-  <section class="workflow-run-grid">
-    <div class="card"><div class="card-header"><div><h2>运行当前工作流</h2><StatusBadge v-if="workflowRunStatus!=='idle'" :status="workflowRunStatus" /></div><button class="btn btn-primary" :disabled="workflowRunning" @click="runWorkflow"><Play :size="15" />{{ workflowRunning ? '运行中…' : '开始运行' }}</button></div><div class="card-body"><div class="field"><label>任务输入</label><textarea v-model="task" class="textarea" /></div><div v-if="output" class="field" style="margin-top:14px"><label>{{ workflowRunning ? '实时状态' : '最终输出（AI 生成内容）' }}</label><div class="result-box" :class="{running:workflowRunning}">{{ output }}</div></div></div></div>
-    <aside class="card"><div class="card-header"><h3>最近运行</h3></div><div class="card-body list-stack"><div v-for="run in runs.slice(0,6)" :key="run.id" class="list-item"><div><strong>{{ run.duration_ms }} ms</strong><p>{{ new Date(run.created_at).toLocaleString('zh-CN') }}</p></div><StatusBadge :status="run.status" /></div><div v-if="!runs.length" class="empty">暂无运行</div></div></aside>
+    <section class="workflow-run-drawer">
+      <header @click="runCollapsed=!runCollapsed">
+        <button class="drawer-toggle" :title="runCollapsed?'展开运行配置':'收起运行配置'"><ChevronRight v-if="runCollapsed" :size="15" /><ChevronDown v-else :size="15" /></button>
+        <div><Play :size="15" /><strong>运行与调试</strong><span v-if="runCollapsed">{{ task || '填写任务输入' }}</span></div>
+        <StatusBadge v-if="workflowRunStatus!=='idle'" :status="workflowRunStatus" />
+        <button class="btn btn-primary" :disabled="workflowRunning" @click.stop="runCollapsed=false;runWorkflow()"><Play :size="14" />{{ workflowRunning ? '运行中…' : '开始运行' }}</button>
+      </header>
+      <div v-if="!runCollapsed" class="workflow-run-content">
+        <div class="run-input-panel">
+          <div class="field"><label>任务输入</label><textarea v-model="task" class="textarea" placeholder="描述本次工作流需要完成的真实任务" /></div>
+        </div>
+        <div class="run-output-panel">
+          <label>{{ workflowRunning ? '实时状态' : '运行输出' }}</label>
+          <div class="result-box" :class="{running:workflowRunning,empty:!output}">{{ output || '运行后将在这里展示节点状态和最终结果。' }}</div>
+        </div>
+        <aside class="run-history-panel">
+          <label>最近运行</label>
+          <div class="run-history-list"><div v-for="run in runs.slice(0,5)" :key="run.id"><span><strong>{{ run.duration_ms }} ms</strong><small>{{ new Date(run.created_at).toLocaleString('zh-CN') }}</small></span><StatusBadge :status="run.status" /></div><p v-if="!runs.length">暂无运行记录</p></div>
+        </aside>
+      </div>
+    </section>
   </section>
-  <div v-if="paletteDrag.active && paletteDrag.agent" class="palette-drag-ghost" :style="{left:`${paletteDrag.x+14}px`,top:`${paletteDrag.y+14}px`}"><Bot :size="14" />{{ paletteDrag.agent.name }}</div>
+  <div v-if="paletteDrag.active && paletteDrag.item" class="palette-drag-ghost" :class="{knowledge:paletteDrag.kind==='knowledge'}" :style="{left:`${paletteDrag.x+14}px`,top:`${paletteDrag.y+14}px`}"><Database v-if="paletteDrag.kind==='knowledge'" :size="14" /><Bot v-else :size="14" />{{ paletteDrag.item.name }}</div>
 </template>

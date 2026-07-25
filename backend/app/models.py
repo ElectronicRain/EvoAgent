@@ -24,6 +24,16 @@ class TimestampMixin:
     )
 
 
+class AgentGroup(TimestampMixin, Base):
+    __tablename__ = "agent_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(20), default="#1769c2")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class AgentDefinition(TimestampMixin, Base):
     __tablename__ = "agents"
 
@@ -32,6 +42,9 @@ class AgentDefinition(TimestampMixin, Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
     model_endpoint_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_endpoints.id"), nullable=True
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(100), index=True)
     slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
@@ -49,6 +62,7 @@ class AgentDefinition(TimestampMixin, Base):
     is_template: Mapped[bool] = mapped_column(Boolean, default=False)
 
     parent: Mapped["AgentDefinition | None"] = relationship(remote_side=[id])
+    group: Mapped["AgentGroup | None"] = relationship()
 
 
 class AgentRun(TimestampMixin, Base):
@@ -56,6 +70,9 @@ class AgentRun(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     parent_run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     input_text: Mapped[str] = mapped_column(Text)
@@ -64,6 +81,7 @@ class AgentRun(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     token_usage: Mapped[int] = mapped_column(Integer, default=0)
+    security_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class AgentConversation(TimestampMixin, Base):
@@ -71,6 +89,9 @@ class AgentConversation(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(160), default="新会话")
 
 
@@ -85,6 +106,63 @@ class AgentMessage(TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
     trace_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class UserAccount(TimestampMixin, Base):
+    __tablename__ = "user_accounts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(80))
+    password_hash: Mapped[str] = mapped_column(Text)
+    avatar_color: Mapped[str] = mapped_column(String(20), default="#1769c2")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserPreference(TimestampMixin, Base):
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    reply_style_id: Mapped[str] = mapped_column(String(30), default="balanced")
+    custom_reply_style: Mapped[str] = mapped_column(Text, default="")
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    profile_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class UserQuestionMemory(TimestampMixin, Base):
+    __tablename__ = "user_question_memories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    question: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(60), default="general", index=True)
+    keywords_json: Mapped[str] = mapped_column(Text, default="[]")
 
 
 class AgentArtifact(TimestampMixin, Base):
@@ -317,10 +395,21 @@ class Approval(TimestampMixin, Base):
     action_type: Mapped[str] = mapped_column(String(60))
     summary: Mapped[str] = mapped_column(Text)
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    execution_result_json: Mapped[str] = mapped_column(Text, default="{}")
     risk_level: Mapped[str] = mapped_column(String(20), default="medium")
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RuntimeSecurityConfig(TimestampMixin, Base):
+    __tablename__ = "runtime_security_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    filesystem_mode: Mapped[str] = mapped_column(String(30), default="workspace")
+    workspace_roots_json: Mapped[str] = mapped_column(Text, default="[]")
+    command_mode: Mapped[str] = mapped_column(String(30), default="risk_based")
+    block_critical_commands: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ApprovalPolicy(TimestampMixin, Base):
@@ -359,6 +448,9 @@ class EvolutionProposal(TimestampMixin, Base):
     candidate_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
     reason: Mapped[str] = mapped_column(Text)
     changes_json: Mapped[str] = mapped_column(Text, default="{}")
+    goal_json: Mapped[str] = mapped_column(Text, default="{}")
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    decision_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
     baseline_score: Mapped[float] = mapped_column(Float, default=0)
     candidate_score: Mapped[float] = mapped_column(Float, default=0)
@@ -371,9 +463,12 @@ class EvaluationCase(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(160))
     discipline: Mapped[str] = mapped_column(String(100), default="通用")
+    category: Mapped[str] = mapped_column(String(60), default="quality", index=True)
     input_text: Mapped[str] = mapped_column(Text)
     expected_keywords_json: Mapped[str] = mapped_column(Text, default="[]")
     requires_citation: Mapped[bool] = mapped_column(Boolean, default=False)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
 class AuditLog(Base):

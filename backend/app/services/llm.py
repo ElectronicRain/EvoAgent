@@ -51,8 +51,51 @@ class DemoProvider(LLMProvider):
         web_sources = ""
         if "【网络研究资料】" in system:
             web_sources = system.split("【网络研究资料】", 1)[1].strip()
+        local_result: dict[str, Any] | None = None
+        local_match = re.search(
+            r"【本地请求预检结果】.*?结果：(\{.*?\})\n应优先依据该本地结果回答",
+            system,
+            re.S,
+        )
+        if local_match:
+            try:
+                local_result = json.loads(local_match.group(1))
+            except json.JSONDecodeError:
+                local_result = None
         role_hint = system.splitlines()[0][:80] if system else "EvoAgent"
-        if web_sources:
+        if local_result:
+            payload = local_result.get("result") or {}
+            if local_result.get("status") == "completed" and isinstance(payload, dict):
+                if isinstance(payload.get("items"), list):
+                    rows = [
+                        f"- {item.get('name')}（{item.get('type')}）"
+                        for item in payload["items"][:100]
+                    ]
+                    answer = (
+                        f"已读取本地目录：{payload.get('path', '当前目录')}\n\n"
+                        + ("\n".join(rows) or "该目录为空。")
+                    )
+                elif "content" in payload:
+                    answer = (
+                        f"已读取本地文件：{payload.get('path', '')}\n\n"
+                        f"{str(payload.get('content', ''))[:8000]}"
+                    )
+                elif isinstance(payload.get("matches"), list):
+                    answer = (
+                        f"已完成本地搜索，共找到 {len(payload['matches'])} 项：\n\n"
+                        + "\n".join(
+                            f"- {item.get('path')}"
+                            for item in payload["matches"][:100]
+                        )
+                    )
+                else:
+                    answer = f"本地操作已完成：{json.dumps(payload, ensure_ascii=False)}"
+            else:
+                answer = (
+                    "本地操作未执行。\n\n"
+                    f"原因：{local_result.get('error') or local_result.get('message') or '当前安全策略不允许该操作'}"
+                )
+        elif web_sources:
             review_match = re.search(r"请对任务“(.+?)”", user_message)
             research_topic = review_match.group(1) if review_match else user_message
             entries = re.findall(

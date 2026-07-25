@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
@@ -190,9 +192,31 @@ def test_360_search_parser_prefers_direct_result_url():
 def test_health_and_seeded_overview(client):
     assert client.get("/health").json()["status"] == "healthy"
     overview = client.get("/api/overview").json()
-    assert overview["counts"]["agents"] == 3
+    assert overview["counts"]["agents"] == 9
     assert overview["counts"]["workflows"] == 1
     assert overview["counts"]["knowledge_bases"] == 1
+    agents = client.get("/api/agents").json()
+    assert sum(agent["status"] == "active" for agent in agents) == 5
+    assert sum(agent["status"] == "candidate" for agent in agents) == 2
+    assert sum(agent["status"] == "archived" for agent in agents) == 2
+    catalog = {
+        agent["slug"]: agent
+        for agent in agents
+        if agent["slug"]
+        in {
+            "knowledge-curator",
+            "data-insight-reporter",
+            "requirement-designer",
+            "multi-agent-coordinator",
+            "legacy-material-extractor",
+            "legacy-format-proofreader",
+        }
+    }
+    assert len(catalog) == 6
+    for agent in catalog.values():
+        assert "exec" in json.loads(agent["tools_json"])
+        assert json.loads(agent["skills_json"])
+        assert json.loads(agent["permissions_json"])["mcp_extensions"]
 
 
 def test_windows_tauri_origin_is_allowed(client):
@@ -265,6 +289,248 @@ def test_workspace_escape_is_blocked(client):
     )
     assert response.status_code == 400
     assert "超出授权工作区" in response.json()["detail"]
+
+
+def test_runtime_security_supports_workspace_and_per_turn_full_access(client, tmp_path):
+    workspace = tmp_path / "safe-workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-visible-only-with-full-access", encoding="utf-8")
+    configured = client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "custom",
+            "workspace_roots": [str(workspace)],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+    assert configured.status_code == 200
+    assert configured.json()["workspace_roots"] == [str(workspace.resolve())]
+
+    blocked = client.post(
+        "/api/tools/run",
+        json={
+            "tool": "read_file",
+            "arguments": {"path": str(outside)},
+            "permission_mode": "auto",
+            "security_profile": "default",
+        },
+    )
+    allowed = client.post(
+        "/api/tools/run",
+        json={
+            "tool": "read_file",
+            "arguments": {"path": str(outside)},
+            "permission_mode": "auto",
+            "security_profile": "unrestricted_auto",
+        },
+    )
+    assert blocked.status_code == 400
+    assert allowed.status_code == 200
+    assert allowed.json()["result"]["content"] == "outside-visible-only-with-full-access"
+
+    workspace_profile_blocked = client.post(
+        "/api/tools/run",
+        json={
+            "tool": "read_file",
+            "arguments": {"path": str(outside)},
+            "permission_mode": "auto",
+            "security_profile": "workspace_auto",
+        },
+    )
+    executed = client.post(
+        "/api/tools/run",
+        json={
+            "tool": "exec",
+            "arguments": {"command": "Write-Output exec-ready"},
+            "permission_mode": "auto",
+            "security_profile": "custom_auto",
+        },
+    )
+    assert workspace_profile_blocked.status_code == 400
+    assert executed.status_code == 200
+    assert executed.json()["result"]["exit_code"] == 0
+    assert "exec-ready" in executed.json()["result"]["stdout"]
+
+    client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "workspace",
+            "workspace_roots": ["data/workspace"],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+
+
+def test_local_path_request_uses_local_tool_without_web_research(client, tmp_path):
+    workspace = tmp_path / "local-intent"
+    workspace.mkdir()
+    (workspace / "课程安排.txt").write_text("周五进行项目验收", encoding="utf-8")
+    client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "custom",
+            "workspace_roots": [str(workspace)],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+    created = client.post(
+        "/api/agents",
+        json={
+            "name": "本地文件 Agent",
+            "slug": "local-file-intent-agent",
+            "description": "优先处理本地文件任务",
+            "system_prompt": "你负责按照用户要求安全地访问本地目录和文件，并如实返回结果。",
+            "provider": "demo",
+            "model": "demo-model",
+            "tools": ["list_directory", "read_file", "search_files", "web_research"],
+            "permissions": {"tool_mode": "auto"},
+        },
+    ).json()
+    run = client.post(
+        f"/api/agents/{created['id']}/run",
+        json={
+            "input": f"帮我列出本地目录 {workspace}",
+            "context": {"security_profile": "custom_auto"},
+        },
+    ).json()
+    trace = json.loads(run["trace_json"])
+    types = [item.get("type") for item in trace]
+    assert run["status"] == "completed"
+    assert "local_intent_detected" in types
+    assert "web_search_started" not in types
+    assert "课程安排.txt" in run["output_text"]
+
+    client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "workspace",
+            "workspace_roots": ["data/workspace"],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+
+
+def test_local_request_planner_targets_a_named_desktop_file():
+    from pathlib import Path
+
+    from backend.app.services.tools import ToolRuntime
+
+    planned = ToolRuntime.plan_local_request("帮我读取桌面上的 notes.txt")
+
+    assert planned == {
+        "tool": "read_file",
+        "arguments": {"path": "桌面/notes.txt"},
+    }
+    assert ToolRuntime._known_folder("桌面/notes.txt") == Path.home() / "Desktop" / "notes.txt"
+
+
+def test_conversation_resumes_after_manual_tool_approval(client, monkeypatch, tmp_path):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+
+    class WriteAfterApprovalProvider:
+        async def chat(self, messages, *, model, temperature, tools=None):
+            if any(message.get("role") == "tool" for message in messages):
+                return LLMResponse(content="The approved local write completed.", tokens=4)
+            return LLMResponse(
+                content="",
+                tokens=3,
+                tool_calls=[
+                    {
+                        "id": "write-after-approval",
+                        "name": "write_file",
+                        "arguments": {"path": "approved-result.txt", "content": "approved"},
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(
+        agents_service,
+        "get_provider",
+        lambda _provider: WriteAfterApprovalProvider(),
+    )
+    original_security = client.get("/api/security/runtime").json()
+    workspace = tmp_path / "approval-workspace"
+    workspace.mkdir()
+    client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "custom",
+            "workspace_roots": [str(workspace)],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+    created = client.post(
+        "/api/agents",
+        json={
+            "name": "Approval continuation agent",
+            "slug": "approval-continuation-agent",
+            "description": "Verifies that a paused conversation continues after approval.",
+            "system_prompt": "Use the requested local tool and report its result.",
+            "provider": "approval-continuation-test",
+            "model": "test-model",
+            "tools": ["write_file"],
+            "permissions": {"tool_mode": "auto"},
+        },
+    ).json()
+    conversation = client.post(
+        f"/api/agents/{created['id']}/conversations",
+        json={"title": "Approval continuation"},
+    ).json()
+    existing_ids = {item["id"] for item in client.get("/api/approvals").json()}
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            response_future = pool.submit(
+                client.post,
+                f"/api/conversations/{conversation['id']}/messages/stream",
+                json={
+                    "content": "Write the approved result into the local workspace.",
+                    "security_profile": "custom_ask",
+                },
+            )
+            approval = None
+            for _attempt in range(100):
+                pending = [
+                    item
+                    for item in client.get("/api/approvals").json()
+                    if item["id"] not in existing_ids and item["status"] == "pending"
+                ]
+                if pending:
+                    approval = pending[0]
+                    break
+                time.sleep(0.05)
+            assert approval is not None
+
+            decision = client.post(
+                f"/api/approvals/{approval['id']}/decide",
+                json={"approved": True, "decided_by": "pytest"},
+            )
+            assert decision.status_code == 200
+            assert decision.json()["status"] == "approved"
+            response = response_future.result(timeout=10)
+
+        assert response.status_code == 200
+        assert "approval_required" in response.text
+        assert "approval_resolved" in response.text
+        assert "The approved local write completed." in response.text
+        assert (workspace / "approved-result.txt").read_text("utf-8") == "approved"
+    finally:
+        client.put(
+            "/api/security/runtime",
+            json={
+                "filesystem_mode": original_security["filesystem_mode"],
+                "workspace_roots": original_security["workspace_roots"],
+                "command_mode": original_security["command_mode"],
+                "block_critical_commands": original_security["block_critical_commands"],
+            },
+        )
 
 
 def test_chinese_knowledge_search_returns_citations(client):
@@ -392,15 +658,33 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     assert [step["type"] for step in first_steps] == [
         "stream_connected",
         "run_started",
+        "intent_detected",
         "context_ready",
         "model_response",
         "run_completed",
+        "knowledge_archived",
     ]
     assert first_events[-1]["type"] == "done"
     assert next(step for step in first_steps if step["type"] == "context_ready")[
         "history_messages"
     ] == 0
     assert any(event["type"] == "assistant" for event in first_events)
+    archive_step = next(step for step in first_steps if step["type"] == "knowledge_archived")
+    run_id = next(step["run_id"] for step in first_steps if step["type"] == "run_started")
+    assert archive_step["run_id"] == run_id
+    assert archive_step["knowledge_base_ids"]
+    for knowledge_base_id in archive_step["knowledge_base_ids"]:
+        documents = client.get(
+            f"/api/knowledge-bases/{knowledge_base_id}/documents"
+        ).json()
+        archived_document = next(
+            item for item in documents if item["source"] == f"Agent 运行 · {run_id}"
+        )
+        metadata = json.loads(archived_document["metadata_json"])
+        assert archived_document["status"] == "ready"
+        assert metadata["kind"] == "agent_task_result"
+        assert metadata["conversation_id"] == conversation["id"]
+        assert metadata["auto_archived"] is True
 
     second = client.post(
         f"/api/conversations/{conversation['id']}/messages/stream",
@@ -426,6 +710,93 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
         "assistant",
     ]
     assert "run_completed" in messages[-1]["trace_json"]
+
+
+def test_agent_without_bound_knowledge_base_archives_to_default_base(client):
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "后台归档测试 Agent",
+            "slug": "background-archive-test",
+            "system_prompt": "完成用户任务并给出简洁结果。",
+            "provider": "demo",
+            "model": "demo-model",
+            "tools": [],
+            "skills": [],
+            "knowledge_bases": [],
+            "permissions": {},
+        },
+    ).json()
+    conversation = client.post(
+        f"/api/agents/{agent['id']}/conversations",
+        json={"title": "后台任务归档"},
+    ).json()
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        json={"content": "生成一条可检索的任务成果"},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    archive_step = next(
+        event["step"]
+        for event in events
+        if event["type"] == "step" and event["step"]["type"] == "knowledge_archived"
+    )
+
+    assert response.status_code == 200
+    assert archive_step["knowledge_base_names"] == ["Agent 任务成果"]
+    documents = client.get(
+        f"/api/knowledge-bases/{archive_step['knowledge_base_ids'][0]}/documents"
+    ).json()
+    document = next(item for item in documents if item["id"] in archive_step["document_ids"])
+    assert json.loads(document["metadata_json"])["agent_id"] == agent["id"]
+
+
+def test_multiple_agents_can_complete_conversations_concurrently(client):
+    agents = {
+        item["slug"]: item
+        for item in client.get("/api/agents").json()
+        if item["slug"] in {"planner", "researcher"}
+    }
+    conversations = [
+        client.post(
+            f"/api/agents/{agents[slug]['id']}/conversations",
+            json={"title": f"{slug} 并发测试"},
+        ).json()
+        for slug in ("planner", "researcher")
+    ]
+
+    def run_conversation(conversation):
+        return client.post(
+            f"/api/conversations/{conversation['id']}/messages/stream",
+            json={"content": f"完成并发任务 {conversation['id'][:8]}"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(run_conversation, conversations))
+
+    for conversation, response in zip(conversations, responses, strict=True):
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        step_types = [
+            event["step"]["type"]
+            for event in events
+            if event["type"] == "step"
+        ]
+        messages = client.get(
+            f"/api/conversations/{conversation['id']}/messages"
+        ).json()
+        assert response.status_code == 200
+        assert events[-1]["type"] == "done"
+        assert "run_completed" in step_types
+        assert "knowledge_archived" in step_types
+        assert [item["role"] for item in messages] == ["user", "assistant"]
 
 
 def test_research_trace_survives_refresh_and_creates_markdown(
@@ -579,6 +950,67 @@ def test_visual_workflow_positions_persist_and_graph_runs(client):
     assert run["status"] == "completed"
 
 
+def test_workflow_knowledge_node_searches_bound_knowledge_base(client):
+    knowledge_base = client.post(
+        "/api/knowledge-bases",
+        json={
+            "name": "Workflow Knowledge Source",
+            "discipline": "testing",
+            "description": "Used to verify the workflow knowledge node.",
+        },
+    ).json()
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "Input"},
+            {
+                "id": "knowledge",
+                "type": "knowledge",
+                "label": "Knowledge search",
+                "config": {
+                    "knowledge_base_id": knowledge_base["id"],
+                    "query": "{{input.task}}",
+                    "top_k": 3,
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "Output",
+                "config": {
+                    "value": {
+                        "answer": "{{nodes.knowledge.output}}",
+                        "chunk_count": "{{nodes.knowledge.chunk_count}}",
+                    }
+                },
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "knowledge"},
+            {"source": "knowledge", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={
+            "name": "Knowledge node workflow",
+            "description": "Verifies knowledge nodes can run independently.",
+            "definition": definition,
+        },
+    ).json()
+
+    run = client.post(
+        f"/api/workflows/{workflow['id']}/run",
+        json={"input": {"task": "Find the relevant workflow context."}},
+    ).json()
+    output = json.loads(run["output_json"])
+    trace = json.loads(run["trace_json"])
+
+    assert run["status"] == "completed"
+    assert output["chunk_count"] == 0
+    assert knowledge_base["name"] in output["answer"]
+    assert [step["type"] for step in trace] == ["input", "knowledge", "output"]
+
+
 def test_workflow_stream_reports_live_node_progress(client):
     planner = next(item for item in client.get("/api/agents").json() if item["slug"] == "planner")
     definition = {
@@ -660,7 +1092,54 @@ def test_offline_agent_create_and_existing_agent_update(client):
     assert updated.status_code == 200
     assert updated.json()["name"] == "测试编辑后的 Agent"
     assert updated.json()["temperature"] == 0.6
-    assert json.loads(updated.json()["tools_json"]) == ["read_file", "search_files"]
+    assert json.loads(updated.json()["tools_json"]) == ["read_file", "search_files", "exec"]
+
+
+def test_custom_agent_group_crud_and_membership(client):
+    suffix = str(time.time_ns())
+    created_group = client.post(
+        "/api/agent-groups",
+        json={
+            "name": f"自定义科研组-{suffix}",
+            "description": "集中管理科研辅助 Agent",
+            "color": "#7c5cc4",
+            "sort_order": 80,
+        },
+    )
+    assert created_group.status_code == 201, created_group.text
+    group = created_group.json()
+    assert group["agent_count"] == 0
+
+    created_agent = client.post(
+        "/api/agents",
+        json={
+            "name": "分组测试 Agent",
+            "slug": f"group-agent-{suffix}",
+            "description": "验证 Agent 自定义分组",
+            "system_prompt": "你是用于验证自定义分组功能的测试 Agent。",
+            "group_id": group["id"],
+        },
+    )
+    assert created_agent.status_code == 201, created_agent.text
+    agent = created_agent.json()
+    assert agent["group_id"] == group["id"]
+
+    groups = client.get("/api/agent-groups")
+    assert groups.status_code == 200
+    assert next(item for item in groups.json() if item["id"] == group["id"])["agent_count"] == 1
+
+    renamed = client.patch(
+        f"/api/agent-groups/{group['id']}",
+        json={"name": f"科研协作组-{suffix}", "color": "#2f80d4"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == f"科研协作组-{suffix}"
+
+    deleted = client.delete(f"/api/agent-groups/{group['id']}")
+    assert deleted.status_code == 204
+    refreshed_agent = client.get(f"/api/agents/{agent['id']}")
+    assert refreshed_agent.status_code == 200
+    assert refreshed_agent.json()["group_id"] is None
 
 
 def test_missing_file_tool_result_does_not_abort_agent(client, monkeypatch):
@@ -751,6 +1230,70 @@ def test_builtin_plugins_skills_and_mcp_are_ready(client):
     assert knowledge["result"]["structuredContent"]
 
 
+def test_agent_has_exec_skills_and_can_call_selected_mcp(client, monkeypatch):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+
+    captured: dict[str, object] = {}
+
+    class CapabilityProvider:
+        async def chat(self, messages, *, model, temperature, tools=None):
+            captured["system"] = messages[0]["content"]
+            captured["tools"] = tools or []
+            if any(message.get("role") == "tool" for message in messages):
+                return LLMResponse(content="已通过 MCP 取得知识库列表。", tokens=2)
+            mcp_tool = next(
+                item["function"]["name"]
+                for item in tools or []
+                if "knowledge_bases_list" in item["function"]["description"]
+            )
+            return LLMResponse(
+                content="",
+                tokens=2,
+                tool_calls=[{"id": "mcp-list", "name": mcp_tool, "arguments": {}}],
+            )
+
+    monkeypatch.setattr(agents_service, "get_provider", lambda _provider: CapabilityProvider())
+    knowledge_mcp = next(
+        item
+        for item in client.get("/api/extensions").json()
+        if item["name"] == "学科知识库 MCP"
+    )
+    created = client.post(
+        "/api/agents",
+        json={
+            "name": "全能力 Agent",
+            "slug": "full-capability-agent",
+            "system_prompt": "理解用户目标，使用可用能力完成任务并报告真实执行结果。",
+            "provider": "capability-test",
+            "tools": [],
+            "skills": [],
+            "permissions": {
+                "tool_mode": "auto",
+                "mcp_extensions": [knowledge_mcp["id"]],
+                "security_profile": "workspace_auto",
+            },
+        },
+    ).json()
+    assert "exec" in json.loads(created["tools_json"])
+
+    run = client.post(
+        f"/api/agents/{created['id']}/run", json={"input": "列出当前知识库"}
+    ).json()
+    trace = json.loads(run["trace_json"])
+    tool_names = {item["function"]["name"] for item in captured["tools"]}
+    context = next(item for item in trace if item["type"] == "context_ready")
+
+    assert run["status"] == "completed"
+    assert "exec" in tool_names
+    assert any(name.startswith("mcp_") for name in tool_names)
+    assert "【已启用 Skills】" in captured["system"]
+    assert context["capabilities"]["exec"] is True
+    assert context["capabilities"]["mcp_services"] == ["学科知识库 MCP"]
+    assert any(item["type"] == "intent_detected" for item in trace)
+    assert any(item["type"] == "tool_result" and item["status"] == "completed" for item in trace)
+
+
 def test_evolution_requires_evaluation_before_activation(client, monkeypatch):
     from backend.app.services import evolution as evolution_service_module
 
@@ -822,8 +1365,207 @@ def test_evolution_requires_evaluation_before_activation(client, monkeypatch):
     )
     assert "目标任务执行协议" in report["optimized_prompt"]
     assert report["artifact"]["relative_path"].endswith("-evaluation.md")
+    assert report["gate"]["passed"] is True
+    assert {item["id"] for item in report["gate"]["checks"]} == {
+        "candidate_score",
+        "improvement",
+        "failure_rate",
+    }
+    assert report["cases"][0]["candidate_breakdown"]["coverage"] >= 0
     approved = client.post(
         f"/api/evolution/{proposal['id']}/decide",
         json={"approved": True, "decided_by": "pytest"},
     ).json()
     assert approved["status"] == "approved"
+    lineages = client.get("/api/evolution/lineages").json()
+    lineage = next(
+        item
+        for item in lineages
+        if item["lineage_id"]
+        == next(
+            agent
+            for agent in client.get("/api/agents").json()
+            if agent["id"] == proposal["candidate_agent_id"]
+        )["lineage_id"]
+    )
+    assert lineage["active_agent_id"] == proposal["candidate_agent_id"]
+    rolled_back = client.post(
+        f"/api/evolution/agents/{proposal['candidate_agent_id']}/rollback",
+        json={
+            "target_agent_id": proposal["source_agent_id"],
+            "reason": "pytest 验证安全回滚",
+            "actor": "pytest",
+        },
+    ).json()
+    assert rolled_back["to_agent_id"] == proposal["source_agent_id"]
+
+
+def test_evolution_goal_analysis_parallel_versions_and_case_management(client):
+    agent = next(
+        item for item in client.get("/api/agents").json() if item["status"] == "active"
+    )
+    analysis = client.post(
+        "/api/evolution/analyze-goal",
+        json={
+            "agent_id": agent["id"],
+            "goal": "提高长任务完整性，减少遗漏，并增强工具失败后的恢复能力。",
+            "include_run_insights": True,
+        },
+    )
+    assert analysis.status_code == 200
+    diagnosis = analysis.json()
+    dimension_ids = {item["id"] for item in diagnosis["dimensions"]}
+    assert "structure" in dimension_ids
+    assert "reliability" in dimension_ids
+    assert "【本轮进化目标】" in diagnosis["recommended_prompt"]
+    assert diagnosis["suggested_cases"]
+
+    benchmark = client.post(
+        "/api/evaluation-cases",
+        json={
+            "name": "并行草案临时用例",
+            "discipline": "工程",
+            "category": "reliability",
+            "input": "工具失败后继续完成其余任务并说明替代方案。",
+            "expected_keywords": ["失败", "替代", "完成"],
+            "requires_citation": False,
+            "weight": 1.7,
+            "enabled": True,
+        },
+    ).json()
+    updated = client.put(
+        f"/api/evaluation-cases/{benchmark['id']}",
+        json={"weight": 2.0, "enabled": False},
+    ).json()
+    assert updated["weight"] == 2.0
+    assert updated["enabled"] is False
+
+    payload = {
+        "agent_id": agent["id"],
+        "reason": diagnosis["goal"],
+        "proposed_prompt": "",
+        "selected_case_ids": [],
+        "min_candidate_score": 72,
+        "min_improvement": 1,
+        "max_failure_rate": 0.1,
+        "goal_analysis": diagnosis,
+    }
+    first = client.post("/api/evolution", json=payload)
+    second = client.post("/api/evolution", json=payload)
+    assert first.status_code == 201
+    assert second.status_code == 201
+    first_candidate = next(
+        item
+        for item in client.get("/api/agents").json()
+        if item["id"] == first.json()["candidate_agent_id"]
+    )
+    second_candidate = next(
+        item
+        for item in client.get("/api/agents").json()
+        if item["id"] == second.json()["candidate_agent_id"]
+    )
+    assert second_candidate["version"] == first_candidate["version"] + 1
+    assert second_candidate["slug"] != first_candidate["slug"]
+
+    overview = client.get("/api/evolution/overview").json()
+    assert overview["summary"]["total"] >= 2
+    assert len(overview["pipeline"]) == 5
+    assert client.delete(f"/api/evaluation-cases/{benchmark['id']}").status_code == 204
+
+
+def test_user_auth_usage_memory_profile_and_reply_style(client, monkeypatch):
+    from backend.app.services import agents as agents_module
+    from backend.app.services.llm import LLMResponse
+
+    captured_system_prompts: list[str] = []
+
+    class CapturingProvider:
+        async def chat(self, messages, *, model, temperature, tools=None):
+            captured_system_prompts.append(messages[0]["content"])
+            return LLMResponse(content="已完成用户画像测试。", tokens=37)
+
+    monkeypatch.setattr(
+        agents_module, "get_provider", lambda _provider: CapturingProvider()
+    )
+    monkeypatch.setattr(
+        agents_module, "provider_from_endpoint", lambda _endpoint: CapturingProvider()
+    )
+
+    status = client.get("/api/auth/status").json()
+    assert status["registration_required"] is True
+
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "local_tester",
+            "display_name": "本地测试用户",
+            "password": "secure-pass-2026",
+        },
+    )
+    assert registered.status_code == 201
+    auth = registered.json()
+    assert auth["claimed_legacy_data"] is True
+    headers = {"Authorization": f"Bearer {auth['token']}"}
+
+    me = client.get("/api/auth/me", headers=headers).json()
+    assert me["username"] == "local_tester"
+    assert me["memory_enabled"] is True
+    assert "password_hash" not in me
+
+    custom = client.put(
+        "/api/users/me/reply-style",
+        headers=headers,
+        json={
+            "style_id": "custom",
+            "custom_style": "先给结论，再用三条行动建议说明，并保持专业友好。",
+        },
+    )
+    assert custom.status_code == 200
+    assert custom.json()["reply_style_id"] == "custom"
+
+    agent = next(
+        item for item in client.get("/api/agents").json() if item["status"] == "active"
+    )
+    conversation = client.post(
+        f"/api/agents/{agent['id']}/conversations",
+        headers=headers,
+        json={"title": "用户画像测试"},
+    ).json()
+    assert conversation["user_id"] == me["id"]
+
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages/stream",
+        headers=headers,
+        json={"content": "请帮我检查这份研究报告的证据质量与引用风险。"},
+    )
+    assert response.status_code == 200
+    assert '"type": "done"' in response.text
+    assert captured_system_prompts, response.text
+    assert any(
+        "先给结论，再用三条行动建议说明，并保持专业友好。" in prompt
+        for prompt in captured_system_prompts
+    )
+
+    daily = client.get("/api/users/me/usage?range=day", headers=headers).json()
+    weekly = client.get("/api/users/me/usage?range=week", headers=headers).json()
+    monthly = client.get("/api/users/me/usage?range=month", headers=headers).json()
+    assert len(daily["chart"]) == 7
+    assert len(weekly["chart"]) == 8
+    assert len(monthly["chart"]) == 12
+    assert daily["summary"]["total_runs"] >= 1
+    assert any(item["input"].startswith("请帮我检查") for item in daily["records"])
+
+    profile = client.get("/api/users/me/profile", headers=headers).json()
+    assert profile["question_count"] >= 1
+    assert any("证据质量" in item["question"] for item in profile["recent_questions"])
+
+    updated = client.patch(
+        "/api/users/me",
+        headers=headers,
+        json={"display_name": "画像测试用户", "memory_enabled": False},
+    ).json()
+    assert updated["display_name"] == "画像测试用户"
+    assert updated["memory_enabled"] is False
+
+    assert client.post("/api/auth/logout", headers=headers).status_code == 204
+    assert client.get("/api/auth/me", headers=headers).status_code == 401

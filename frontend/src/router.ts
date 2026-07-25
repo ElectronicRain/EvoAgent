@@ -10,6 +10,7 @@ const router = createRouter({
     { path: '/knowledge/:id', component: () => import('./views/KnowledgeDetailView.vue'), meta: { title: '知识库详情', detached: true } },
     { path: '/extensions', component: () => import('./views/ExtensionsView.vue'), meta: { title: '扩展与模型' } },
     { path: '/evolution', component: () => import('./views/EvolutionView.vue'), meta: { title: '进化实验室' } },
+    { path: '/perception', component: () => import('./views/UserPerceptionView.vue'), meta: { title: '用户与感知' } },
     { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { title: '安全治理' } },
   ],
 })

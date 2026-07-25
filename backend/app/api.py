@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete, desc, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -16,6 +17,7 @@ from .models import (
     AgentConversation,
     AgentDefinition,
     AgentArtifact,
+    AgentGroup,
     AgentMessage,
     AgentRun,
     Approval,
@@ -36,12 +38,15 @@ from .models import (
     ModelEndpoint,
     ResearchSourceReview,
     Skill,
+    UserAccount,
     Workflow,
     WorkflowRun,
 )
 from .schemas import (
     AgentConversationCreate,
     AgentCreate,
+    AgentGroupCreate,
+    AgentGroupUpdate,
     AgentMessageCreate,
     AgentRunRequest,
     AgentUpdate,
@@ -49,8 +54,11 @@ from .schemas import (
     ApprovalPolicyCreate,
     ClassroomSpeechRequest,
     EvaluationCaseCreate,
+    EvaluationCaseUpdate,
     EvolutionCreate,
     EvolutionDecision,
+    EvolutionGoalAnalyze,
+    EvolutionRollback,
     ExtensionCreate,
     KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
@@ -68,10 +76,15 @@ from .schemas import (
     ModelEndpointCreate,
     ModelEndpointUpdate,
     ResearchSourceReviewCreate,
+    RuntimeSecurityConfigUpdate,
     TeachingPlanRequest,
     SkillCreate,
     TextDocumentCreate,
     ToolRunRequest,
+    UserLogin,
+    UserProfileUpdate,
+    UserRegister,
+    UserReplyStyleUpdate,
     WorkflowCreate,
     WorkflowRunRequest,
 )
@@ -85,8 +98,10 @@ from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
 from .services.llm import OpenAICompatibleProvider, get_provider, provider_from_endpoint
 from .services.secrets import secret_store
+from .services.security import RuntimeSecurityContext, runtime_security_service
 from .services.teaching import teaching_service
 from .services.tools import tool_runtime
+from .services.users import REPLY_STYLES, user_service
 from .services.workflows import workflow_engine
 
 
@@ -94,10 +109,284 @@ router = APIRouter(prefix="/api")
 active_conversation_tasks: set[asyncio.Task] = set()
 active_workflow_tasks: set[asyncio.Task] = set()
 active_evolution_tasks: set[asyncio.Task] = set()
+active_knowledge_tasks: set[asyncio.Task] = set()
 
 
 def row(model: Any) -> dict[str, Any]:
     return {column.name: getattr(model, column.name) for column in model.__table__.columns}
+
+
+async def require_user(
+    db: AsyncSession, authorization: str | None
+) -> UserAccount:
+    user = await user_service.resolve(db, authorization)
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return user
+
+
+@router.get("/auth/status")
+async def auth_status(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await user_service.resolve(db, authorization)
+    count = await db.scalar(select(func.count(UserAccount.id))) or 0
+    if user is None:
+        return {
+            "authenticated": False,
+            "registration_required": count == 0,
+            "user": None,
+        }
+    preference = await user_service.preference(db, user.id)
+    return {
+        "authenticated": True,
+        "registration_required": False,
+        "user": user_service.public_user(user, preference),
+    }
+
+
+@router.post("/auth/register", status_code=201)
+async def register_user(
+    payload: UserRegister, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    try:
+        result = await user_service.register(
+            db,
+            username=payload.username,
+            display_name=payload.display_name,
+            password=payload.password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await audit(
+        db,
+        "user.registered",
+        "user_account",
+        result["user"]["id"],
+        {"claimed_legacy_data": result.get("claimed_legacy_data", False)},
+        actor=result["user"]["username"],
+    )
+    return result
+
+
+@router.post("/auth/login")
+async def login_user(
+    payload: UserLogin, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    try:
+        result = await user_service.login(
+            db, username=payload.username, password=payload.password
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    await audit(
+        db,
+        "user.logged_in",
+        "user_account",
+        result["user"]["id"],
+        actor=result["user"]["username"],
+    )
+    return result
+
+
+@router.post("/auth/logout", status_code=204)
+async def logout_user(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    await user_service.logout(db, authorization)
+    return Response(status_code=204)
+
+
+@router.get("/auth/me")
+async def current_user(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    preference = await user_service.preference(db, user.id)
+    return user_service.public_user(user, preference)
+
+
+@router.patch("/users/me")
+async def update_current_user(
+    payload: UserProfileUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    preference = await user_service.preference(db, user.id)
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip()
+    if payload.avatar_color is not None:
+        user.avatar_color = payload.avatar_color
+    if payload.memory_enabled is not None:
+        preference.memory_enabled = payload.memory_enabled
+    await db.flush()
+    await audit(
+        db,
+        "user.profile.updated",
+        "user_account",
+        user.id,
+        actor=user.username,
+    )
+    return user_service.public_user(user, preference)
+
+
+@router.get("/users/me/usage")
+async def current_user_usage(
+    range_name: str = Query(default="day", alias="range", pattern="^(day|week|month)$"),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    return await user_service.usage(db, user.id, range_name)
+
+
+@router.get("/users/me/profile")
+async def current_user_profile(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    return await user_service.profile(db, user.id)
+
+
+@router.get("/reply-styles")
+async def reply_styles() -> list[dict[str, str]]:
+    return REPLY_STYLES
+
+
+@router.put("/users/me/reply-style")
+async def update_reply_style(
+    payload: UserReplyStyleUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    if payload.style_id == "custom" and not payload.custom_style.strip():
+        raise HTTPException(status_code=422, detail="请填写自定义回复风格")
+    preference = await user_service.preference(db, user.id)
+    preference.reply_style_id = payload.style_id
+    preference.custom_reply_style = payload.custom_style.strip()
+    await db.flush()
+    await audit(
+        db,
+        "user.reply_style.updated",
+        "user_preference",
+        user.id,
+        {"style_id": payload.style_id},
+        actor=user.username,
+    )
+    return {
+        "reply_style_id": preference.reply_style_id,
+        "custom_reply_style": preference.custom_reply_style,
+    }
+
+
+async def archive_agent_run_to_knowledge(
+    db: AsyncSession,
+    *,
+    conversation: AgentConversation,
+    agent: AgentDefinition,
+    result: AgentRun,
+    input_text: str,
+) -> dict[str, Any]:
+    """Persist a completed Agent result as searchable, vectorized knowledge."""
+
+    configured_ids = [
+        str(item)
+        for item in loads(agent.knowledge_bases_json, [])
+        if isinstance(item, str) and item
+    ]
+    knowledge_bases: list[KnowledgeBase] = []
+    if configured_ids:
+        knowledge_bases = list(
+            (
+                await db.scalars(
+                    select(KnowledgeBase).where(KnowledgeBase.id.in_(configured_ids))
+                )
+            ).all()
+        )
+
+    if not knowledge_bases:
+        default_name = "Agent 任务成果"
+        default_base = await db.scalar(
+            select(KnowledgeBase).where(KnowledgeBase.name == default_name)
+        )
+        if default_base is None:
+            try:
+                async with db.begin_nested():
+                    default_base = KnowledgeBase(
+                        name=default_name,
+                        discipline="Agent 运行记录",
+                        description="自动保存 Agent 已完成任务的输入、结果与可审计运行信息。",
+                    )
+                    db.add(default_base)
+                    await db.flush()
+            except IntegrityError:
+                default_base = await db.scalar(
+                    select(KnowledgeBase).where(KnowledgeBase.name == default_name)
+                )
+        if default_base is None:
+            raise RuntimeError("无法创建 Agent 任务成果知识库")
+        knowledge_bases = [default_base]
+
+    source = f"Agent 运行 · {result.id}"
+    short_input = " ".join(input_text.split())
+    title = f"{agent.name} · {short_input[:90] or '已完成任务'}"[:255]
+    content = "\n\n".join(
+        [
+            f"# {agent.name} 任务成果",
+            f"## 用户任务\n{input_text.strip()}",
+            f"## Agent 结果\n{result.output_text or ''}",
+            (
+                "## 执行信息\n"
+                f"- Agent：{agent.name}\n"
+                f"- Run ID：{result.id}\n"
+                f"- Conversation ID：{conversation.id}\n"
+                f"- 完成时间：{datetime.now(timezone.utc).isoformat()}"
+            ),
+        ]
+    )
+    archived: list[dict[str, str]] = []
+    for knowledge_base in knowledge_bases:
+        document = await db.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.knowledge_base_id == knowledge_base.id,
+                KnowledgeDocument.source == source,
+            )
+        )
+        if document is None:
+            document = await knowledge_service.add_document(
+                db,
+                knowledge_base.id,
+                title=title,
+                content=content,
+                source=source,
+                metadata={
+                    "kind": "agent_task_result",
+                    "run_id": result.id,
+                    "conversation_id": conversation.id,
+                    "agent_id": agent.id,
+                    "auto_archived": True,
+                },
+            )
+        archived.append(
+            {
+                "knowledge_base_id": knowledge_base.id,
+                "knowledge_base_name": knowledge_base.name,
+                "document_id": document.id,
+            }
+        )
+    return {
+        "type": "knowledge_archived",
+        "run_id": result.id,
+        "knowledge_base_ids": [item["knowledge_base_id"] for item in archived],
+        "knowledge_base_names": [item["knowledge_base_name"] for item in archived],
+        "document_ids": [item["document_id"] for item in archived],
+    }
 
 
 def endpoint_row(model: ModelEndpoint) -> dict[str, Any]:
@@ -147,15 +436,135 @@ async def overview(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     recent_runs = (
         await db.scalars(select(AgentRun).order_by(desc(AgentRun.created_at)).limit(8))
     ).all()
+    security = await runtime_security_service.response(db)
     return {
         "counts": counts,
         "recent_runs": [row(item) for item in recent_runs],
         "runtime": {
             "database": "SQLite",
-            "workspace": str(tool_runtime.root),
-            "safety": "workspace-isolated",
+            "workspace": security["workspace_roots"][0],
+            "safety": security["filesystem_mode"],
+            "command_mode": security["command_mode"],
         },
     }
+
+
+@router.get("/security/runtime")
+async def get_runtime_security(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    return await runtime_security_service.response(db)
+
+
+@router.put("/security/runtime")
+async def update_runtime_security(
+    payload: RuntimeSecurityConfigUpdate, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    item = await runtime_security_service.update(
+        db,
+        filesystem_mode=payload.filesystem_mode,
+        workspace_roots=payload.workspace_roots,
+        command_mode=payload.command_mode,
+        block_critical_commands=payload.block_critical_commands,
+    )
+    await audit(
+        db,
+        "runtime_security.updated",
+        "runtime_security_config",
+        item.id,
+        {
+            "filesystem_mode": item.filesystem_mode,
+            "workspace_roots": payload.workspace_roots,
+            "command_mode": item.command_mode,
+            "block_critical_commands": item.block_critical_commands,
+        },
+    )
+    return await runtime_security_service.response(db)
+
+
+async def _agent_group_row(db: AsyncSession, group: AgentGroup) -> dict[str, Any]:
+    agent_count = int(
+        await db.scalar(
+            select(func.count(AgentDefinition.id)).where(AgentDefinition.group_id == group.id)
+        )
+        or 0
+    )
+    return {**row(group), "agent_count": agent_count}
+
+
+@router.get("/agent-groups")
+async def list_agent_groups(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
+    groups = (
+        await db.scalars(
+            select(AgentGroup).order_by(AgentGroup.sort_order, AgentGroup.name)
+        )
+    ).all()
+    return [await _agent_group_row(db, group) for group in groups]
+
+
+@router.post("/agent-groups", status_code=201)
+async def create_agent_group(
+    payload: AgentGroupCreate, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    name = payload.name.strip()
+    exists = await db.scalar(
+        select(AgentGroup).where(func.lower(AgentGroup.name) == name.lower())
+    )
+    if exists:
+        raise HTTPException(status_code=409, detail="Agent 分组名称已存在")
+    group = AgentGroup(
+        name=name,
+        description=payload.description.strip(),
+        color=payload.color,
+        sort_order=payload.sort_order,
+    )
+    db.add(group)
+    await db.flush()
+    await audit(db, "agent.group_created", "agent_group", group.id, {"name": name})
+    return await _agent_group_row(db, group)
+
+
+@router.patch("/agent-groups/{group_id}")
+async def update_agent_group(
+    group_id: str,
+    payload: AgentGroupUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    group = await db.get(AgentGroup, group_id)
+    if not group:
+        raise not_found("Agent 分组")
+    values = payload.model_dump(exclude_unset=True)
+    if "name" in values:
+        values["name"] = values["name"].strip()
+        duplicate = await db.scalar(
+            select(AgentGroup).where(
+                AgentGroup.id != group_id,
+                func.lower(AgentGroup.name) == values["name"].lower(),
+            )
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="Agent 分组名称已存在")
+    if "description" in values:
+        values["description"] = values["description"].strip()
+    for key, value in values.items():
+        setattr(group, key, value)
+    await audit(db, "agent.group_updated", "agent_group", group.id)
+    return await _agent_group_row(db, group)
+
+
+@router.delete("/agent-groups/{group_id}", status_code=204)
+async def delete_agent_group(
+    group_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    group = await db.get(AgentGroup, group_id)
+    if not group:
+        raise not_found("Agent 分组")
+    await db.execute(
+        update(AgentDefinition)
+        .where(AgentDefinition.group_id == group_id)
+        .values(group_id=None)
+    )
+    await db.delete(group)
+    await audit(db, "agent.group_deleted", "agent_group", group_id)
+    return Response(status_code=204)
 
 
 @router.get("/agents")
@@ -171,6 +580,9 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
     endpoint_id = payload.model_endpoint_id or None
     if endpoint_id and not await db.get(ModelEndpoint, endpoint_id):
         raise not_found("模型接口")
+    group_id = payload.group_id or None
+    if group_id and not await db.get(AgentGroup, group_id):
+        raise not_found("Agent 分组")
     item = AgentDefinition(
         name=payload.name,
         slug=payload.slug,
@@ -178,9 +590,10 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
         system_prompt=payload.system_prompt,
         provider=payload.provider,
         model_endpoint_id=endpoint_id,
+        group_id=group_id,
         model=payload.model,
         temperature=payload.temperature,
-        tools_json=dumps(payload.tools),
+        tools_json=dumps(list(dict.fromkeys([*payload.tools, "exec"]))),
         skills_json=dumps(payload.skills),
         knowledge_bases_json=dumps(payload.knowledge_bases),
         permissions_json=dumps(payload.permissions),
@@ -216,12 +629,19 @@ async def update_agent(
     }
     for key, value in values.items():
         if key in json_fields:
+            if key == "tools":
+                value = list(dict.fromkeys([*value, "exec"]))
             setattr(item, json_fields[key], dumps(value))
         elif key == "model_endpoint_id":
             endpoint_id = value or None
             if endpoint_id and not await db.get(ModelEndpoint, endpoint_id):
                 raise not_found("模型接口")
             setattr(item, key, endpoint_id)
+        elif key == "group_id":
+            group_id = value or None
+            if group_id and not await db.get(AgentGroup, group_id):
+                raise not_found("Agent 分组")
+            item.group_id = group_id
         else:
             setattr(item, key, value)
     await audit(db, "agent.updated", "agent", item.id)
@@ -230,25 +650,42 @@ async def update_agent(
 
 @router.post("/agents/{agent_id}/run")
 async def run_agent(
-    agent_id: str, payload: AgentRunRequest, db: AsyncSession = Depends(get_db)
+    agent_id: str,
+    payload: AgentRunRequest,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     if not await db.get(AgentDefinition, agent_id):
         raise not_found("Agent")
-    result = await agent_engine.run(db, agent_id, payload.input, payload.context)
+    user = await user_service.resolve(db, authorization)
+    context = dict(payload.context)
+    if user is not None:
+        preference = await user_service.preference(db, user.id)
+        context.update(
+            {
+                "user_id": user.id,
+                "reply_style_prompt": user_service.reply_style_prompt(preference),
+            }
+        )
+    result = await agent_engine.run(db, agent_id, payload.input, context)
     return row(result)
 
 
 @router.get("/agents/{agent_id}/conversations")
 async def list_agent_conversations(
-    agent_id: str, db: AsyncSession = Depends(get_db)
+    agent_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
     if not await db.get(AgentDefinition, agent_id):
         raise not_found("Agent")
+    user = await user_service.resolve(db, authorization)
+    query = select(AgentConversation).where(AgentConversation.agent_id == agent_id)
+    if user is not None:
+        query = query.where(AgentConversation.user_id == user.id)
     items = (
         await db.scalars(
-            select(AgentConversation)
-            .where(AgentConversation.agent_id == agent_id)
-            .order_by(desc(AgentConversation.updated_at))
+            query.order_by(desc(AgentConversation.updated_at))
         )
     ).all()
     result = []
@@ -275,11 +712,17 @@ async def list_agent_conversations(
 async def create_agent_conversation(
     agent_id: str,
     payload: AgentConversationCreate,
+    authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     if not await db.get(AgentDefinition, agent_id):
         raise not_found("Agent")
-    item = AgentConversation(agent_id=agent_id, title=payload.title)
+    user = await user_service.resolve(db, authorization)
+    item = AgentConversation(
+        agent_id=agent_id,
+        user_id=user.id if user else None,
+        title=payload.title,
+    )
     db.add(item)
     await db.flush()
     await audit(db, "conversation.created", "agent_conversation", item.id)
@@ -499,8 +942,23 @@ async def review_research_source(
 
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_conversation_message(
-    conversation_id: str, payload: AgentMessageCreate
+    conversation_id: str,
+    payload: AgentMessageCreate,
+    authorization: str | None = Header(default=None),
 ) -> StreamingResponse:
+    async with session_scope() as auth_db:
+        conversation_owner = await auth_db.get(AgentConversation, conversation_id)
+        if conversation_owner is None:
+            raise not_found("会话")
+        user = await user_service.resolve(auth_db, authorization)
+        if user is not None and conversation_owner.user_id not in {None, user.id}:
+            raise HTTPException(status_code=403, detail="不能访问其他用户的会话")
+        user_id = user.id if user else conversation_owner.user_id
+        reply_style_prompt = ""
+        if user is not None:
+            preference = await user_service.preference(auth_db, user.id)
+            reply_style_prompt = user_service.reply_style_prompt(preference)
+
     async def generate():
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -510,6 +968,8 @@ async def stream_conversation_message(
                     conversation = await db.get(AgentConversation, conversation_id)
                     if not conversation:
                         raise LookupError("会话不存在")
+                    if user_id and conversation.user_id is None:
+                        conversation.user_id = user_id
                     history_rows = list(
                         (
                             await db.scalars(
@@ -535,6 +995,13 @@ async def stream_conversation_message(
                     if conversation.title == "新会话":
                         conversation.title = payload.content.strip()[:36]
                     await db.flush()
+                    await user_service.remember_question(
+                        db,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        agent_id=conversation.agent_id,
+                        question=payload.content,
+                    )
 
                     async def publish_step(event: dict[str, Any]) -> None:
                         if event.get("type") == "run_started" and event.get("run_id"):
@@ -546,7 +1013,12 @@ async def stream_conversation_message(
                         db,
                         conversation.agent_id,
                         payload.content,
-                        user_context={"conversation_id": conversation_id},
+                        user_context={
+                            "conversation_id": conversation_id,
+                            "security_profile": payload.security_profile,
+                            "user_id": user_id,
+                            "reply_style_prompt": reply_style_prompt,
+                        },
                         conversation_messages=history,
                         on_event=publish_step,
                     )
@@ -573,6 +1045,46 @@ async def stream_conversation_message(
                         {"run_id": result.id, "status": result.status},
                         success=result.status == "completed",
                     )
+                    # Commit the completed run and conversation before vectorization.
+                    # An embedding/provider failure must never erase the task result.
+                    await db.commit()
+                    if result.status == "completed":
+                        try:
+                            agent = await db.get(AgentDefinition, conversation.agent_id)
+                            if agent is None:
+                                raise LookupError("Agent 不存在")
+                            archive_event = await archive_agent_run_to_knowledge(
+                                db,
+                                conversation=conversation,
+                                agent=agent,
+                                result=result,
+                                input_text=payload.content,
+                            )
+                            trace = loads(result.trace_json, [])
+                            trace.append(archive_event)
+                            result.trace_json = dumps(trace)
+                            assistant_message.trace_json = result.trace_json
+                            await db.commit()
+                            await queue.put({"type": "step", "step": archive_event})
+                        except Exception as archive_error:
+                            await db.rollback()
+                            result = await db.get(AgentRun, result.id)
+                            assistant_message = await db.get(
+                                AgentMessage, assistant_message.id
+                            )
+                            archive_event = {
+                                "type": "knowledge_archive_failed",
+                                "run_id": result.id if result else None,
+                                "message": str(archive_error),
+                            }
+                            if result is not None:
+                                trace = loads(result.trace_json, [])
+                                trace.append(archive_event)
+                                result.trace_json = dumps(trace)
+                            if assistant_message is not None and result is not None:
+                                assistant_message.trace_json = result.trace_json
+                            await db.commit()
+                            await queue.put({"type": "step", "step": archive_event})
                     await queue.put(
                         {
                             "type": "assistant",
@@ -904,6 +1416,7 @@ async def test_model_endpoint(
 @router.post("/tools/run")
 async def run_tool(payload: ToolRunRequest, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     try:
+        security = await runtime_security_service.resolve(db, payload.security_profile)
         return await tool_runtime.execute(
             db,
             payload.tool,
@@ -911,6 +1424,7 @@ async def run_tool(payload: ToolRunRequest, db: AsyncSession = Depends(get_db)) 
             run_id=payload.run_id,
             policy_id=payload.policy_id,
             permission_mode=payload.permission_mode,
+            security_context=security,
         )
     except (ValueError, PermissionError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -937,14 +1451,24 @@ async def decide_approval(
         raise HTTPException(status_code=409, detail="审批已处理")
     result: dict[str, Any] | None = None
     if payload.approved and item.action_type.startswith("tool:"):
+        stored_payload = loads(item.payload_json, {})
+        arguments = stored_payload.get("arguments", stored_payload)
+        security_data = stored_payload.get("security_context")
+        security = (
+            RuntimeSecurityContext(**security_data)
+            if isinstance(security_data, dict)
+            else await runtime_security_service.resolve(db)
+        )
         result = await tool_runtime.execute(
             db,
             item.action_type.split(":", 1)[1],
-            loads(item.payload_json, {}),
+            arguments,
             run_id=item.run_id,
             permission_mode="auto",
             preapproved=True,
+            security_context=security,
         )
+        item.execution_result_json = dumps(result)
     item.status = "approved" if payload.approved else "rejected"
     item.decided_by = payload.decided_by
     item.decided_at = datetime.now(timezone.utc)
@@ -1529,6 +2053,64 @@ async def query_knowledge(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.post("/knowledge/query/stream")
+async def stream_knowledge_query(payload: KnowledgeQueryRequest) -> StreamingResponse:
+    async def generate():
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def run_query() -> None:
+            try:
+                async with session_scope() as db:
+                    async def publish(event: dict[str, Any]) -> None:
+                        await queue.put({"type": "step", "step": event})
+
+                    result = await knowledge_service.query(
+                        db,
+                        query=payload.query,
+                        knowledge_base_ids=payload.knowledge_base_ids,
+                        knowledge_group_ids=payload.knowledge_group_ids,
+                        top_k=payload.top_k,
+                        candidate_k=payload.candidate_k,
+                        generate_answer=payload.generate_answer,
+                        on_event=publish,
+                    )
+                    await queue.put({"type": "knowledge_result", "result": result})
+            except Exception as exc:
+                message = str(exc).strip() or f"{type(exc).__name__}：知识检索异常"
+                await queue.put({"type": "error", "message": message})
+            finally:
+                await queue.put({"type": "done"})
+
+        yield f'data: {dumps({"type": "step", "step": {"type": "stream_connected"}})}\n\n'
+        task = asyncio.create_task(run_query())
+        active_knowledge_tasks.add(task)
+        task.add_done_callback(active_knowledge_tasks.discard)
+        waiting_seconds = 0
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=2)
+                waiting_seconds = 0
+            except TimeoutError:
+                waiting_seconds += 2
+                event = {
+                    "type": "step",
+                    "step": {
+                        "type": "knowledge_waiting",
+                        "elapsed_seconds": waiting_seconds,
+                    },
+                }
+            yield f"data: {dumps(event)}\n\n"
+            if event["type"] == "done":
+                break
+        await task
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/knowledge/config")
 async def get_knowledge_provider_config(
     db: AsyncSession = Depends(get_db),
@@ -1820,11 +2402,13 @@ async def workspace_mcp(
         name = str(params.get("name") or "")
         if name not in allowed_tools:
             return mcp_error(payload, -32601, "工作区 MCP 不允许此工具")
+        security = await runtime_security_service.resolve(db)
         result = await tool_runtime.execute(
             db,
             name,
             dict(params.get("arguments") or {}),
             permission_mode="auto",
+            security_context=security,
         )
         return mcp_response(
             payload,
@@ -1989,7 +2573,10 @@ async def call_extension_tool(
     item = await db.get(Extension, extension_id)
     if not item:
         raise not_found("扩展")
-    return await extension_service.call_mcp_tool(item, tool_name, arguments)
+    security = await runtime_security_service.resolve(db)
+    return await extension_service.call_mcp_tool(
+        item, tool_name, arguments, db=db, security_context=security
+    )
 
 
 @router.get("/evaluation-cases")
@@ -2004,13 +2591,122 @@ async def create_evaluation_case(
     item = EvaluationCase(
         name=payload.name,
         discipline=payload.discipline,
+        category=payload.category,
         input_text=payload.input,
         expected_keywords_json=dumps(payload.expected_keywords),
         requires_citation=payload.requires_citation,
+        weight=payload.weight,
+        enabled=payload.enabled,
     )
     db.add(item)
     await db.flush()
+    await audit(db, "evaluation_case.created", "evaluation_case", item.id)
+    await db.commit()
+    await db.refresh(item)
     return row(item)
+
+
+@router.put("/evaluation-cases/{case_id}")
+async def update_evaluation_case(
+    case_id: str,
+    payload: EvaluationCaseUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    item = await db.get(EvaluationCase, case_id)
+    if not item:
+        raise not_found("评测用例")
+    changes = payload.model_dump(exclude_unset=True)
+    field_map = {"input": "input_text", "expected_keywords": "expected_keywords_json"}
+    for key, value in changes.items():
+        target = field_map.get(key, key)
+        setattr(item, target, dumps(value) if key == "expected_keywords" else value)
+    await audit(db, "evaluation_case.updated", "evaluation_case", item.id)
+    await db.commit()
+    await db.refresh(item)
+    return row(item)
+
+
+@router.delete("/evaluation-cases/{case_id}", status_code=204)
+async def delete_evaluation_case(
+    case_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    item = await db.get(EvaluationCase, case_id)
+    if not item:
+        raise not_found("评测用例")
+    await db.delete(item)
+    await audit(db, "evaluation_case.deleted", "evaluation_case", case_id)
+    await db.commit()
+    return Response(status_code=204)
+
+
+@router.get("/evolution/overview")
+async def evolution_overview(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    return await evolution_service.overview(db)
+
+
+@router.post("/evolution/analyze-goal")
+async def analyze_evolution_goal(
+    payload: EvolutionGoalAnalyze,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    source = await db.get(AgentDefinition, payload.agent_id)
+    if not source:
+        raise not_found("Agent")
+    return await evolution_service.analyze_goal(
+        db, source, payload.goal, payload.include_run_insights
+    )
+
+
+@router.get("/evolution/lineages")
+async def evolution_lineages(
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    agents = list(
+        (
+            await db.scalars(
+                select(AgentDefinition).order_by(
+                    AgentDefinition.lineage_id, desc(AgentDefinition.version)
+                )
+            )
+        ).all()
+    )
+    grouped: dict[str, list[AgentDefinition]] = {}
+    for agent in agents:
+        grouped.setdefault(agent.lineage_id, []).append(agent)
+    return [
+        {
+            "lineage_id": lineage_id,
+            "name": versions[0].name,
+            "active_agent_id": next(
+                (item.id for item in versions if item.status == "active"), None
+            ),
+            "versions": [row(item) for item in versions],
+        }
+        for lineage_id, versions in grouped.items()
+        if len(versions) > 1
+    ]
+
+
+@router.post("/evolution/agents/{agent_id}/rollback")
+async def rollback_evolution_agent(
+    agent_id: str,
+    payload: EvolutionRollback,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    active = await db.get(AgentDefinition, agent_id)
+    target = await db.get(AgentDefinition, payload.target_agent_id)
+    if not active or not target:
+        raise not_found("Agent 版本")
+    try:
+        result = await evolution_service.rollback(
+            db, active, target, payload.reason, payload.actor
+        )
+        await db.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/evolution")
@@ -2036,7 +2732,16 @@ async def create_evolution(
         payload.reason,
         payload.proposed_prompt,
         payload.proposed_tools,
+        selected_case_ids=payload.selected_case_ids,
+        min_candidate_score=payload.min_candidate_score,
+        min_improvement=payload.min_improvement,
+        max_failure_rate=payload.max_failure_rate,
+        goal_analysis=payload.goal_analysis,
     )
+    # Commit before responding so an immediate dashboard refresh observes the
+    # new proposal instead of racing the request-scoped session finalizer.
+    await db.commit()
+    await db.refresh(item)
     return row(item)
 
 
@@ -2116,9 +2821,17 @@ async def decide_evolution(
     if not item:
         raise not_found("进化提案")
     try:
-        return row(
-            await evolution_service.decide(db, item, payload.approved, payload.decided_by)
+        result = await evolution_service.decide(
+            db,
+            item,
+            payload.approved,
+            payload.decided_by,
+            override_gate=payload.override_gate,
+            note=payload.note,
         )
+        await db.commit()
+        await db.refresh(result)
+        return row(result)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

@@ -22,7 +22,7 @@
   → 配置的大模型生成带 [资料 N] 引用的答案
 ```
 
-父子分块使细粒度子块负责准确召回、较完整父块负责生成上下文，避免固定大块遗漏关键信息或小块失去语义。SQLite 中保存归一化 float32 BLOB、模型、维度、内容哈希和来源元数据；同时保留 FTS5。该策略不依赖 Windows 原生向量扩展，适合单机桌面软件、可离线迁移和审计。查询采用 Dense + BM25 + RRF + Rerank，降低单一向量相似度对专业术语、公式和中文专名的漏召回风险。
+父子分块使细粒度子块负责准确召回、较完整父块负责生成上下文，避免固定大块遗漏关键信息或小块失去语义。连续编号列表会额外保留“完整列表父块 + 独立条目子块”结构，命中任意条目即可展开全部同级条目。SQLite 中保存归一化 float32 BLOB、模型、维度、内容哈希和来源元数据；同时保留 FTS5。该策略不依赖 Windows 原生向量扩展，适合单机桌面软件、可离线迁移和审计。查询采用 Dense + BM25 + RRF + Rerank，降低单一向量相似度对专业术语、公式和中文专名的漏召回风险。
 
 ## 2. 模型配置
 
@@ -247,12 +247,33 @@ curl -F "file=@paper.pdf" -F "relative_path=课程资料/第一章/paper.pdf" \
     "fused_candidates": 30,
     "reranked": 30,
     "rerank_model": "BAAI/bge-reranker-v2-m3",
+    "candidate_documents": 1,
+    "per_document_limit": 6,
+    "exhaustive_query": true,
+    "list_contexts": [{"list_id":"section-1-list-1","item_count":5,"document_id":"doc-id","title":"网格评价规范"}],
     "context_chars": 8660
   }
 }
 ```
 
 `generate_answer=false` 时仍完成查询改写、混合检索和 rerank，只把 `answer` 返回为空。旧接口 `POST /api/knowledge/search` 保持兼容，直接返回片段数组。
+
+### `POST /api/knowledge/query/stream`
+
+请求体与 `/api/knowledge/query` 相同，响应类型为 `text/event-stream`。事件按真实执行顺序返回：
+
+```text
+stream_connected
+scope_resolved
+query_rewrite_started → query_rewritten
+hybrid_retrieval_started → hybrid_retrieval_completed → fusion_completed
+rerank_started → rerank_completed
+context_assembled → answer_generation_started → answer_generated
+knowledge_result
+done
+```
+
+阶段事件使用 `{"type":"step","step":{...}}`，最终结果使用 `{"type":"knowledge_result","result":{...}}`。耗时超过 2 秒时会穿插 `knowledge_waiting` 心跳事件，前端可据此显示已等待时长。
 
 ## 6. 错误与安全约定
 

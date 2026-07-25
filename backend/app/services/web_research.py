@@ -52,6 +52,20 @@ class WebResearchService:
     )
 
     def should_research(self, task: str) -> bool:
+        local_path = re.search(
+            r"桌面|本地|文件夹|目录|磁盘|硬盘|工作区|文档|下载|"
+            r"[A-Za-z]:[\\/]|(?:^|\s)[.~]{1,2}[\\/]",
+            task,
+            re.I,
+        )
+        local_action = re.search(
+            r"读取|打开|查看|列出|浏览|找出|查找|搜索|写入|保存|修改|删除|执行|"
+            r"read|open|list|browse|find|search|write|save|edit|run|exec",
+            task,
+            re.I,
+        )
+        if local_path and local_action:
+            return False
         return bool(self.trigger.search(task))
 
     def research_mode(self, task: str) -> str:

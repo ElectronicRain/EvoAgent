@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy import delete, func, select, text
@@ -25,6 +26,7 @@ from .knowledge_processing import (
     estimate_tokens,
     extract_sections,
     hierarchical_chunks,
+    numbered_list_spans,
 )
 from .knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config, vector_store
 from .llm import get_provider, provider_from_endpoint
@@ -361,7 +363,12 @@ class KnowledgeService:
         top_k: int | None = None,
         candidate_k: int | None = None,
         generate_answer: bool = True,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
+        async def emit(event: dict[str, Any]) -> None:
+            if on_event:
+                await on_event(event)
+
         requested_scope = bool(knowledge_base_ids or knowledge_group_ids)
         resolved_ids = set(knowledge_base_ids)
         if knowledge_group_ids:
@@ -374,6 +381,14 @@ class KnowledgeService:
             ).all()
             resolved_ids.update(grouped_ids)
         scoped_base_ids = sorted(resolved_ids)
+        await emit(
+            {
+                "type": "scope_resolved",
+                "scope": "selected" if requested_scope else "all",
+                "knowledge_base_count": len(scoped_base_ids),
+                "knowledge_base_ids": scoped_base_ids,
+            }
+        )
         if requested_scope and not scoped_base_ids:
             return {
                 "answer": "所选知识库分组中还没有知识库或可检索资料。",
@@ -393,8 +408,24 @@ class KnowledgeService:
         config = await get_knowledge_config(db)
         final_k = max(1, min(top_k or config.top_k, 20))
         pool_k = max(final_k, min(candidate_k or config.candidate_k, 100))
+        await emit({"type": "query_rewrite_started", "query": query})
         rewrites = await self._rewrite_query(db, config, query)
+        await emit(
+            {
+                "type": "query_rewritten",
+                "queries": rewrites,
+                "query_count": len(rewrites),
+            }
+        )
         embedder = EmbeddingClient(config)
+        await emit(
+            {
+                "type": "hybrid_retrieval_started",
+                "embedding_provider": embedder.provider_name,
+                "embedding_model": embedder.model,
+                "candidate_k": pool_k,
+            }
+        )
         query_vectors = await embedder.embed(rewrites)
 
         dense_rankings: list[list[str]] = []
@@ -407,6 +438,16 @@ class KnowledgeService:
         lexical_ids, lexical_scores = await self._lexical_search(
             db, rewrites, scoped_base_ids, pool_k
         )
+        dense_candidate_count = (
+            len(set().union(*map(set, dense_rankings))) if dense_rankings else 0
+        )
+        await emit(
+            {
+                "type": "hybrid_retrieval_completed",
+                "dense_candidates": dense_candidate_count,
+                "lexical_candidates": len(lexical_ids),
+            }
+        )
 
         fused: defaultdict[str, float] = defaultdict(float)
         for ranking in [*dense_rankings, lexical_ids]:
@@ -415,6 +456,13 @@ class KnowledgeService:
         candidate_ids = [
             chunk_id for chunk_id, _ in sorted(fused.items(), key=lambda item: item[1], reverse=True)[:pool_k]
         ]
+        await emit(
+            {
+                "type": "fusion_completed",
+                "fused_candidates": len(candidate_ids),
+                "method": "RRF",
+            }
+        )
         if not candidate_ids:
             return {
                 "answer": "知识库中没有检索到与问题相关的内容。",
@@ -435,6 +483,13 @@ class KnowledgeService:
         by_id = {item.id: item for item in models}
         ordered = [by_id[item] for item in candidate_ids if item in by_id]
         rerank_error = ""
+        await emit(
+            {
+                "type": "rerank_started",
+                "candidate_count": len(ordered),
+                "model": config.rerank_model,
+            }
+        )
         try:
             reranked = await RerankClient(config).rerank(
                 query, [item.content for item in ordered], min(pool_k, len(ordered))
@@ -442,23 +497,84 @@ class KnowledgeService:
         except RuntimeError as exc:
             rerank_error = str(exc)
             reranked = [(index, fused[item.id]) for index, item in enumerate(ordered)]
-        selected = self._select_diverse(ordered, reranked, final_k)
+        candidate_document_count = len({item.document_id for item in ordered})
+        exhaustive_query = bool(
+            re.search(
+                r"全部|完整|所有|逐条|分别|列出|几点|哪几|几项|包括哪些|有哪些|要点|步骤|方面|"
+                r"\d+\s*[点项条个]|[一二三四五六七八九十]+\s*[点项条个]",
+                query,
+            )
+        )
+        per_document_limit = (
+            final_k if exhaustive_query or candidate_document_count <= 1 else min(3, final_k)
+        )
+        selected = self._select_diverse(
+            ordered,
+            reranked,
+            final_k,
+            per_document_limit=per_document_limit,
+        )
+        await emit(
+            {
+                "type": "rerank_completed",
+                "reranked": len(reranked),
+                "selected": len(selected),
+                "fallback": bool(rerank_error),
+                "message": rerank_error,
+            }
+        )
         parent_ids = {item.parent_chunk_id for item, _score in selected if item.parent_chunk_id}
         parents = (
             await db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.id.in_(parent_ids)))
         ).all() if parent_ids else []
         parent_by_id = {item.id: item for item in parents}
+        expanded_lists = (
+            await self._expanded_numbered_list_contexts(db, query, selected)
+            if exhaustive_query
+            else {}
+        )
 
         chunks: list[dict[str, Any]] = []
         citations: list[dict[str, Any]] = []
-        for number, (item, rerank_score) in enumerate(selected, 1):
+        list_contexts: dict[str, dict[str, Any]] = {}
+        seen_expanded_lists: set[str] = set()
+        for item, rerank_score in selected:
             parent = parent_by_id.get(item.parent_chunk_id or "")
-            context_content = parent.content if parent else item.content
             metadata = loads(item.metadata_json, {})
+            context_source_id = parent.id if parent else item.id
+            expanded = expanded_lists.get(context_source_id) or expanded_lists.get(
+                f"document:{item.document_id}"
+            )
+            if expanded and expanded["id"] in seen_expanded_lists:
+                continue
+            if expanded:
+                seen_expanded_lists.add(expanded["id"])
+                context_content = expanded["content"]
+                metadata = {
+                    **metadata,
+                    "structure": "numbered_list",
+                    "list_id": expanded["id"],
+                    "list_item_count": expanded["item_count"],
+                    "locator": expanded["locator"],
+                    "locators": expanded["locators"],
+                    "expanded_list_context": True,
+                    "cross_section_continuation": len(expanded["locators"]) > 1,
+                }
+                visible_content = context_content
+            else:
+                context_content = parent.content if parent else item.content
+                visible_content = item.content
+            if metadata.get("list_id"):
+                list_contexts[str(metadata["list_id"])] = {
+                    "list_id": metadata["list_id"],
+                    "item_count": int(metadata.get("list_item_count") or 0),
+                    "document_id": item.document_id,
+                    "title": item.title,
+                }
             chunk_row = {
                 "id": item.id,
                 "title": item.title,
-                "content": item.content,
+                "content": visible_content,
                 "context": context_content,
                 "citation": item.citation,
                 "knowledge_base_id": item.knowledge_base_id,
@@ -469,6 +585,7 @@ class KnowledgeService:
                 "metadata": metadata,
             }
             chunks.append(chunk_row)
+            number = len(chunks)
             citations.append(
                 {
                     "number": number,
@@ -481,7 +598,25 @@ class KnowledgeService:
                 }
             )
         context = self._assemble_context(chunks, config.context_char_budget)
+        await emit(
+            {
+                "type": "context_assembled",
+                "context_chars": len(context),
+                "citation_count": len(citations),
+                "numbered_lists": len(list_contexts),
+                "numbered_list_items": sum(item["item_count"] for item in list_contexts.values()),
+            }
+        )
+        if generate_answer:
+            await emit({"type": "answer_generation_started"})
         answer = await self._generate_answer(db, config, query, context) if generate_answer else ""
+        await emit(
+            {
+                "type": "answer_generated",
+                "answer_chars": len(answer),
+                "citation_count": len(citations),
+            }
+        )
         return {
             "answer": answer,
             "query": query,
@@ -491,12 +626,16 @@ class KnowledgeService:
             "trace": {
                 "embedding_provider": embedder.provider_name,
                 "embedding_model": embedder.model,
-                "dense_candidates": len(set().union(*map(set, dense_rankings))) if dense_rankings else 0,
+                "dense_candidates": dense_candidate_count,
                 "lexical_candidates": len(lexical_ids),
                 "fused_candidates": len(candidate_ids),
                 "reranked": len(reranked),
                 "rerank_model": config.rerank_model,
                 "rerank_error": rerank_error,
+                "candidate_documents": candidate_document_count,
+                "per_document_limit": per_document_limit,
+                "exhaustive_query": exhaustive_query,
+                "list_contexts": list(list_contexts.values()),
                 "context_chars": len(context),
                 "scope": "selected" if requested_scope else "all",
                 "knowledge_base_ids": scoped_base_ids,
@@ -586,21 +725,143 @@ class KnowledgeService:
         ordered = sorted(best, key=lambda chunk_id: best[chunk_id], reverse=True)[:limit]
         return ordered, best
 
+    async def _expanded_numbered_list_contexts(
+        self,
+        db: AsyncSession,
+        query: str,
+        selected: list[tuple[KnowledgeChunk, float]],
+    ) -> dict[str, dict[str, Any]]:
+        """Find the complete numbered-list span around selected chunks, including the next page."""
+
+        selected_context_ids = {
+            item.parent_chunk_id or item.id
+            for item, _score in selected
+        }
+        selected_document_ids = {item.document_id for item, _score in selected}
+        if not selected_context_ids or not selected_document_ids:
+            return {}
+        parent_rows = (
+            await db.scalars(
+                select(KnowledgeChunk)
+                .where(
+                    KnowledgeChunk.document_id.in_(selected_document_ids),
+                    KnowledgeChunk.level == "parent",
+                )
+                .order_by(KnowledgeChunk.document_id, KnowledgeChunk.chunk_index)
+            )
+        ).all()
+        by_document: defaultdict[str, list[KnowledgeChunk]] = defaultdict(list)
+        for row in parent_rows:
+            by_document[row.document_id].append(row)
+
+        query_features = _lexical_features(query)
+        query_anchor = re.split(
+            r"有哪|包含哪|包括哪|有几|哪[一二三四五六七八九十\d]+[点项条个]?|"
+            r"[一二三四五六七八九十\d]+[点项条个]|请|完整|全部|列出|分别",
+            query,
+            maxsplit=1,
+        )[0].strip(" ，。！？：:、")
+        expansions: dict[str, dict[str, Any]] = {}
+        for document_id, document_parents in by_document.items():
+            sections = []
+            for parent in document_parents:
+                metadata = loads(parent.metadata_json, {})
+                sections.append(
+                    ExtractedSection(
+                        parent.content,
+                        str(metadata.get("heading") or ""),
+                        str(metadata.get("locator") or ""),
+                        metadata,
+                    )
+                )
+            best_match: tuple[float, Any, list[KnowledgeChunk]] | None = None
+            for span in numbered_list_spans(sections):
+                span_parents = document_parents[
+                    span.start_section_index : span.end_section_index + 1
+                ]
+                selected_overlap = sum(
+                    parent.id in selected_context_ids
+                    for parent in span_parents
+                )
+                span_features = _lexical_features(span.content)
+                if query_features and not (query_features & span_features):
+                    continue
+                lexical_coverage = len(query_features & span_features) / max(1, len(query_features))
+                heading_match = False
+                anchor_position_bonus = 0.0
+                if len(query_anchor) >= 2:
+                    anchor_position = span.intro.find(query_anchor)
+                    if anchor_position >= 0:
+                        anchor_position_bonus = 3 / (1 + anchor_position / 20)
+                    heading_match = any(
+                        re.match(
+                            rf"^(?:\d{{1,3}}[、.．)]\s*)?{re.escape(query_anchor)}"
+                            rf"(?:\s|[(（:：]|$)",
+                            line.strip(),
+                        )
+                        is not None
+                        for line in span.intro.splitlines()
+                    )
+                # Selection overlap keeps this local to retrieved evidence; lexical
+                # coverage chooses the relevant list when a page contains several.
+                score = (
+                    lexical_coverage * 10
+                    + selected_overlap * 0.25
+                    + anchor_position_bonus
+                    + (5 if heading_match else 0)
+                    + min(len(span.items), 20) / 100
+                )
+                if best_match is None or score > best_match[0]:
+                    best_match = (score, span, span_parents)
+            if best_match is None:
+                continue
+            score, span, span_parents = best_match
+            if score <= 1:
+                continue
+            expansion_id = hashlib.sha256(
+                f"{document_id}:{span.content}".encode("utf-8")
+            ).hexdigest()[:20]
+            expansion = {
+                "id": f"expanded-list-{expansion_id}",
+                "content": span.content,
+                "item_count": len(span.items),
+                "locators": span.locators,
+                "locator": " – ".join(span.locators),
+            }
+            for parent in span_parents:
+                expansions[parent.id] = expansion
+            # Old indexes may have attached the section heading to a previous list
+            # item, so no child from this exact span reaches top-k. Once a document
+            # is relevant, expose its best matching list as a document-level fallback.
+            expansions[f"document:{document_id}"] = expansion
+        return expansions
+
     @staticmethod
     def _select_diverse(
-        chunks: list[KnowledgeChunk], reranked: list[tuple[int, float]], top_k: int
+        chunks: list[KnowledgeChunk],
+        reranked: list[tuple[int, float]],
+        top_k: int,
+        *,
+        per_document_limit: int = 3,
     ) -> list[tuple[KnowledgeChunk, float]]:
         selected: list[tuple[KnowledgeChunk, float]] = []
         per_document: defaultdict[str, int] = defaultdict(int)
         seen_hashes: set[str] = set()
+        seen_contexts: set[str] = set()
         for index, score in reranked:
             if index < 0 or index >= len(chunks):
                 continue
             chunk = chunks[index]
-            if chunk.content_hash in seen_hashes or per_document[chunk.document_id] >= 3:
+            context_key = chunk.parent_chunk_id or chunk.id
+            if (
+                chunk.content_hash in seen_hashes
+                or context_key in seen_contexts
+                or per_document[chunk.document_id] >= per_document_limit
+            ):
                 continue
             selected.append((chunk, score))
             seen_hashes.add(chunk.content_hash)
+            seen_contexts.add(context_key)
             per_document[chunk.document_id] += 1
             if len(selected) >= top_k:
                 break
@@ -632,7 +893,9 @@ class KnowledgeService:
             return "知识库中没有检索到足以回答该问题的资料。"
         system = (
             "你是 EvoAgent 的知识库问答助手。只能依据给定资料作答；无法从资料确认时要明确说明。"
-            "关键陈述后使用 [资料 N] 标注来源，不得编造引用。先直接回答，再给必要说明。\n\n"
+            "关键陈述后使用 [资料 N] 标注来源，不得编造引用。先直接回答，再给必要说明。"
+            "如果资料包含编号列表，且问题要求列出全部、若干点、步骤、方面或要点，必须保留原顺序并完整列出"
+            "上下文中出现的每一项，不得为了简洁只保留前三项；若资料明显不完整，必须说明当前仅检索到的范围。\n\n"
             f"检索资料：\n{context}"
         )
         endpoint = await db.get(ModelEndpoint, config.llm_endpoint_id) if config.llm_endpoint_id else None

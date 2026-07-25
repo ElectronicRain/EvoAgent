@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { API_ORIGIN } from '../services/api'
 
 export const useAppStore = defineStore('app', {
   state: () => ({
@@ -14,7 +15,7 @@ export const useAppStore = defineStore('app', {
     },
     async checkBackend(): Promise<boolean> {
       try {
-        const response = await fetch('http://127.0.0.1:8000/health')
+        const response = await fetch(`${API_ORIGIN}/health`)
         this.backendOnline = response.ok
       } catch { this.backendOnline = false }
       return this.backendOnline

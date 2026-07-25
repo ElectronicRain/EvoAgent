@@ -1,4 +1,11 @@
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000/api'
+export const API_ORIGIN = API_BASE.replace(/\/api\/?$/, '')
+const AUTH_TOKEN_KEY = 'evoagent-auth-token'
+
+function attachAuth(headers: Headers) {
+  const token = window.localStorage.getItem(AUTH_TOKEN_KEY)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -30,6 +37,7 @@ function errorMessage(detail: unknown, status: number): string {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
+  attachAuth(headers)
   let response: Response | undefined
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -56,9 +64,11 @@ async function stream(
   data: unknown,
   onEvent: (event: any) => void,
 ): Promise<void> {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  attachAuth(headers)
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(data),
   })
   if (!response.ok || !response.body) {
@@ -88,9 +98,11 @@ async function stream(
 }
 
 async function blob(path: string, data: unknown): Promise<Blob> {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  attachAuth(headers)
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(data),
   })
   if (!response.ok) {
