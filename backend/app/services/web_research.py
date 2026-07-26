@@ -71,6 +71,18 @@ class WebResearchService:
     def research_mode(self, task: str) -> str:
         return "academic" if self.academic_trigger.search(task) else "web"
 
+    def requested_source_count(self, task: str) -> int:
+        """Return a bounded, user-requested evidence count for research tasks."""
+        patterns = (
+            r"(?:至少|不少于|约|大约|检索|搜寻|纳入|包含|覆盖)?\s*(\d{1,3})\s*(?:篇|条)\s*(?:文献|论文|资料)?",
+            r"(\d{1,3})\s*(?:papers?|articles?|references?|studies)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, task, re.I)
+            if match:
+                return max(5, min(int(match.group(1)), 80))
+        return 12
+
     def institution_name(self, task: str) -> str | None:
         match = re.search(r"([\u4e00-\u9fff]{2,24}(?:大学|学院))", task)
         if not match:
@@ -149,13 +161,14 @@ class WebResearchService:
     async def collect(self, task: str, on_event: EventHandler) -> list[dict[str, Any]]:
         mode = self.research_mode(task)
         queries = self.query_variants(task)
+        target_sources = self.requested_source_count(task) if mode == "academic" else 12
         await on_event(
             {
                 "type": "research_planning",
                 "queries": queries,
                 "strategy": "comprehensive",
                 "mode": mode,
-                "target_sources": 12,
+                "target_sources": target_sources,
             }
         )
         candidates: list[dict[str, Any]] = []
@@ -182,7 +195,7 @@ class WebResearchService:
                         "scholar_url": search_url if mode == "academic" else None,
                     }
                 )
-                results = await self._search(client, query, mode)
+                results = await self._search(client, query, mode, target_sources)
                 relevant = self._rank_results(task, results)
                 await on_event(
                     {
@@ -205,7 +218,7 @@ class WebResearchService:
                 )
                 candidates.extend(relevant)
 
-            sources = self._rank_results(task, candidates)[:12]
+            sources = self._rank_results(task, candidates)[:target_sources]
             await on_event(
                 {
                     "type": "research_sources_selected",
@@ -234,7 +247,8 @@ class WebResearchService:
                 return index, {**source, "content": content[:6000], "status": status}
 
             fetch_tasks = []
-            for index, source in enumerate(sources[:10], 1):
+            fetch_limit = min(len(sources), 20 if mode == "academic" else 10)
+            for index, source in enumerate(sources[:fetch_limit], 1):
                 await on_event(
                     {
                         "type": "web_fetch_started",
@@ -263,7 +277,18 @@ class WebResearchService:
                         "content_excerpt": item["content"][:900],
                     }
                 )
-            enriched = [enriched_by_index[index] for index in sorted(enriched_by_index)]
+            enriched = []
+            for index, source in enumerate(sources, 1):
+                enriched.append(
+                    enriched_by_index.get(
+                        index,
+                        {
+                            **source,
+                            "content": source.get("description", ""),
+                            "status": "metadata-only",
+                        },
+                    )
+                )
         return enriched
 
     def _rank_results(
@@ -339,12 +364,12 @@ class WebResearchService:
         return sorted(ranked.values(), key=lambda item: item.get("relevance", 0), reverse=True)
 
     async def _search(
-        self, client: httpx.AsyncClient, query: str, mode: str
+        self, client: httpx.AsyncClient, query: str, mode: str, target_sources: int = 12
     ) -> list[dict[str, Any]]:
         if mode == "academic":
             tasks = [
                 self._search_google_scholar(client, query),
-                self._search_crossref(client, query),
+                self._search_crossref(client, query, rows=max(12, target_sources)),
             ]
         else:
             tasks = [
@@ -554,13 +579,13 @@ class WebResearchService:
         return items
 
     async def _search_crossref(
-        self, client: httpx.AsyncClient, query: str
+        self, client: httpx.AsyncClient, query: str, rows: int = 12
     ) -> list[dict[str, Any]]:
         response = await client.get(
             "https://api.crossref.org/works",
             params={
                 "query.bibliographic": query,
-                "rows": 12,
+                "rows": max(5, min(int(rows), 80)),
                 "sort": "relevance",
                 "select": (
                     "DOI,title,URL,abstract,published,type,publisher,container-title,"
@@ -715,13 +740,15 @@ class WebResearchService:
                 if item.get("scholar_url")
                 else ""
             )
+            content_limit = 2200 if index <= 12 else 700
             blocks.append(
                 f"[{index}] {item['title']}\nURL: {item['url']}\n"
                 f"{scholar_line}"
                 f"来源: {item.get('source', 'Web')}\n"
                 f"可信度: {(item.get('credibility') or {}).get('level', '待核验')} "
                 f"{(item.get('credibility') or {}).get('score', 0)}/100\n"
-                f"内容: {content[:2500]}"
+                f"可用层级: {item.get('status', 'metadata-only')}\n"
+                f"内容: {content[:content_limit]}"
             )
         return "【网络研究资料】\n" + "\n\n".join(blocks)
 

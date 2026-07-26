@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
+from docx import Document
 
 
 def test_openai_compatible_provider_retries_v1_after_root_404(monkeypatch):
@@ -1559,6 +1561,22 @@ def test_professional_workflow_branches_loops_and_persists_artifacts(client):
     assert len(artifacts) == 4
     assert {item["iteration"] for item in artifacts} == {1, 2}
     assert all(item["run_id"] == run["id"] for item in artifacts)
+    assert all('{"result"' not in item["content"] for item in artifacts)
+
+    artifact_export = client.post(
+        f"/api/workflow-artifacts/{artifacts[-1]['id']}/export/docx", json={}
+    )
+    assert artifact_export.status_code == 200
+    assert artifact_export.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "filename*=UTF-8''" in artifact_export.headers["content-disposition"]
+    artifact_document = Document(BytesIO(artifact_export.content))
+    assert any("结果" in paragraph.text for paragraph in artifact_document.paragraphs)
+
+    run_export = client.post(f"/api/workflow-runs/{run['id']}/export/docx", json={})
+    assert run_export.status_code == 200
+    assert run_export.content.startswith(b"PK")
 
 
 def test_workflow_expert_builds_editable_executable_draft(client):
@@ -1637,9 +1655,41 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
     assert materialized.status_code == 200
     result = materialized.json()
     created = result["created_agents"]
+    enabled_skill_ids = {
+        item["id"] for item in client.get("/api/skills").json() if item["enabled"]
+    }
+    enabled_mcp_ids = {
+        item["id"]
+        for item in client.get("/api/extensions").json()
+        if item["enabled"] and item["kind"] == "mcp"
+    }
     assert len(created) == len(draft_keys)
     assert all(item["status"] == "candidate" for item in created)
-    assert all("exec" in json.loads(item["tools_json"]) for item in created)
+    assert all(
+        {"exec", "call_agent", "web_research", "read_file", "write_file"}.issubset(
+            set(json.loads(item["tools_json"]))
+        )
+        for item in created
+    )
+    assert all(
+        enabled_skill_ids.issubset(set(json.loads(item["skills_json"])))
+        for item in created
+    )
+    assert all(
+        enabled_mcp_ids.issubset(
+            set(json.loads(item["permissions_json"])["mcp_extensions"])
+        )
+        for item in created
+    )
+    assert all(
+        json.loads(item["permissions_json"])["mcp"]
+        and json.loads(item["permissions_json"])["skills"]
+        for item in created
+    )
+    assert all(
+        json.loads(item["generation_config_json"])["max_output_tokens"] >= 8192
+        for item in created
+    )
     assert all(json.loads(item["generation_config_json"]) for item in created)
     assert not result["agent_drafts"]
     assert all(

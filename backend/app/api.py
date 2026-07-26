@@ -89,6 +89,7 @@ from .schemas import (
     UserProfileUpdate,
     UserRegister,
     UserReplyStyleUpdate,
+    WorkflowClarificationRequest,
     WorkflowCreate,
     WorkflowExpertChatRequest,
     WorkflowExpertMaterializeRequest,
@@ -103,6 +104,7 @@ from .services.knowledge import knowledge_service
 from .services.knowledge_processing import extract_sections
 from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
+from .services.workflow_clarification import workflow_clarification_service
 from .services.llm import (
     OpenAICompatibleImageProvider,
     OpenAICompatibleProvider,
@@ -122,6 +124,12 @@ from .services.security import RuntimeSecurityContext, runtime_security_service
 from .services.teaching import teaching_service
 from .services.tools import tool_runtime
 from .services.users import REPLY_STYLES, user_service
+from .services.document_exports import (
+    content_disposition,
+    markdown_to_docx,
+    output_to_markdown,
+    safe_docx_filename,
+)
 from .services.workflows import workflow_engine
 from .services.workflow_expert import workflow_expert
 
@@ -1248,6 +1256,23 @@ async def list_workflows(db: AsyncSession = Depends(get_db)) -> list[dict[str, A
     return [row(item) for item in items]
 
 
+@router.post("/workflow-clarification")
+async def clarify_workflow_requirements(
+    payload: WorkflowClarificationRequest,
+) -> dict[str, Any]:
+    context = {
+        "workflow_name": payload.workflow_name,
+        "workflow_description": payload.workflow_description,
+        "definition": payload.definition,
+    }
+    if not payload.confirmed:
+        return workflow_clarification_service.analyze(payload.task, **context)
+    try:
+        return workflow_clarification_service.resolve(payload.task, payload.answers, **context)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/workflows", status_code=201)
 async def create_workflow(
     payload: WorkflowCreate, db: AsyncSession = Depends(get_db)
@@ -1466,6 +1491,41 @@ async def list_workflow_artifacts(
         )
     ).all()
     return [row(item) for item in items]
+
+
+@router.post("/workflow-artifacts/{artifact_id}/export/docx")
+async def export_workflow_artifact_docx(
+    artifact_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    artifact = await db.get(WorkflowArtifact, artifact_id)
+    if artifact is None:
+        raise not_found("工作流产出文档")
+    filename = safe_docx_filename(artifact.title)
+    return Response(
+        content=markdown_to_docx(artifact.title, artifact.content),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": content_disposition(filename)},
+    )
+
+
+@router.post("/workflow-runs/{run_id}/export/docx")
+async def export_workflow_run_docx(
+    run_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    run = await db.get(WorkflowRun, run_id)
+    if run is None:
+        raise not_found("工作流运行")
+    workflow = await db.get(Workflow, run.workflow_id)
+    title = f"{workflow.name if workflow else '工作流'}-最终成果"
+    # Run exports are clean deliverables: omit workflow metadata, task wrappers,
+    # iteration labels, and other orchestration details stored in artifacts.
+    markdown = output_to_markdown(run.output_json)
+    filename = safe_docx_filename(title)
+    return Response(
+        content=markdown_to_docx(title, markdown),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": content_disposition(filename)},
+    )
 
 
 @router.get("/workflow-runs")

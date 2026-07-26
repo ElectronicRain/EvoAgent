@@ -456,6 +456,7 @@ class AgentEngine:
         execution: ExecutionContext | None = None,
         conversation_messages: list[dict[str, str]] | None = None,
         on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        max_output_tokens: int | None = None,
     ) -> AgentRun:
         execution = execution or ExecutionContext()
         if user_context:
@@ -534,6 +535,9 @@ class AgentEngine:
                 db, permissions
             )
             generation_config = self.generation_config(agent)
+            effective_max_output_tokens = generation_config.max_output_tokens
+            if max_output_tokens is not None:
+                effective_max_output_tokens = max(128, min(int(max_output_tokens), 32768))
             image_endpoint = await self._image_endpoint(db, agent)
             math_query = self.is_math_query(input_text)
 
@@ -683,7 +687,7 @@ class AgentEngine:
                     temperature=agent.temperature,
                     tools=schemas or None,
                     top_p=generation_config.top_p,
-                    max_output_tokens=generation_config.max_output_tokens,
+                    max_output_tokens=effective_max_output_tokens,
                 )
                 total_tokens += response.tokens
                 await emit(
@@ -773,7 +777,7 @@ class AgentEngine:
                     temperature=min(agent.temperature, 0.3),
                     tools=None,
                     top_p=generation_config.top_p,
-                    max_output_tokens=generation_config.max_output_tokens,
+                    max_output_tokens=effective_max_output_tokens,
                 )
                 total_tokens += recovery.tokens
                 final_content = recovery.content.strip()
@@ -835,7 +839,7 @@ class AgentEngine:
                         model=model_name,
                         temperature=min(agent.temperature, 0.2),
                         top_p=generation_config.top_p,
-                        max_output_tokens=generation_config.max_output_tokens,
+                        max_output_tokens=effective_max_output_tokens,
                     )
                     total_tokens += repair.tokens
                     if repair.content.strip():
@@ -883,6 +887,7 @@ class AgentEngine:
                         ],
                         model=model_name,
                         temperature=min(agent.temperature, 0.4),
+                        max_output_tokens=effective_max_output_tokens,
                     )
                     total_tokens += review.tokens
                     if review.content.strip():

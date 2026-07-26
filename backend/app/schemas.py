@@ -260,6 +260,15 @@ class WorkflowCreate(BaseModel):
     definition: dict[str, Any] = Field(default_factory=lambda: {"nodes": [], "edges": []})
 
 
+class WorkflowClarificationRequest(BaseModel):
+    task: str = Field(min_length=1, max_length=20_000)
+    workflow_name: str = Field(default="", max_length=120)
+    workflow_description: str = Field(default="", max_length=4000)
+    definition: dict[str, Any] = Field(default_factory=dict)
+    answers: dict[str, Any] = Field(default_factory=dict)
+    confirmed: bool = False
+
+
 class WorkflowRunRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     loop_enabled: bool | None = None

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
-  Activity, Bot, Box, Braces, ChevronDown, ChevronRight, CircleStop, Code2, Database,
+  Activity, Bot, Box, Braces, ChevronDown, ChevronRight, CircleStop, Code2, Database, Download,
   Check, FileText, GitBranch, GitMerge,
   GripVertical, Library, Maximize2, Minimize2, Minus, MousePointer2,
   Pause, RotateCw, Send, Sparkles, Square,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Play, Plus, Save, Search, Settings2, ShieldCheck, Trash2, Workflow, X, ZoomIn,
+  CircleHelp, Languages, ListChecks,
 } from 'lucide-vue-next'
+import FloatingPanel from '../components/FloatingPanel.vue'
 import PageHeader from '../components/PageHeader.vue'
+import RichAgentMessage from '../components/RichAgentMessage.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import WorkflowExpertWindow from '../components/WorkflowExpertWindow.vue'
 import { api, type Entity } from '../services/api'
@@ -52,6 +55,30 @@ type RunTimelineItem = {
   tone: 'info' | 'success' | 'warning' | 'error'
   elapsed: number
 }
+type ClarificationOption = { value: string; label: string; description?: string }
+type ClarificationQuestion = {
+  id: string
+  label: string
+  question: string
+  type: 'single_choice' | 'number' | 'text'
+  required: boolean
+  default?: string | number
+  options?: ClarificationOption[]
+  placeholder?: string
+  min?: number
+  max?: number
+  suffix?: string
+}
+type ClarificationResult = {
+  required: boolean
+  confirmed?: boolean
+  task_type: string
+  task_type_label: string
+  summary: string
+  questions: ClarificationQuestion[]
+  original_task: string
+  resolved_task: string
+}
 
 const store = useAppStore()
 const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), knowledgeBases = ref<Entity[]>([]), tools = ref<Entity[]>([]), runs = ref<Entity[]>([]), approvalPolicies = ref<Entity[]>([])
@@ -65,6 +92,7 @@ const nodeWidth = 168, nodeHeight = 82
 const baseCanvasWidth = 1600, baseCanvasHeight = 900, canvasGutter = 900
 const zoom = ref(1), workflowRunning = ref(false), workflowRunStatus = ref('idle')
 const currentRunId = ref(''), runPaused = ref(false), runGuidance = ref(''), runArtifacts = ref<Entity[]>([])
+const exportingDocumentId = ref('')
 const pendingApprovals = ref<Entity[]>([]), decidingApprovalId = ref('')
 const runSecurityProfile = ref('default'), runPermissionMode = ref('inherit'), runApprovalPolicyId = ref('')
 const nodeRunStates = ref<Record<string, NodeRunState>>({})
@@ -79,6 +107,10 @@ const RUN_STATE_KEY = 'evoagent-workflow-run-state-v2'
 const resourceTab = ref<'agents' | 'knowledge' | 'components'>('agents')
 const paletteCollapsed = ref(false), inspectorCollapsed = ref(false), runCollapsed = ref(true), fullScreen = ref(false)
 const expertOpen = ref(false)
+const clarificationOpen = ref(false), clarificationChecking = ref(false), clarificationSubmitting = ref(false)
+const clarificationResult = ref<ClarificationResult | null>(null)
+const clarificationAnswers = ref<Record<string, any>>({})
+const clarificationOriginalTask = ref('')
 const movingNodeId = ref('')
 const canvasPan = reactive({ active: false, pointerId: -1, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 })
 const paletteDrag = reactive({ item: null as Entity | null, kind: 'agent' as 'agent' | 'knowledge' | 'component', active: false, startX: 0, startY: 0, x: 0, y: 0 })
@@ -104,6 +136,18 @@ const runProgress = computed(() => {
     return total
   }, 0)
   return Math.min(100, Math.round((value / nodes.value.length) * 100))
+})
+const clarificationComplete = computed(() => {
+  const questions = clarificationResult.value?.questions || []
+  return questions.every(question => {
+    const value = clarificationAnswers.value[question.id]
+    if (question.required && (value === undefined || value === null || String(value).trim() === '')) return false
+    if (question.type !== 'number' || value === undefined || value === null || value === '') return true
+    const numeric = Number(value)
+    return Number.isFinite(numeric)
+      && (question.min === undefined || numeric >= question.min)
+      && (question.max === undefined || numeric <= question.max)
+  })
 })
 const canvasSize = computed(() => ({
   width: Math.max(
@@ -241,6 +285,78 @@ function applyStoredRunState(state: Entity) {
 function parseJson(value: unknown, fallback: any) {
   try { return typeof value === 'string' ? JSON.parse(value) : (value ?? fallback) }
   catch { return fallback }
+}
+
+function workflowOutputMarkdown(value: unknown): string {
+  let current = value
+  for (let attempt = 0; attempt < 3 && typeof current === 'string'; attempt += 1) {
+    const source = current.trim()
+    if (!source || !['{', '[', '"'].includes(source[0])) return current
+    try { current = JSON.parse(source) }
+    catch { return source }
+  }
+  if (typeof current === 'string') return current
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>
+    for (const key of ['result', 'output', 'content', 'answer', 'markdown', 'text', 'document']) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim()) return workflowOutputMarkdown(candidate)
+    }
+    const sections = Object.entries(record)
+      .filter(([, item]) => typeof item === 'string' && item.trim())
+      .map(([key, item]) => `## ${key}\n\n${item}`)
+    if (sections.length) return sections.join('\n\n')
+  }
+  return `\`\`\`json\n${JSON.stringify(current, null, 2)}\n\`\`\``
+}
+
+function documentFilename(value: string) {
+  const stem = String(value || '工作流成果').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim()
+  return `${stem || '工作流成果'}.docx`
+}
+
+function saveDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function downloadWorkflowWord() {
+  if (!currentRunId.value || exportingDocumentId.value) return
+  exportingDocumentId.value = 'run'
+  try {
+    const blob = await api.blob(`/workflow-runs/${currentRunId.value}/export/docx`, {})
+    saveDownload(blob, documentFilename(`${currentWorkflow.value?.name || '工作流'}-最终成果`))
+    store.notify('Word 文档已生成并开始下载')
+  } catch (error: any) {
+    store.notify(error.message || 'Word 文档生成失败', 'error')
+  } finally {
+    exportingDocumentId.value = ''
+  }
+}
+
+async function downloadArtifactWord(artifact: Entity) {
+  if (!artifact?.id || exportingDocumentId.value) return
+  exportingDocumentId.value = artifact.id
+  try {
+    const blob = await api.blob(`/workflow-artifacts/${artifact.id}/export/docx`, {})
+    saveDownload(blob, documentFilename(artifact.title))
+    store.notify('Word 文档已生成并开始下载')
+  } catch (error: any) {
+    store.notify(error.message || 'Word 文档生成失败', 'error')
+  } finally {
+    exportingDocumentId.value = ''
+  }
+}
+
+function previewArtifact(artifact: Entity) {
+  output.value = String(artifact.content || '')
+  runPanelTab.value = 'result'
 }
 
 function elapsedSeconds() {
@@ -539,8 +655,7 @@ function hydrateRunRecord(run: Entity, includeTraceTimeline = false) {
   }
   if (!workflowRunning.value) {
     if (run.status === 'completed') {
-      const finalOutput = parseJson(run.output_json, run.output_json || '')
-      output.value = typeof finalOutput === 'string' ? finalOutput : JSON.stringify(finalOutput, null, 2)
+      output.value = workflowOutputMarkdown(run.output_json || '')
       runPanelTab.value = 'result'
     } else if (run.error) output.value = run.error
   }
@@ -781,7 +896,7 @@ function addAgentAt(agent: Entity, point: { x: number; y: number }) {
     id,
     type: 'agent',
     label: agent.name,
-    config: { agent_id: agent.id, input: '{{input.task}}', auto_input: true, retry_count: 1 },
+    config: { agent_id: agent.id, input: '{{input.task}}', prompt: '', auto_input: true, retry_count: 1, max_output_tokens: 8192 },
     position: {
       x: Math.max(8, point.x - nodeWidth / 2),
       y: Math.max(8, point.y - nodeHeight / 2),
@@ -1290,11 +1405,69 @@ async function saveWorkflow() {
   finally { store.loading(false) }
 }
 
-async function runWorkflow() {
+function clarificationPayload(confirmed = false) {
+  return {
+    task: clarificationOriginalTask.value || task.value.trim(),
+    workflow_name: workflowForm.name,
+    workflow_description: workflowForm.description,
+    definition: buildDefinition(),
+    answers: confirmed ? clarificationAnswers.value : {},
+    confirmed,
+  }
+}
+
+async function inspectWorkflowRequirements() {
+  clarificationChecking.value = true
+  clarificationOriginalTask.value = task.value.trim()
+  try {
+    const result = await api.post<ClarificationResult>('/workflow-clarification', clarificationPayload(false))
+    if (!result.required || !result.questions.length) return true
+    clarificationResult.value = result
+    clarificationAnswers.value = Object.fromEntries(
+      result.questions.map(question => [question.id, question.default ?? '']),
+    )
+    clarificationOpen.value = true
+    return false
+  } catch (error: any) {
+    store.notify(error.message || '暂时无法分析任务完整度，请重试', 'error')
+    return false
+  } finally {
+    clarificationChecking.value = false
+  }
+}
+
+function closeClarification() {
+  if (clarificationSubmitting.value) return
+  clarificationOpen.value = false
+}
+
+async function confirmClarification() {
+  if (!clarificationComplete.value) {
+    store.notify('请补全所有必填要求，并检查数字范围', 'error')
+    return
+  }
+  clarificationSubmitting.value = true
+  try {
+    const result = await api.post<ClarificationResult>('/workflow-clarification', clarificationPayload(true))
+    task.value = result.resolved_task
+    clarificationOpen.value = false
+    store.notify('需求已确认，正在按明确要求启动工作流')
+    await nextTick()
+    await runWorkflow(true)
+  } catch (error: any) {
+    store.notify(error.message || '需求确认失败，请检查后重试', 'error')
+  } finally {
+    clarificationSubmitting.value = false
+  }
+}
+
+async function runWorkflow(skipClarification = false) {
   if (workflowRunning.value) return
+  if (clarificationChecking.value || (clarificationSubmitting.value && !skipClarification)) return
   if (!task.value.trim()) return store.notify('请先填写本次工作流的用户目标', 'error')
   const missingVariable = variables.value.find(item => item.required && (item.default === '' || item.default === null || item.default === undefined))
   if (missingVariable) return store.notify(`运行必填变量“${missingVariable.name}”尚未填写`, 'error')
+  if (!skipClarification && !(await inspectWorkflowRequirements())) return
   workflowRunning.value = true
   workflowRunStatus.value = 'running'
   currentRunId.value = ''
@@ -1347,8 +1520,7 @@ async function runWorkflow() {
     workflowRunStatus.value = run.status
     currentRunId.value = run.id || currentRunId.value
     if (run.status === 'completed') {
-      try { output.value = JSON.stringify(JSON.parse(run.output_json), null, 2) }
-      catch { output.value = run.output_json || '工作流已完成' }
+      output.value = workflowOutputMarkdown(run.output_json || '工作流已完成')
       runPanelTab.value = 'result'
     } else output.value = run.error || (run.status === 'interrupted' ? '工作流已由用户中断。' : '工作流执行失败，请查看最近运行记录。')
     if (currentRunId.value) runArtifacts.value = await api.get(`/workflow-runs/${currentRunId.value}/artifacts`)
@@ -1599,6 +1771,8 @@ onBeforeUnmount(() => {
             <div class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option v-for="agent in agents" :key="agent.id" :value="agent.id" :disabled="!executableAgent(agent)">{{ agent.name }} · v{{ agent.version }} · {{ statusLabel(agent.status) }}</option></select></div>
             <label class="switch-line"><input v-model="selectedNode.config.auto_input" type="checkbox"><span>根据入线自动聚合输入</span></label>
             <div class="field"><label>接口失败自动重试</label><input v-model.number="selectedNode.config.retry_count" type="number" min="0" max="3" class="input"><span class="field-help">仅对超时、限流和 5xx 等临时故障重试。</span></div>
+            <div class="field"><label>最长输出 Token</label><input v-model.number="selectedNode.config.max_output_tokens" type="number" min="512" max="32768" step="512" class="input"><span class="field-help">长文撰写建议 12000–20000；该值仅覆盖当前节点，不修改 Agent 全局设置。</span></div>
+            <div class="field"><label>节点专用任务说明</label><textarea v-model="selectedNode.config.prompt" class="textarea inspector-textarea" placeholder="定义本节点角色、交付结构、证据边界和验收标准" /><span class="field-help">此说明会在运行时真实传给 Agent，并支持引用上游变量。</span></div>
             <div v-if="selectedNode.config.auto_input===false" class="field"><label>输入模板</label><textarea v-model="selectedNode.config.input" class="textarea inspector-textarea" /></div>
             <div class="notice">可引用 &#123;&#123;input.task&#125;&#125;、&#123;&#123;variables.name&#125;&#125; 和 &#123;&#123;nodes.node_id.output&#125;&#125;。</div>
           </template>
@@ -1663,7 +1837,7 @@ onBeforeUnmount(() => {
           <button class="btn btn-sm" @click="controlRun(runPaused?'resume':'pause')"><Play v-if="runPaused" :size="13" /><Pause v-else :size="13" />{{ runPaused ? '继续' : '暂停' }}</button>
           <button class="btn btn-sm btn-danger" @click="controlRun('interrupt')"><Square :size="12" />中断</button>
         </div>
-        <button class="btn btn-primary" :disabled="workflowRunning" @click.stop="runCollapsed=false;runWorkflow()"><Play :size="14" />{{ workflowRunning ? '运行中…' : '开始运行' }}</button>
+        <button class="btn btn-primary" :disabled="workflowRunning || clarificationChecking" @click.stop="runCollapsed=false;runWorkflow()"><Play :size="14" />{{ workflowRunning ? '运行中…' : clarificationChecking ? '分析需求…' : '开始运行' }}</button>
       </header>
       <div v-if="!runCollapsed" class="workflow-run-content">
         <div class="run-input-panel">
@@ -1687,10 +1861,13 @@ onBeforeUnmount(() => {
         <div class="run-output-panel">
           <div class="run-output-heading">
             <label>{{ workflowRunning ? '实时执行链路' : '运行详情' }}</label>
-            <nav>
-              <button :class="{active:runPanelTab==='timeline'}" @click="runPanelTab='timeline'">执行过程 <b>{{ runTimeline.length }}</b></button>
-              <button :class="{active:runPanelTab==='result'}" @click="runPanelTab='result'">最终成果</button>
-            </nav>
+            <div class="run-result-actions">
+              <nav>
+                <button :class="{active:runPanelTab==='timeline'}" @click="runPanelTab='timeline'">执行过程 <b>{{ runTimeline.length }}</b></button>
+                <button :class="{active:runPanelTab==='result'}" @click="runPanelTab='result'">最终成果</button>
+              </nav>
+              <button v-if="currentRunId && !workflowRunning" class="word-download-link" :disabled="!!exportingDocumentId" @click="downloadWorkflowWord"><Download :size="11" />{{ exportingDocumentId==='run' ? '生成中…' : '下载 Word' }}</button>
+            </div>
           </div>
           <div v-if="runTimeline.length || workflowRunning" class="run-progress-overview">
             <div><strong>{{ workflowRunning ? (activeRunNodeId ? nodeRuntime(activeRunNodeId).stage : '工作流调度中') : workflowRunStatus==='completed' ? '全部节点执行完成' : workflowRunStatus==='failed' ? '执行失败，请查看红色节点' : '运行已结束' }}</strong><span>{{ runProgress }}% · {{ runStats.completed }}/{{ runStats.total }} 完成<span v-if="runStats.skipped"> · {{ runStats.skipped }} 跳过</span><span v-if="runStats.failed"> · {{ runStats.failed }} 失败</span> · {{ runElapsedSeconds }} 秒</span></div>
@@ -1709,7 +1886,10 @@ onBeforeUnmount(() => {
             </article>
             <div v-if="!runTimeline.length" class="run-activity-empty">运行后将在这里实时展示 Agent 内部步骤。</div>
           </div>
-          <div v-else class="result-box" :class="{running:workflowRunning,empty:!output}">{{ output || '工作流完成后将在这里展示最终成果。' }}</div>
+          <div v-else class="result-box workflow-markdown-result" :class="{running:workflowRunning,empty:!output}">
+            <RichAgentMessage v-if="output" :content="workflowOutputMarkdown(output)" />
+            <span v-else>工作流完成后将在这里展示最终成果。</span>
+          </div>
           <div v-if="workflowRunning" class="run-guidance">
             <input v-model="runGuidance" class="input" placeholder="运行中补充要求或纠偏指令" @keydown.enter.prevent="sendRunGuidance">
             <button :disabled="!currentRunId || !runGuidance.trim()" @click="sendRunGuidance"><Send :size="12" />引导</button>
@@ -1718,8 +1898,9 @@ onBeforeUnmount(() => {
         <aside class="run-history-panel">
           <label>{{ runArtifacts.length ? '本次产出文档' : '最近运行' }}</label>
           <div v-if="runArtifacts.length" class="workflow-artifact-list">
-            <article v-for="artifact in runArtifacts" :key="artifact.id">
+            <article v-for="artifact in runArtifacts" :key="artifact.id" tabindex="0" title="点击预览 Markdown 成果" @click="previewArtifact(artifact)" @keydown.enter="previewArtifact(artifact)">
               <FileText :size="13" /><span><strong>{{ artifact.title }}</strong><small>第 {{ artifact.iteration }} 轮 · 已保存到数据库</small></span>
+              <button class="artifact-download-link" :disabled="!!exportingDocumentId" title="下载排版后的 Word 文档" @click.stop="downloadArtifactWord(artifact)"><Download :size="11" />{{ exportingDocumentId===artifact.id ? '生成中' : 'Word' }}</button>
             </article>
           </div>
           <div class="run-history-list"><div v-for="run in runs.slice(0,5)" :key="run.id"><span><strong>{{ run.duration_ms }} ms · {{ run.iteration_count || 1 }} 轮</strong><small>{{ new Date(run.created_at).toLocaleString('zh-CN') }}</small></span><StatusBadge :status="run.status" /></div><p v-if="!runs.length">暂无运行记录</p></div>
@@ -1728,5 +1909,75 @@ onBeforeUnmount(() => {
     </section>
   </section>
   <div v-if="paletteDrag.active && paletteDrag.item" class="palette-drag-ghost" :class="{knowledge:paletteDrag.kind==='knowledge'}" :style="{left:`${paletteDrag.x+14}px`,top:`${paletteDrag.y+14}px`}"><Database v-if="paletteDrag.kind==='knowledge'" :size="14" /><Braces v-else-if="paletteDrag.kind==='component'" :size="14" /><Bot v-else :size="14" />{{ paletteDrag.item.name }}</div>
+  <FloatingPanel
+    v-model="clarificationOpen"
+    title="运行前确认需求"
+    eyebrow="REQUIREMENT CHECK"
+    description="先补齐会影响执行结果的关键要求，确认后才会正式启动工作流。"
+    size="large"
+    :close-on-backdrop="false"
+  >
+    <div v-if="clarificationResult" class="workflow-clarification">
+      <section class="clarification-overview">
+        <div class="clarification-icon"><CircleHelp :size="22" /></div>
+        <div>
+          <span>{{ clarificationResult.task_type_label }} · {{ clarificationResult.questions.length }} 项待确认</span>
+          <strong>{{ clarificationResult.summary }}</strong>
+          <p>{{ clarificationOriginalTask }}</p>
+        </div>
+      </section>
+      <div class="clarification-list">
+        <article v-for="(question,index) in clarificationResult.questions" :key="question.id" class="clarification-question">
+          <header>
+            <span>{{ index + 1 }}</span>
+            <div><strong>{{ question.question }}</strong><small>{{ question.label }}{{ question.required ? ' · 必填' : ' · 选填' }}</small></div>
+            <Languages v-if="question.id.includes('language')" :size="18" />
+            <ListChecks v-else :size="18" />
+          </header>
+          <div v-if="question.type==='single_choice'" class="clarification-options">
+            <button
+              v-for="option in question.options"
+              :key="option.value"
+              type="button"
+              :class="{active:clarificationAnswers[question.id]===option.value}"
+              @click="clarificationAnswers[question.id]=option.value"
+            >
+              <i><Check v-if="clarificationAnswers[question.id]===option.value" :size="12" /></i>
+              <span><strong>{{ option.label }}</strong><small v-if="option.description">{{ option.description }}</small></span>
+            </button>
+          </div>
+          <label v-else-if="question.type==='number'" class="clarification-number">
+            <input
+              v-model.number="clarificationAnswers[question.id]"
+              class="input"
+              type="number"
+              :min="question.min"
+              :max="question.max"
+            >
+            <span>{{ question.suffix }}</span>
+            <small>可填写 {{ question.min }}–{{ question.max }}</small>
+          </label>
+          <textarea
+            v-else
+            v-model="clarificationAnswers[question.id]"
+            class="textarea clarification-text"
+            :placeholder="question.placeholder"
+          />
+        </article>
+      </div>
+      <p class="clarification-note"><ShieldCheck :size="14" />你的回答会合并到本次任务指令中，并随运行记录保存；不会修改原工作流结构。</p>
+    </div>
+    <template #footer>
+      <button class="btn" :disabled="clarificationSubmitting" @click="closeClarification">取消运行</button>
+      <button class="btn btn-primary" :disabled="clarificationSubmitting || !clarificationComplete" @click="confirmClarification">
+        <Play :size="14" />{{ clarificationSubmitting ? '正在启动…' : '确认需求并运行' }}
+      </button>
+    </template>
+  </FloatingPanel>
   <WorkflowExpertWindow :open="expertOpen" :definition="buildDefinition()" :workflow-name="workflowForm.name" :workflow-description="workflowForm.description" @close="expertOpen=false" @apply="applyExpertProposal" />
 </template>
+
+<style scoped>
+.workflow-clarification{display:grid;gap:18px}.clarification-overview{display:flex;gap:14px;padding:16px;border:1px solid #c9e1f1;border-radius:14px;background:linear-gradient(135deg,#f2f9ff,#f7fbff 55%,#eefaf7)}.clarification-icon{display:grid;place-items:center;width:44px;height:44px;flex:0 0 44px;border-radius:13px;color:#0877bb;background:#fff;box-shadow:0 7px 20px rgba(20,101,153,.13)}.clarification-overview>div:last-child{display:grid;gap:4px;min-width:0}.clarification-overview span{font-size:11px;font-weight:800;letter-spacing:.06em;color:#1682a7}.clarification-overview strong{font-size:14px;color:#173851}.clarification-overview p{margin:3px 0 0;color:#5c7181;font-size:12px;line-height:1.55;white-space:pre-wrap}.clarification-list{display:grid;gap:12px}.clarification-question{padding:15px;border:1px solid #d9e6ef;border-radius:14px;background:#fff;box-shadow:0 5px 18px rgba(18,59,86,.05)}.clarification-question>header{display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:start;gap:10px;margin-bottom:12px}.clarification-question>header>span{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:#e7f4fd;color:#0877bb;font-size:11px;font-weight:900}.clarification-question>header>div{display:grid;gap:3px}.clarification-question>header strong{color:#18384f;font-size:13px}.clarification-question>header small{color:#7b8f9e;font-size:10px}.clarification-question>header>svg{color:#78a7c4}.clarification-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.clarification-options button{display:flex;align-items:flex-start;gap:8px;min-height:64px;padding:10px;border:1px solid #dbe6ed;border-radius:11px;background:#f9fbfc;color:#334f62;text-align:left;cursor:pointer;transition:.16s ease}.clarification-options button:hover{border-color:#8fc9e7;background:#f5fbff}.clarification-options button.active{border-color:#1689c2;background:#eef8ff;box-shadow:0 0 0 2px rgba(22,137,194,.09)}.clarification-options button>i{display:grid;place-items:center;width:16px;height:16px;flex:0 0 16px;margin-top:1px;border:1px solid #b7cad7;border-radius:50%;color:#fff}.clarification-options button.active>i{border-color:#1689c2;background:#1689c2}.clarification-options button>span{display:grid;gap:3px}.clarification-options button strong{font-size:12px}.clarification-options button small{font-size:10px;line-height:1.45;color:#718594}.clarification-number{display:flex;align-items:center;gap:9px}.clarification-number .input{width:180px}.clarification-number>span{color:#426177;font-weight:700}.clarification-number>small{color:#8798a4}.clarification-text{min-height:76px;resize:vertical}.clarification-note{display:flex;align-items:center;gap:7px;margin:0;padding:10px 12px;border-radius:10px;background:#f4faf7;color:#4c7464;font-size:11px}.clarification-note svg{flex:0 0 auto;color:#248461}
+@media (max-width:760px){.clarification-options{grid-template-columns:1fr}.clarification-overview{padding:13px}.clarification-question{padding:12px}}
+</style>

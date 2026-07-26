@@ -9,10 +9,11 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..models import AgentDefinition, KnowledgeBase, ModelEndpoint
+from ..models import AgentDefinition, Extension, KnowledgeBase, ModelEndpoint, Skill
 from ..schemas import AgentGenerationConfig, AgentRAGConfig
 from .common import dumps
 from .llm import provider_from_endpoint
+from .tools import tool_runtime
 from .workflows import WorkflowEngine
 
 
@@ -32,6 +33,39 @@ SUPPORTED_NODE_TYPES = {
 
 
 class WorkflowExpert:
+    async def _full_agent_capabilities(self, db: AsyncSession) -> dict[str, Any]:
+        skill_ids = list(
+            await db.scalars(
+                select(Skill.id).where(Skill.enabled.is_(True)).order_by(Skill.name)
+            )
+        )
+        mcp_extension_ids = list(
+            await db.scalars(
+                select(Extension.id)
+                .where(Extension.enabled.is_(True), Extension.kind == "mcp")
+                .order_by(Extension.name)
+            )
+        )
+        image_endpoint = await db.scalar(
+            select(ModelEndpoint)
+            .where(
+                ModelEndpoint.enabled.is_(True),
+                ModelEndpoint.modality == "image",
+            )
+            .order_by(desc(ModelEndpoint.updated_at))
+        )
+        tools = [
+            str(item.get("function", {}).get("name") or "")
+            for item in tool_runtime.schemas()
+        ]
+        tools.extend(["exec", "call_agent", "web_research"])
+        return {
+            "tools": list(dict.fromkeys(item for item in tools if item)),
+            "skills": skill_ids,
+            "mcp_extensions": mcp_extension_ids,
+            "image_model_endpoint_id": image_endpoint.id if image_endpoint else None,
+        }
+
     @staticmethod
     def _resource_text(item: Any) -> str:
         return f"{item.name} {getattr(item, 'description', '')}".lower()
@@ -67,7 +101,9 @@ class WorkflowExpert:
         *,
         endpoint: ModelEndpoint | None,
         knowledge_bases: list[KnowledgeBase],
+        full_capabilities: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        full_capabilities = full_capabilities or {}
         knowledge_ids = {item.id for item in knowledge_bases}
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -87,8 +123,9 @@ class WorkflowExpert:
                 for item in raw.get("tools", [])
                 if isinstance(item, str) and item.strip()
             ]
-            if "exec" not in tools:
-                tools.append("exec")
+            tools = list(
+                dict.fromkeys([*tools, *full_capabilities.get("tools", []), "exec"])
+            )
             rag = {
                 **AgentRAGConfig().model_dump(),
                 **(raw.get("rag_config") if isinstance(raw.get("rag_config"), dict) else {}),
@@ -109,6 +146,9 @@ class WorkflowExpert:
                 generation = AgentGenerationConfig.model_validate(generation).model_dump()
             except ValueError:
                 generation = AgentGenerationConfig().model_dump()
+            generation["max_output_tokens"] = max(
+                int(generation.get("max_output_tokens") or 0), 8192
+            )
             selected_knowledge = [
                 str(item)
                 for item in raw.get("knowledge_bases", [])
@@ -132,27 +172,41 @@ class WorkflowExpert:
                     ),
                     "provider": endpoint.provider_type if endpoint else "demo",
                     "model_endpoint_id": endpoint.id if endpoint else None,
+                    "image_model_endpoint_id": full_capabilities.get(
+                        "image_model_endpoint_id"
+                    ),
                     "model": endpoint.default_model if endpoint else "demo-model",
                     "temperature": max(
                         0.0, min(float(raw.get("temperature", 0.25)), 2.0)
                     ),
                     "tools": list(dict.fromkeys(tools)),
-                    "skills": [
-                        str(item)
-                        for item in raw.get("skills", [])
-                        if isinstance(item, str) and item.strip()
-                    ],
+                    "skills": list(
+                        dict.fromkeys(
+                            [
+                                str(item)
+                                for item in raw.get("skills", [])
+                                if isinstance(item, str) and item.strip()
+                            ]
+                            + list(full_capabilities.get("skills", []))
+                        )
+                    ),
                     "knowledge_bases": selected_knowledge,
                     "rag_config": rag,
                     "generation_config": generation,
-                    "permissions": raw.get("permissions")
-                    if isinstance(raw.get("permissions"), dict)
-                    else {
+                    "permissions": {
+                        **(
+                            raw.get("permissions")
+                            if isinstance(raw.get("permissions"), dict)
+                            else {}
+                        ),
                         "exec": True,
                         "mcp": True,
                         "skills": True,
                         "security_profile": "workspace-write",
                         "approval_policy": "never",
+                        "mcp_extensions": list(
+                            full_capabilities.get("mcp_extensions", [])
+                        ),
                     },
                 }
             )
@@ -784,6 +838,7 @@ class WorkflowExpert:
                 "工作流智能编排需要在线对话模型接口。"
                 "请先在“扩展与模型”中配置并启用现有接口。"
             )
+        full_capabilities = await self._full_agent_capabilities(db)
         if endpoint:
             resources = {
                 "agents": [
@@ -880,6 +935,7 @@ class WorkflowExpert:
             raw_agent_drafts,
             endpoint=endpoint,
             knowledge_bases=list(knowledge_bases),
+            full_capabilities=full_capabilities,
         )
         self._insert_agent_drafts(proposed, agent_drafts, fallback_changes)
         self._augment_requested_branch(proposed, message, fallback_changes)
@@ -967,6 +1023,7 @@ class WorkflowExpert:
             raise ValueError(
                 "创建工作流 Agent 需要在线对话模型接口，请先启用现有接口"
             )
+        full_capabilities = await self._full_agent_capabilities(db)
         knowledge_bases = (
             await db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.name))
         ).all()
@@ -978,6 +1035,7 @@ class WorkflowExpert:
             ],
             endpoint=endpoint,
             knowledge_bases=list(knowledge_bases),
+            full_capabilities=full_capabilities,
         )
         referenced_keys = {
             str((node.get("config") or {}).get("agent_draft_key"))
@@ -1002,6 +1060,7 @@ class WorkflowExpert:
                 system_prompt=draft["system_prompt"],
                 provider=draft["provider"],
                 model_endpoint_id=draft["model_endpoint_id"],
+                image_model_endpoint_id=draft.get("image_model_endpoint_id"),
                 model=draft["model"],
                 temperature=draft["temperature"],
                 tools_json=dumps(draft["tools"]),

@@ -14,6 +14,7 @@ from backend.app.services.workflows import (
     _condition_expression,
     render_value,
 )
+from backend.app.services.web_research import WebResearchService
 
 
 def test_template_rendering_preserves_typed_values():
@@ -55,6 +56,27 @@ def test_workflow_node_retry_only_accepts_transient_failures():
     assert engine._retryable_node_error(RuntimeError("HTTP 503: busy")) is True
     assert engine._retryable_node_error(RuntimeError("HTTP 402: insufficient")) is False
     assert engine._retryable_node_error(LookupError("Agent 不存在")) is False
+
+
+def test_academic_workflow_quality_gate_rejects_truncated_unverified_review():
+    task = {"task": "Write an English literature review using 40 papers about mesh quality"}
+    truncated = {
+        "result": "# Mesh Quality Review\n\n## Abstract\n\nDraft.\n\n## Introduction\n\nText.\n\n## 2.2 Metrics\n\n$\\k"
+    }
+    issues = WorkflowEngine._delivery_quality_issues(task, truncated, {"nodes": {}})
+
+    assert any("参考文献" in issue for issue in issues)
+    assert any("40" in issue for issue in issues)
+    assert any("截断" in issue for issue in issues)
+    assert any("真实联网" in issue for issue in issues)
+
+
+def test_web_research_honors_requested_academic_source_count():
+    service = WebResearchService()
+
+    assert service.requested_source_count("请检索并纳入 40 篇文献完成综述") == 40
+    assert service.requested_source_count("review 120 papers") == 80
+    assert service.requested_source_count("普通调研") == 12
 
 
 def test_workflow_legacy_condition_expression_is_evaluated_without_exec():
