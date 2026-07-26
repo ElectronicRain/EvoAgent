@@ -4,7 +4,7 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-0.3.17-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-0.3.18-1769c2)](#windows-桌面端)
 
 EvoAgent 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。当前版本已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、安全审批、用户记忆和成果数据库交付。
 
@@ -48,7 +48,8 @@ cd EvoAgent
 - AI 文档课堂：当前 Agent 使用已绑定模型或最近启用的模型接口动态生成口语化教学脚本；可选择讲解章节，只圈画模型识别的重点词，并在独立板书区逐字书写公式推导。支持硅基流动 CosyVoice2 神经语音、8 种云端中文音色、自然/生动/严谨语气、Windows 本地语音降级、暂停、清除、用户接管画笔、公式点选提问及边看文档边追问。
 - 可视化工作流：全量展示 Agent、知识库和专业节点，支持画布拖动、节点拖放、端口连线、条件分支、变量槽、模板、安全函数、合并、工具、成果节点、缩放、适应画布、全屏及左右/底部面板收起。
 - 智能编排专家：根据自然语言生成工作流、分支、变量、知识库节点以及配置完整的新 Agent；专家新建的 Agent 自动绑定现有在线文本/图片模型，并继承全部本地工具、已启用 Skills 与 MCP 服务。用户可持续对话调整方案，生成后仍可手工修改节点、连线和参数。
-- 工作流运行：实时显示每个节点及 Agent 内部 RAG、联网、模型、工具和成果事件；支持循环次数、停止条件、自动重试、运行中暂停、中断、人工引导和每轮成果文档。长文节点可独立设置输出 Token 上限，文献综述会在交付前校验真实来源数量、完整章节、参考文献和截断状态，未通过时不会伪装成成功成果。
+- 工作流运行：实时显示每个节点及 Agent 内部 RAG、联网、模型、工具和成果事件；支持循环次数、停止条件、自动重试、运行中暂停、中断、人工引导和每轮成果文档。Agent 节点可按规划、检索、撰写、审核、均衡或完整能力设置独立工具策略与上下文预算；重复工具结果自动复用，超长结果自动压缩，达到预算后基于已有证据收敛。长文节点可独立设置输出 Token 上限，文献综述会在交付前校验真实来源数量、完整章节、参考文献和截断状态，未通过时不会伪装成成功成果。
+- 工作流 RAG 去重：知识库节点负责一次检索并沿连线传递可追溯证据，检索、撰写和评审 Agent 默认不重复执行内部 RAG；节点可按需切换为 Agent 自身 RAG，并可控制是否启用查询改写，从而减少在线模型、Embedding 与 Rerank 的重复调用。
 - 工作流恢复：节点状态、执行轨迹、运行参数和成果持久化；切换页面后自动恢复当前运行、追赶遗漏事件并继续显示后台进度。
 - 本地电脑工具：工作区文件列表、读取、写入、搜索和受控 PowerShell。
 - 学科知识库：支持多文件或整个文件夹递归导入，保留目录层级，并完成清洗、去重、父子分块、向量化和检索问答。
@@ -68,8 +69,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.17_x64-setup.exe
-frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.17_x64_en-US.msi
+frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.18_x64-setup.exe
+frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.18_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -163,6 +164,7 @@ cargo check
 - 在“协作工作流”中，从左侧资源栏拖入 Agent、知识库或专业节点（也可双击居中添加）；从节点右侧端口拖到目标节点左侧端口即可连接。左键拖动空白画布可平移，工具栏支持缩放、适应画布和全屏。
 - Agent 节点可使用卡片删除按钮、工具栏或 Delete 键删除；连线可先单击选中后使用工具栏/Delete 键删除，也可双击直接删除。
 - “工作流智能编排专家”可根据目标自动创建 Agent、知识库节点、条件分支、变量和完整连线；应用方案后仍可继续手动编辑。
+- Agent 节点的“节点工具策略”会按职责限制工具轮数与调用次数；“节点 RAG 策略”用于选择 Agent 自身知识库或只复用上游证据。默认自动策略会让提纲节点直接规划、检索节点只检索和综合一次、撰写/审核节点复用上游结果，避免重复消耗模型额度。
 - 点击“开始运行”前，可在“本次运行安全策略”中选择访问范围和审批方式。运行时会实时显示当前节点、节点耗时、Agent 内部步骤和最终结果，无需等待整个工作流结束才看到状态。
 - 点击“开始运行”后会先检查任务是否明确；若语言、范围、数量、时效、交付形式或验收标准等关键要求缺失，会先弹出场景化确认窗口，补全后才启动工作流。已经写明的要求不会重复询问。
 - 工作流完成后，在“最终成果”中阅读渲染后的 Markdown；右上角可下载整次运行的 Word 文档，“本次产出文档”列表也支持逐份预览和下载。
@@ -173,7 +175,7 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **v0.3.17**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **v0.3.18**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
 
 若使用本地源码版快捷方式，推荐目标为：
 

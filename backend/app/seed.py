@@ -62,6 +62,7 @@ async def upgrade_workflow_runtime_contracts(db) -> None:
         nodes = list(definition.get("nodes") or [])
         edges = list(definition.get("edges") or [])
         changed = False
+        has_knowledge_node = any(node.get("type") == "knowledge" for node in nodes)
         execution = definition.setdefault("execution", {})
         if execution.get("intent_validation") is not settings.require_online_agents:
             execution["intent_validation"] = settings.require_online_agents
@@ -69,9 +70,22 @@ async def upgrade_workflow_runtime_contracts(db) -> None:
         node_map = {str(node.get("id")): node for node in nodes}
         for node in nodes:
             config = node.setdefault("config", {})
-            if node.get("type") == "agent" and "retry_count" not in config:
-                config["retry_count"] = 1
-                changed = True
+            if node.get("type") == "agent":
+                if "retry_count" not in config:
+                    config["retry_count"] = 1
+                    changed = True
+                if "tool_policy" not in config:
+                    config["tool_policy"] = "auto"
+                    changed = True
+                if "rag_mode" not in config:
+                    config["rag_mode"] = "off" if has_knowledge_node else "auto"
+                    changed = True
+                prompt = str(config.get("prompt") or "")
+                if engine.prompt_looks_corrupted(prompt):
+                    config["prompt"] = engine.default_agent_node_prompt(
+                        str(node.get("label") or node.get("id") or "Agent")
+                    )
+                    changed = True
 
         for condition in [node for node in nodes if node.get("type") == "condition"]:
             condition_id = str(condition.get("id"))
@@ -112,15 +126,6 @@ async def upgrade_workflow_runtime_contracts(db) -> None:
                 )
                 changed = True
 
-            direct_true_edges = [
-                edge
-                for edge in edges
-                if edge.get("source") == condition_id
-                and edge.get("source_slot") == "true"
-                and node_map.get(str(edge.get("target")), {}).get("type") == "merge"
-            ]
-            if not direct_true_edges:
-                continue
             deliverable_incoming = next(
                 (edge for edge in edges if edge.get("target") == review_id),
                 None,
@@ -131,6 +136,55 @@ async def upgrade_workflow_runtime_contracts(db) -> None:
                 else review_id
             )
             if not deliverable_id or deliverable_id not in node_map:
+                continue
+            for false_edge in [
+                edge
+                for edge in edges
+                if edge.get("source") == condition_id
+                and edge.get("source_slot") == "false"
+            ]:
+                revision = node_map.get(str(false_edge.get("target")))
+                if not revision or revision.get("type") != "agent":
+                    continue
+                revision_label = str(
+                    revision.get("label") or revision.get("id") or "修订"
+                )
+                if not engine.agent_node_policy_preset(revision_label) == "review":
+                    continue
+                revision_config = revision.setdefault("config", {})
+                desired_input = (
+                    f"【待修订正文】\n{{{{nodes.{deliverable_id}.output}}}}\n\n"
+                    f"【评审意见】\n{{{{nodes.{review_id}.output}}}}"
+                )
+                if revision_config.get("auto_input", True) or (
+                    desired_input != revision_config.get("input")
+                ):
+                    revision_config["auto_input"] = False
+                    revision_config["input"] = desired_input
+                    changed = True
+                revision_prompt = str(revision_config.get("prompt") or "")
+                if not revision_prompt or "DECISION" in revision_prompt:
+                    revision_config["prompt"] = engine.default_agent_node_prompt(
+                        revision_label
+                    )
+                    changed = True
+                if revision_config.get("tool_policy") != "review":
+                    revision_config["tool_policy"] = "review"
+                    changed = True
+                if revision_config.get("rag_mode") != "off":
+                    revision_config["rag_mode"] = "off"
+                    changed = True
+                if int(revision_config.get("input_context_char_limit") or 0) < 80000:
+                    revision_config["input_context_char_limit"] = 80000
+                    changed = True
+            direct_true_edges = [
+                edge
+                for edge in edges
+                if edge.get("source") == condition_id
+                and edge.get("source_slot") == "true"
+                and node_map.get(str(edge.get("target")), {}).get("type") == "merge"
+            ]
+            if not direct_true_edges:
                 continue
             base_id = f"{condition_id}_approved_result"
             approved_id = base_id

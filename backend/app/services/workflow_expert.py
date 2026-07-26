@@ -233,6 +233,31 @@ class WorkflowExpert:
             config = dict(node.get("config") or {})
             if node_type == "agent" and "input" in config:
                 config.setdefault("auto_input", False)
+            if node_type == "agent":
+                configured_policy = str(config.get("tool_policy") or "auto").lower()
+                if configured_policy not in {
+                    "auto",
+                    "planning",
+                    "research",
+                    "writing",
+                    "review",
+                    "balanced",
+                    "full",
+                }:
+                    configured_policy = "auto"
+                config["tool_policy"] = configured_policy
+                configured_rag = str(config.get("rag_mode") or "auto").lower()
+                config["rag_mode"] = (
+                    configured_rag
+                    if configured_rag in {"auto", "agent", "off"}
+                    else "auto"
+                )
+                config.setdefault("retry_count", 1)
+                prompt = str(config.get("prompt") or "")
+                if WorkflowEngine.prompt_looks_corrupted(prompt):
+                    config["prompt"] = WorkflowEngine.default_agent_node_prompt(
+                        str(node.get("label") or node_id)
+                    )
             if node_type == "knowledge" and "query" in config:
                 config.setdefault("auto_input", False)
             if node_type == "agent":
@@ -373,7 +398,13 @@ class WorkflowExpert:
                             "id": node_id,
                             "type": "agent",
                             "label": agent.name,
-                            "config": {"agent_id": agent.id, "input": "{{input.task}}"},
+                            "config": {
+                                "agent_id": agent.id,
+                                "input": "{{input.task}}",
+                                "tool_policy": "auto",
+                                "rag_mode": "auto",
+                                "retry_count": 1,
+                            },
                         },
                     )
                     prior = definition["nodes"][-3]["id"] if len(definition["nodes"]) > 2 else "input"
@@ -484,7 +515,13 @@ class WorkflowExpert:
                     "id": node_id,
                     "type": "agent",
                     "label": agent.name,
-                    "config": {"agent_id": agent.id, "input": input_template},
+                    "config": {
+                        "agent_id": agent.id,
+                        "input": input_template,
+                        "tool_policy": "auto",
+                        "rag_mode": "auto",
+                        "retry_count": 1,
+                    },
                 }
             )
             edges.append({"source": upstream, "target": node_id, "source_slot": "output"})
@@ -863,6 +900,11 @@ class WorkflowExpert:
                 "节点引用使用 {{nodes.node_id.output}}。必须保留 input 到 output 的完整路径，"
                 "不得创建结构环；用户要求分支时必须建立 condition、至少两条 true/false 支路"
                 "以及 merge 汇合节点；重复执行使用 execution.loop_enabled/loop_count。"
+                "每个 agent 节点必须设置 config.tool_policy：规划/提纲用 planning，检索用 research，"
+                "撰写用 writing，审核或修订用 review，确需本地工具时才用 balanced/full；"
+                "不要让规划、撰写、审核节点调用 exec、文件遍历或 MCP。"
+                "每个 agent 节点同时设置 config.rag_mode：已有知识库节点或上游证据时用 off，"
+                "只有确实需要读取该 Agent 自身绑定知识库时才用 agent，否则用 auto。"
                 "只返回 JSON："
                 '{"reply":"给用户的说明","name":"工作流名","description":"说明",'
                 '"change_summary":["修改"],"new_agents":[{"key":"draft_role","name":"角色 Agent",'

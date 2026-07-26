@@ -270,6 +270,131 @@ class WorkflowEngine:
     def __init__(self) -> None:
         self.controls: dict[str, WorkflowControl] = {}
 
+    @staticmethod
+    def agent_node_policy_preset(label: str, config: dict[str, Any] | None = None) -> str:
+        configured = str((config or {}).get("tool_policy") or "auto").strip().lower()
+        if configured in {"planning", "research", "writing", "review", "balanced", "full"}:
+            return configured
+        profile = " ".join(
+            [
+                label,
+                str((config or {}).get("prompt") or ""),
+            ]
+        ).lower()
+        if re.search(r"规划|提纲|需求|拆解|计划|编排|plan|outline|requirement", profile):
+            return "planning"
+        if re.search(r"检索|搜索|文献|调研|资料搜集|research|search|literature", profile):
+            return "research"
+        if re.search(r"审核|评审|核验|校验|复核|修订|review|verify|revision", profile):
+            return "review"
+        if re.search(r"撰写|写作|成稿|综合生成|draft|write|synthesis", profile):
+            return "writing"
+        return "balanced"
+
+    @classmethod
+    def agent_node_tool_policy(
+        cls, label: str, config: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        config = config or {}
+        policy: dict[str, Any] = {
+            "preset": cls.agent_node_policy_preset(label, config)
+        }
+        overrides = {
+            "max_tool_iterations": "max_iterations",
+            "max_tool_calls": "max_calls",
+            "tool_result_char_limit": "result_char_limit",
+            "tool_context_char_limit": "context_char_limit",
+        }
+        for source, target in overrides.items():
+            if config.get(source) not in (None, ""):
+                policy[target] = config[source]
+        if isinstance(config.get("tool_allowlist"), list):
+            policy["allowed_tools"] = config["tool_allowlist"]
+        return policy
+
+    @classmethod
+    def agent_node_rag_policy(
+        cls, label: str, config: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        config = config or {}
+        configured = str(config.get("rag_mode") or "auto").strip().lower()
+        preset = cls.agent_node_policy_preset(label, config)
+        if configured not in {"agent", "off"}:
+            configured = "off" if preset in {"research", "writing", "review"} else "agent"
+        return {
+            "mode": configured,
+            # Workflow tasks have already passed clarification and contain explicit
+            # node context, so an extra LLM query-rewrite call is normally redundant.
+            "query_rewrite": bool(config.get("rag_query_rewrite", False)),
+            "cross_language": bool(config.get("rag_cross_language", False)),
+        }
+
+    @classmethod
+    def default_agent_node_prompt(cls, label: str) -> str:
+        preset = cls.agent_node_policy_preset(label)
+        if preset == "review" and re.search(r"修订|改写|润色|revision|revise", label, re.I):
+            return (
+                "依据待修订正文和评审意见逐项修复问题，保持已核验事实、引用和参考文献对应关系。"
+                "只输出完整修订稿，不输出 DECISION 标记、修改过程或省略号；不得虚构文献、数据、DOI 或 URL。"
+            )
+        prompts = {
+            "planning": (
+                "只负责澄清目标并形成可执行提纲。直接依据用户已确认需求和系统附加的知识上下文，"
+                "输出研究范围、核心问题、章节结构、证据需求与验收标准；不要读取本地文件、执行命令或重复检索。"
+            ),
+            "research": (
+                "只负责取得并整理真实、可追溯的资料。优先提供题名、作者、年份、期刊、DOI 或 URL，"
+                "区分已核验事实与待核验线索；达到用户要求的资料范围后立即停止检索并输出结构化证据表。"
+            ),
+            "writing": (
+                "只依据用户目标和上游证据完成正式成稿。保持论点、证据和引用一一对应，"
+                "不得虚构文献、实验数据或 DOI；使用可直接渲染的 Markdown，完整交付正文。"
+            ),
+            "review": (
+                "对上游成果进行质量审核或修订，检查是否符合用户目标、证据是否可追溯、结构是否完整。"
+                "审核节点首行输出 DECISION: PASS 或 DECISION: REVISE，并给出可执行修改项；修订节点输出完整修订稿。"
+            ),
+            "balanced": (
+                "围绕当前节点职责完成可供下游直接使用的结构化结果。已有信息足够时直接输出；"
+                "只有缺少任务必需的真实信息时才调用工具，并且不得重复相同查询。"
+            ),
+        }
+        return prompts[preset]
+
+    @staticmethod
+    def prompt_looks_corrupted(value: str) -> bool:
+        compact = re.sub(r"\s+", "", value or "")
+        return len(compact) >= 20 and compact.count("?") >= 10 and (
+            compact.count("?") / len(compact)
+        ) >= 0.3
+
+    @staticmethod
+    def _bounded_node_text(value: str, limit: int) -> tuple[str, int]:
+        if len(value) <= limit:
+            return value, 0
+        marker = f"\n\n…[节点上下文已压缩 {len(value) - limit:,} 个字符]…\n\n"
+        available = max(200, limit - len(marker))
+        head = int(available * 0.7)
+        compacted = f"{value[:head]}{marker}{value[-(available - head):]}"
+        return compacted, len(value) - len(compacted)
+
+    @classmethod
+    def agent_node_context_limit(cls, label: str, config: dict[str, Any]) -> int:
+        defaults = {
+            "planning": 16000,
+            "research": 24000,
+            "writing": 60000,
+            "review": 60000,
+            "balanced": 32000,
+            "full": 80000,
+        }
+        preset = cls.agent_node_policy_preset(label, config)
+        raw = config.get("input_context_char_limit", defaults[preset])
+        try:
+            return max(8000, min(int(raw), 120000))
+        except (TypeError, ValueError):
+            return defaults[preset]
+
     def events(self, run_id: str, after: int = 0) -> dict[str, Any]:
         control = self.controls.get(run_id)
         if not control:
@@ -811,10 +936,44 @@ class WorkflowEngine:
             original_intent = str(
                 workflow_input.get("task") or dumps(workflow_input)
             ).strip()
-            routed_input = str(
-                config.get("input", workflow_input.get("task", ""))
-            ).strip()
+            if config.get("auto_input", False) and active_parent_ids:
+                parent_inputs: list[str] = []
+                for parent_id in active_parent_ids:
+                    parent = context["nodes"].get(parent_id)
+                    if isinstance(parent, dict):
+                        parent_value = parent.get("output", parent.get("task", parent))
+                    else:
+                        parent_value = parent
+                    text = (
+                        parent_value
+                        if isinstance(parent_value, str)
+                        else dumps(parent_value)
+                    )
+                    if str(text).strip():
+                        parent_inputs.append(
+                            f"【上游节点：{parent_id}】\n{str(text).strip()}"
+                        )
+                routed_input = "\n\n".join(parent_inputs).strip()
+            else:
+                routed_input = str(
+                    config.get("input", workflow_input.get("task", ""))
+                ).strip()
             node_prompt = str(config.get("prompt") or "").strip()
+            if self.prompt_looks_corrupted(node_prompt):
+                node_prompt = self.default_agent_node_prompt(node_label)
+            tool_policy = self.agent_node_tool_policy(node_label, config)
+            rag_policy = self.agent_node_rag_policy(node_label, config)
+            context_limit = self.agent_node_context_limit(node_label, config)
+            original_intent, original_removed = self._bounded_node_text(
+                original_intent, min(8000, max(3000, context_limit // 4))
+            )
+            node_prompt, prompt_removed = self._bounded_node_text(
+                node_prompt, min(12000, max(4000, context_limit // 3))
+            )
+            routed_budget = max(4000, context_limit - len(original_intent) - len(node_prompt) - 800)
+            routed_input, routed_removed = self._bounded_node_text(
+                routed_input or original_intent, routed_budget
+            )
             node_input = (
                 f"【用户原始意图】\n{original_intent}\n\n"
                 f"【当前工作流节点】\n{node_label}\n\n"
@@ -828,6 +987,21 @@ class WorkflowEngine:
             guidance = context["runtime"]["guidance"]
             if guidance:
                 node_input += "\n\n【用户运行中引导】\n" + "\n".join(guidance)
+            node_input, final_removed = self._bounded_node_text(node_input, context_limit)
+            removed_chars = original_removed + prompt_removed + routed_removed + final_removed
+            if on_agent_event:
+                await on_agent_event(
+                    {
+                        "type": "node_context_prepared",
+                        "tool_policy": tool_policy["preset"],
+                        "rag_mode": rag_policy["mode"],
+                        "context_chars": len(node_input),
+                        "context_char_limit": context_limit,
+                        "removed_chars": removed_chars,
+                        "auto_input": bool(config.get("auto_input", False)),
+                        "upstream_nodes": active_parent_ids,
+                    }
+                )
             runtime = context.get("runtime", {})
             permission_mode = str(runtime.get("permission_mode") or "inherit")
             agent_run = await agent_engine.run(
@@ -856,6 +1030,8 @@ class WorkflowEngine:
                     if config.get("max_output_tokens") not in (None, "")
                     else None
                 ),
+                tool_policy=tool_policy,
+                rag_policy=rag_policy,
             )
             agent_trace = loads(agent_run.trace_json, [])
             research_events = [

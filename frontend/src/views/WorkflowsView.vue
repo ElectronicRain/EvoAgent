@@ -185,6 +185,20 @@ const componentNodes = [
   { id: 'tool', name: '工具调用', description: '执行已注册 Tool / MCP 能力', icon: Settings2 },
   { id: 'artifact', name: '产出文档', description: '生成并持久化交付文档', icon: FileText },
 ] as Entity[]
+const agentToolPolicies = [
+  { value: 'auto', label: '按节点职责自动', description: '规划、检索、撰写和评审自动使用不同预算，推荐' },
+  { value: 'planning', label: '规划 / 提纲', description: '不开放主动工具，直接使用已附加上下文，一次生成' },
+  { value: 'research', label: '资料检索', description: '只执行一次系统联网检索和一次综合，不重复审校' },
+  { value: 'writing', label: '长文撰写', description: '不主动检索，专注使用上游证据完成长文' },
+  { value: 'review', label: '审核 / 修订', description: '不主动检索，专注核验和修订上游成果' },
+  { value: 'balanced', label: '均衡工具', description: '最多 3 轮、6 次工具请求，重复结果自动复用' },
+  { value: 'full', label: '完整能力', description: '继承 Agent 全部工具，仅用于确需操作环境的节点' },
+]
+const agentRagModes = [
+  { value: 'auto', label: '按节点职责自动', description: '规划可使用 Agent 知识库；检索、撰写和评审复用工作流上游证据' },
+  { value: 'agent', label: '使用 Agent RAG', description: '读取该 Agent 绑定的知识库；工作流内默认不额外调用模型改写查询' },
+  { value: 'off', label: '仅使用上游证据', description: '不重复检索 Agent 知识库，适合已有知识库节点或检索节点的链路' },
+]
 const runSecurityProfiles = [
   { value: 'default', label: '继承安全治理', description: '使用安全设置中的目录范围与默认规则' },
   { value: 'read_only', label: '只读模式', description: '禁止写文件和执行命令' },
@@ -194,6 +208,8 @@ const runSecurityProfiles = [
 ]
 const executableAgent = (agent: Entity) => ['active', 'candidate'].includes(agent.status)
 const statusLabel = (status: string) => ({ active: '启用', candidate: '候选', archived: '归档', rejected: '拒绝' } as Record<string, string>)[status] || status
+const toolPolicyDescription = (value: string) => agentToolPolicies.find(item => item.value === (value || 'auto'))?.description || agentToolPolicies[0].description
+const ragModeDescription = (value: string) => agentRagModes.find(item => item.value === (value || 'auto'))?.description || agentRagModes[0].description
 const runStatusLabel = (status: NodeRunStatus) => ({
   idle: '未运行', queued: '等待', running: '执行中', completed: '完成', failed: '失败', skipped: '跳过',
 } as Record<NodeRunStatus, string>)[status]
@@ -394,6 +410,8 @@ function agentEventInfo(event: Entity) {
     run_started: { title: 'Agent 运行实例已启动', stage: '初始化 Agent', progress: 4 },
     intent_detected: { title: '已识别任务意图', stage: '意图识别', progress: 10 },
     context_ready: { title: '上下文与能力准备完成', stage: '组装上下文', progress: 18 },
+    node_context_prepared: { title: '节点输入已按预算组装', stage: '组装上下文', progress: 16 },
+    tool_policy_applied: { title: '节点工具策略已生效', stage: '能力与预算', progress: 20 },
     rag_query_condensed: { title: '已生成独立检索问题', stage: 'RAG · 问题改写', progress: 22 },
     rag_scope_resolved: { title: '已确定知识库检索范围', stage: 'RAG · 检索范围', progress: 25 },
     rag_query_rewrite_started: { title: '正在扩展检索问题', stage: 'RAG · 查询扩展', progress: 28 },
@@ -413,7 +431,10 @@ function agentEventInfo(event: Entity) {
     research_synthesis_started: { title: '开始综合研究资料', stage: '模型生成 · 资料综合', progress: 64 },
     model_response: { title: '模型返回阶段性结果', stage: '模型生成', progress: 74 },
     tool_result: { title: '工具调用返回结果', stage: '工具执行', progress: 62 },
-    tool_iteration_limit_reached: { title: '工具调用达到上限，正在强制收敛', stage: '模型生成 · 收敛', progress: 76 },
+    tool_result_reused: { title: '已复用相同工具结果', stage: '工具去重', progress: 64 },
+    tool_budget_updated: { title: '工具预算已更新', stage: '能力与预算', progress: 68 },
+    tool_context_compacted: { title: '工具上下文已自动压缩', stage: '上下文控制', progress: 70 },
+    tool_iteration_limit_reached: { title: '资料调用已完成，正在整理答案', stage: '模型生成 · 收敛', progress: 76 },
     tool_iteration_recovered: { title: '已基于工具结果生成最终答案', stage: '模型生成 · 收敛', progress: 79 },
     approval_required: { title: '工具操作等待审批', stage: '等待安全审批', progress: 58 },
     approval_resolved: { title: '工具审批已经处理', stage: '工具执行', progress: 62 },
@@ -437,7 +458,9 @@ function agentEventInfo(event: Entity) {
   }
   let detail = String(event.message || event.error || '')
   if (type === 'intent_detected') detail = `类型：${event.category || '通用任务'}${event.needs_clarification ? ' · 需要补充信息' : ''}`
+  else if (type === 'node_context_prepared') detail = `${event.tool_policy || 'auto'} 策略 · RAG ${event.rag_mode || 'auto'} · 上下文 ${event.context_chars || 0}/${event.context_char_limit || 0} 字${event.removed_chars ? ` · 压缩 ${event.removed_chars} 字` : ''}`
   else if (type === 'context_ready') detail = `知识片段 ${event.rag?.citations || 0} 条 · 历史消息 ${event.history_messages || 0} 条`
+  else if (type === 'tool_policy_applied') detail = `${event.preset || 'balanced'} · 最多 ${event.max_iterations || 1} 轮 / ${event.max_calls || 0} 次 · 可用工具 ${event.available_tools?.length || 0} 个`
   else if (type === 'rag_query_rewritten') detail = `生成 ${event.query_count || event.queries?.length || 0} 个检索问题`
   else if (type === 'rag_hybrid_retrieval_completed') detail = `向量候选 ${event.dense_candidates || 0} · 全文候选 ${event.lexical_candidates || 0}`
   else if (type === 'rag_rerank_completed') detail = `重排 ${event.reranked || 0} 条 · 选中 ${event.selected || 0} 条`
@@ -449,8 +472,11 @@ function agentEventInfo(event: Entity) {
   else if (type === 'web_page_fetched') detail = `${event.title || event.url || ''} · ${event.status || '已读取'}`
   else if (type === 'model_response') detail = `第 ${event.iteration || 1} 次响应 · ${event.stage || 'answer'}${event.tool_calls?.length ? ` · 调用 ${event.tool_calls.join('、')}` : ''}`
   else if (type === 'tool_result') detail = `${event.tool || '工具'} · ${event.status || 'completed'}${event.error ? ` · ${event.error}` : ''}`
+  else if (type === 'tool_result_reused') detail = `${event.tool || '工具'} · 相同参数不再重复执行`
+  else if (type === 'tool_budget_updated') detail = `已执行 ${event.calls_executed || 0}/${event.max_calls || 0} 次 · 复用 ${event.calls_reused || 0} 次 · 第 ${event.iterations_used || 1}/${event.max_iterations || 1} 轮`
+  else if (type === 'tool_context_compacted') detail = `压缩 ${event.removed_chars || 0} 字 · 上限 ${event.context_char_limit || 0} 字`
   else if (type === 'generation_verified') detail = `${event.passed ? '校验通过' : `发现 ${event.issues?.length || 0} 个问题`} · 引用 ${event.citation_count || 0} 条`
-  else if (type === 'run_completed') detail = `耗时 ${event.duration_ms || 0} ms · Token ${event.token_usage || 0}`
+  else if (type === 'run_completed') detail = `耗时 ${event.duration_ms || 0} ms · 模型请求 ${event.model_calls || 1} 次 · 工具执行 ${event.tool_calls_executed || 0} 次 · Token ${event.token_usage || 0}`
   return {
     ...info,
     type,
@@ -770,6 +796,8 @@ function normalizeNodes(definition: Entity): CanvasNode[] {
     const config = { ...(node.config || {}) }
     if (['agent', 'knowledge'].includes(node.type) && config.auto_input === undefined) config.auto_input = true
     if (node.type === 'agent' && config.retry_count === undefined) config.retry_count = 1
+    if (node.type === 'agent' && !config.tool_policy) config.tool_policy = 'auto'
+    if (node.type === 'agent' && !config.rag_mode) config.rag_mode = 'auto'
     if (node.type === 'function') config.arguments ||= ['', '']
     return {
       ...node,
@@ -896,7 +924,7 @@ function addAgentAt(agent: Entity, point: { x: number; y: number }) {
     id,
     type: 'agent',
     label: agent.name,
-    config: { agent_id: agent.id, input: '{{input.task}}', prompt: '', auto_input: true, retry_count: 1, max_output_tokens: 8192 },
+    config: { agent_id: agent.id, input: '{{input.task}}', prompt: '', auto_input: true, retry_count: 1, max_output_tokens: 8192, tool_policy: 'auto', rag_mode: 'auto' },
     position: {
       x: Math.max(8, point.x - nodeWidth / 2),
       y: Math.max(8, point.y - nodeHeight / 2),
@@ -1770,6 +1798,13 @@ onBeforeUnmount(() => {
           <template v-if="selectedNode.type==='agent'">
             <div class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option v-for="agent in agents" :key="agent.id" :value="agent.id" :disabled="!executableAgent(agent)">{{ agent.name }} · v{{ agent.version }} · {{ statusLabel(agent.status) }}</option></select></div>
             <label class="switch-line"><input v-model="selectedNode.config.auto_input" type="checkbox"><span>根据入线自动聚合输入</span></label>
+            <div class="field"><label>节点工具策略</label><select v-model="selectedNode.config.tool_policy" class="select"><option v-for="policy in agentToolPolicies" :key="policy.value" :value="policy.value">{{ policy.label }}</option></select><span class="field-help">{{ toolPolicyDescription(selectedNode.config.tool_policy) }}</span></div>
+            <div class="field"><label>节点 RAG 策略</label><select v-model="selectedNode.config.rag_mode" class="select"><option v-for="mode in agentRagModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select><span class="field-help">{{ ragModeDescription(selectedNode.config.rag_mode) }}</span></div>
+            <div v-if="['balanced','full'].includes(selectedNode.config.tool_policy)" class="field-grid two-col compact-grid">
+              <div class="field"><label>最多工具轮数</label><input v-model.number="selectedNode.config.max_tool_iterations" type="number" min="1" max="8" class="input" placeholder="自动"></div>
+              <div class="field"><label>最多工具请求</label><input v-model.number="selectedNode.config.max_tool_calls" type="number" min="0" max="64" class="input" placeholder="自动"></div>
+            </div>
+            <div class="field"><label>节点输入预算（字符）</label><input v-model.number="selectedNode.config.input_context_char_limit" type="number" min="8000" max="120000" step="4000" class="input" placeholder="按职责自动"><span class="field-help">只压缩超出预算的长上下文，并保留开头和结尾；不会触发额外模型请求。</span></div>
             <div class="field"><label>接口失败自动重试</label><input v-model.number="selectedNode.config.retry_count" type="number" min="0" max="3" class="input"><span class="field-help">仅对超时、限流和 5xx 等临时故障重试。</span></div>
             <div class="field"><label>最长输出 Token</label><input v-model.number="selectedNode.config.max_output_tokens" type="number" min="512" max="32768" step="512" class="input"><span class="field-help">长文撰写建议 12000–20000；该值仅覆盖当前节点，不修改 Agent 全局设置。</span></div>
             <div class="field"><label>节点专用任务说明</label><textarea v-model="selectedNode.config.prompt" class="textarea inspector-textarea" placeholder="定义本节点角色、交付结构、证据边界和验收标准" /><span class="field-help">此说明会在运行时真实传给 Agent，并支持引用上游变量。</span></div>

@@ -41,6 +41,133 @@ class ExecutionContext:
     approval_run_id: str | None = None
     permission_mode: str | None = None
     approval_policy_id: str | None = None
+    tool_policy: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AgentToolPolicy:
+    """A per-run tool budget so workflow roles do not inherit every Agent capability."""
+
+    preset: str
+    max_iterations: int
+    max_calls: int
+    result_char_limit: int
+    context_char_limit: int
+    allowed_tools: frozenset[str] | None
+    allow_mcp: bool
+    stop_on_repeated_call: bool
+    allow_repair_retry: bool
+    allow_quality_review: bool
+
+    @classmethod
+    def resolve(cls, value: dict[str, Any] | None = None) -> "AgentToolPolicy":
+        raw = dict(value or {})
+        preset = str(raw.get("preset") or "full").strip().lower()
+        presets: dict[str, dict[str, Any]] = {
+            "planning": {
+                "max_iterations": 1,
+                "max_calls": 0,
+                "result_char_limit": 3000,
+                "context_char_limit": 8000,
+                "allowed_tools": [],
+                "allow_mcp": False,
+                "allow_repair_retry": False,
+                "allow_quality_review": False,
+            },
+            "research": {
+                # web_research is collected once by the deterministic research service;
+                # it is intentionally not exposed as another model-callable tool.
+                "max_iterations": 1,
+                "max_calls": 0,
+                "result_char_limit": 5000,
+                "context_char_limit": 16000,
+                "allowed_tools": ["web_research"],
+                "allow_mcp": False,
+                "allow_repair_retry": False,
+                "allow_quality_review": False,
+            },
+            "writing": {
+                "max_iterations": 1,
+                "max_calls": 0,
+                "result_char_limit": 4000,
+                "context_char_limit": 12000,
+                "allowed_tools": [],
+                "allow_mcp": False,
+                "allow_repair_retry": True,
+                "allow_quality_review": False,
+            },
+            "review": {
+                "max_iterations": 1,
+                "max_calls": 0,
+                "result_char_limit": 4000,
+                "context_char_limit": 12000,
+                "allowed_tools": [],
+                "allow_mcp": False,
+                "allow_repair_retry": False,
+                "allow_quality_review": False,
+            },
+            "balanced": {
+                "max_iterations": min(settings.max_tool_iterations, 3),
+                "max_calls": 6,
+                "result_char_limit": 6000,
+                "context_char_limit": 20000,
+                "allowed_tools": None,
+                "allow_mcp": True,
+                "allow_repair_retry": True,
+                "allow_quality_review": True,
+            },
+            "full": {
+                "max_iterations": settings.max_tool_iterations,
+                "max_calls": 16,
+                "result_char_limit": 8000,
+                "context_char_limit": 32000,
+                "allowed_tools": None,
+                "allow_mcp": True,
+                "allow_repair_retry": True,
+                "allow_quality_review": True,
+            },
+        }
+        if preset not in presets:
+            preset = "balanced"
+        resolved = {**presets[preset], **{key: item for key, item in raw.items() if item is not None}}
+        allowed = resolved.get("allowed_tools")
+        return cls(
+            preset=preset,
+            max_iterations=max(
+                1,
+                min(int(resolved.get("max_iterations", 1)), settings.max_tool_iterations),
+            ),
+            max_calls=max(0, min(int(resolved.get("max_calls", 0)), 64)),
+            result_char_limit=max(
+                1000, min(int(resolved.get("result_char_limit", 6000)), 24000)
+            ),
+            context_char_limit=max(
+                4000, min(int(resolved.get("context_char_limit", 20000)), 100000)
+            ),
+            allowed_tools=(
+                frozenset(str(item) for item in allowed)
+                if isinstance(allowed, (list, tuple, set, frozenset))
+                else None
+            ),
+            allow_mcp=bool(resolved.get("allow_mcp", True)),
+            stop_on_repeated_call=bool(resolved.get("stop_on_repeated_call", True)),
+            allow_repair_retry=bool(resolved.get("allow_repair_retry", True)),
+            allow_quality_review=bool(resolved.get("allow_quality_review", True)),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "preset": self.preset,
+            "max_iterations": self.max_iterations,
+            "max_calls": self.max_calls,
+            "result_char_limit": self.result_char_limit,
+            "context_char_limit": self.context_char_limit,
+            "allowed_tools": sorted(self.allowed_tools) if self.allowed_tools is not None else None,
+            "allow_mcp": self.allow_mcp,
+            "stop_on_repeated_call": self.stop_on_repeated_call,
+            "allow_repair_retry": self.allow_repair_retry,
+            "allow_quality_review": self.allow_quality_review,
+        }
 
 
 class AgentEngine:
@@ -128,6 +255,55 @@ class AgentEngine:
         if "max_output_tokens" in parameters:
             options["max_output_tokens"] = max_output_tokens
         return await provider.chat(messages, **options)
+
+    @staticmethod
+    def _bounded_text(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        marker = f"\n…[已压缩 {len(value) - limit:,} 个字符]…\n"
+        available = max(100, limit - len(marker))
+        head = max(80, int(available * 0.72))
+        tail = max(20, available - head)
+        return f"{value[:head]}{marker}{value[-tail:]}"
+
+    @classmethod
+    def _tool_result_for_model(cls, result: dict[str, Any], limit: int) -> str:
+        serialized = dumps(result)
+        if len(serialized) <= limit:
+            return serialized
+        excerpt = cls._bounded_text(serialized, max(400, limit - 260))
+        return dumps(
+            {
+                "status": result.get("status", "completed"),
+                "tool": result.get("tool"),
+                "truncated": True,
+                "original_chars": len(serialized),
+                "content_excerpt": excerpt,
+                "instruction": "工具结果已按上下文预算压缩；请基于可见证据作答，不要重复调用相同参数。",
+            }
+        )
+
+    @classmethod
+    def _compact_tool_messages(
+        cls, messages: list[dict[str, Any]], limit: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        copied = [dict(item) for item in messages]
+        tool_indexes = [
+            index for index, item in enumerate(copied) if item.get("role") == "tool"
+        ]
+        total = sum(len(str(copied[index].get("content") or "")) for index in tool_indexes)
+        if total <= limit:
+            return copied, 0
+        original_total = total
+        for index in tool_indexes:
+            if total <= limit:
+                break
+            content = str(copied[index].get("content") or "")
+            target = max(500, len(content) - (total - limit))
+            compacted = cls._bounded_text(content, target)
+            copied[index]["content"] = compacted
+            total -= len(content) - len(compacted)
+        return copied, max(0, original_total - total)
 
     def call_agent_schema(self) -> dict[str, Any]:
         return {
@@ -224,10 +400,15 @@ class AgentEngine:
         query: str,
         conversation_messages: list[dict[str, str]] | None = None,
         on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        enabled_override: bool | None = None,
+        query_rewrite_override: bool | None = None,
+        cross_language_override: bool | None = None,
     ) -> dict[str, Any]:
         config = self.rag_config(agent)
         knowledge_base_ids = loads(agent.knowledge_bases_json, [])
-        if not config.enabled or not (
+        enabled = config.enabled if enabled_override is None else enabled_override
+        if not enabled or not (
             knowledge_base_ids or config.knowledge_group_ids
         ):
             return {
@@ -274,8 +455,16 @@ class AgentEngine:
             dense_weight=config.dense_weight,
             lexical_weight=config.lexical_weight,
             context_char_budget=config.context_char_budget,
-            query_rewrite=config.query_rewrite,
-            cross_language=config.cross_language,
+            query_rewrite=(
+                config.query_rewrite
+                if query_rewrite_override is None
+                else query_rewrite_override
+            ),
+            cross_language=(
+                config.cross_language
+                if cross_language_override is None
+                else cross_language_override
+            ),
             knowledge_graph=config.knowledge_graph,
             parent_expansion=config.parent_expansion,
             complete_list_expansion=config.complete_list_expansion,
@@ -457,6 +646,8 @@ class AgentEngine:
         conversation_messages: list[dict[str, str]] | None = None,
         on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         max_output_tokens: int | None = None,
+        tool_policy: dict[str, Any] | None = None,
+        rag_policy: dict[str, Any] | None = None,
     ) -> AgentRun:
         execution = execution or ExecutionContext()
         if user_context:
@@ -476,6 +667,10 @@ class AgentEngine:
             raise RuntimeError(f"检测到 Agent 循环调用: {chain}")
 
         agent_permissions = loads(agent.permissions_json, {})
+        runtime_tool_policy = AgentToolPolicy.resolve(
+            tool_policy or execution.tool_policy
+        )
+        execution.tool_policy = runtime_tool_policy.as_dict()
         security_profile = str(
             (user_context or {}).get("security_profile")
             or agent_permissions.get("security_profile")
@@ -531,9 +726,14 @@ class AgentEngine:
             }
             permissions = agent_permissions
             allowed_tools = set(loads(agent.tools_json, [])) | {"exec"}
-            mcp_schemas, mcp_bindings, mcp_services, mcp_errors = await self._mcp_catalog(
-                db, permissions
-            )
+            if runtime_tool_policy.allowed_tools is not None:
+                allowed_tools.intersection_update(runtime_tool_policy.allowed_tools)
+            if runtime_tool_policy.allow_mcp and runtime_tool_policy.max_calls > 0:
+                mcp_schemas, mcp_bindings, mcp_services, mcp_errors = (
+                    await self._mcp_catalog(db, permissions)
+                )
+            else:
+                mcp_schemas, mcp_bindings, mcp_services, mcp_errors = [], {}, [], []
             generation_config = self.generation_config(agent)
             effective_max_output_tokens = generation_config.max_output_tokens
             if max_output_tokens is not None:
@@ -544,12 +744,17 @@ class AgentEngine:
             async def publish_rag_step(event: dict[str, Any]) -> None:
                 await emit({**event, "type": f"rag_{event['type']}"})
 
+            runtime_rag_policy = dict(rag_policy or {})
+            rag_mode = str(runtime_rag_policy.get("mode") or "agent").lower()
             rag_result = await self._prepare_agent_rag(
                 db,
                 agent,
                 input_text,
                 conversation_messages,
                 publish_rag_step,
+                enabled_override=(False if rag_mode == "off" else None),
+                query_rewrite_override=runtime_rag_policy.get("query_rewrite"),
+                cross_language_override=runtime_rag_policy.get("cross_language"),
             )
             system_prompt = await self._build_system_prompt(
                 db,
@@ -564,6 +769,8 @@ class AgentEngine:
                 conversation_messages,
                 image_generation_available=bool(image_endpoint),
                 math_query=math_query,
+                available_tools=allowed_tools,
+                tool_policy=runtime_tool_policy,
             )
             await emit({"type": "intent_detected", **intent.as_dict()})
             await emit(
@@ -578,11 +785,17 @@ class AgentEngine:
                     },
                     "history_messages": len(conversation_messages or []),
                     "capabilities": {
-                        "exec": True,
+                        "exec": "exec" in allowed_tools,
                         "skills": "【已启用 Skills】" in system_prompt,
                         "mcp_services": mcp_services,
                         "image_generation": bool(image_endpoint),
                         "math_visualization": math_query,
+                    },
+                    "tool_policy": runtime_tool_policy.as_dict(),
+                    "rag_policy": {
+                        "mode": rag_mode,
+                        "query_rewrite": runtime_rag_policy.get("query_rewrite"),
+                        "cross_language": runtime_rag_policy.get("cross_language"),
                     },
                 }
             )
@@ -594,11 +807,28 @@ class AgentEngine:
             if "call_agent" in allowed_tools:
                 schemas.append(self.call_agent_schema())
             schemas.extend(mcp_schemas)
+            if runtime_tool_policy.max_calls <= 0:
+                schemas = []
             if mcp_errors:
                 await emit({"type": "mcp_unavailable", "errors": mcp_errors})
+            await emit(
+                {
+                    "type": "tool_policy_applied",
+                    "preset": runtime_tool_policy.preset,
+                    "max_iterations": runtime_tool_policy.max_iterations,
+                    "max_calls": runtime_tool_policy.max_calls,
+                    "result_char_limit": runtime_tool_policy.result_char_limit,
+                    "context_char_limit": runtime_tool_policy.context_char_limit,
+                    "available_tools": [
+                        item["function"]["name"] for item in schemas
+                    ],
+                    "mcp_enabled": runtime_tool_policy.allow_mcp,
+                }
+            )
             provider = provider_from_endpoint(endpoint) if endpoint else get_provider(agent.provider)
             model_name = endpoint.default_model if endpoint else agent.model
             total_tokens = 0
+            model_calls = 0
             final_content = ""
             research_requested = (
                 not local_request
@@ -679,16 +909,34 @@ class AgentEngine:
             messages.extend(conversation_messages or [])
             messages.append({"role": "user", "content": input_text})
 
-            for iteration in range(settings.max_tool_iterations):
+            tool_calls_requested = 0
+            tool_calls_executed = 0
+            tool_calls_reused = 0
+            tool_cache: dict[str, dict[str, Any]] = {}
+            convergence_reason = ""
+            for iteration in range(runtime_tool_policy.max_iterations):
+                model_messages, compacted_chars = self._compact_tool_messages(
+                    messages, runtime_tool_policy.context_char_limit
+                )
+                if compacted_chars:
+                    await emit(
+                        {
+                            "type": "tool_context_compacted",
+                            "iteration": iteration + 1,
+                            "removed_chars": compacted_chars,
+                            "context_char_limit": runtime_tool_policy.context_char_limit,
+                        }
+                    )
                 response = await self._chat(
                     provider,
-                    messages,
+                    model_messages,
                     model=model_name,
                     temperature=agent.temperature,
                     tools=schemas or None,
                     top_p=generation_config.top_p,
                     max_output_tokens=effective_max_output_tokens,
                 )
+                model_calls += 1
                 total_tokens += response.tokens
                 await emit(
                     {
@@ -721,48 +969,107 @@ class AgentEngine:
                     }
                 )
                 for item in response.tool_calls:
-                    try:
-                        result = await self._execute_tool(
-                            db,
-                            agent,
-                            run,
-                            item["name"],
-                            item["arguments"],
-                            execution,
-                            security_context,
-                            mcp_bindings,
+                    tool_calls_requested += 1
+                    cache_key = f"{item['name']}:{dumps(item['arguments'])}"
+                    if cache_key in tool_cache:
+                        result = tool_cache[cache_key]
+                        tool_calls_reused += 1
+                        await emit(
+                            {
+                                "type": "tool_result_reused",
+                                "tool": item["name"],
+                                "reason": "相同参数已执行，本次直接复用结果",
+                            }
                         )
-                    except Exception as exc:
-                        # A recoverable tool problem (for example, a stale file path
-                        # proposed by the model) must not abort the whole Agent run.
-                        # Return the failure as a tool message so the model can inspect
-                        # the workspace, choose another path, or continue without it.
-                        message = str(exc).strip() or f"{type(exc).__name__}：工具执行失败"
+                        if runtime_tool_policy.stop_on_repeated_call:
+                            convergence_reason = "repeated_tool_call"
+                    elif tool_calls_executed >= runtime_tool_policy.max_calls:
                         result = {
-                            "status": "failed",
-                            "error": message,
+                            "status": "budget_exhausted",
                             "tool": item["name"],
-                            "recovery": "请检查参数；读取文件前先调用 list_directory，或跳过该文件继续任务。",
+                            "error": "本节点工具调用预算已用尽，请基于已有结果直接生成最终交付。",
                         }
-                    result = await self._publish_tool_result(db, emit, item["name"], result)
+                        convergence_reason = "tool_call_budget"
+                    else:
+                        try:
+                            result = await self._execute_tool(
+                                db,
+                                agent,
+                                run,
+                                item["name"],
+                                item["arguments"],
+                                execution,
+                                security_context,
+                                mcp_bindings,
+                            )
+                        except Exception as exc:
+                            # A recoverable tool problem (for example, a stale file path
+                            # proposed by the model) must not abort the whole Agent run.
+                            message = str(exc).strip() or f"{type(exc).__name__}：工具执行失败"
+                            result = {
+                                "status": "failed",
+                                "error": message,
+                                "tool": item["name"],
+                                "recovery": "请检查参数；读取文件前先调用 list_directory，或跳过该文件继续任务。",
+                            }
+                        tool_calls_executed += 1
+                        result = await self._publish_tool_result(
+                            db, emit, item["name"], result
+                        )
+                        tool_cache[cache_key] = result
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": item["id"],
-                            "content": dumps(result),
+                            "content": self._tool_result_for_model(
+                                result, runtime_tool_policy.result_char_limit
+                            ),
                         }
                     )
+                await emit(
+                    {
+                        "type": "tool_budget_updated",
+                        "iterations_used": iteration + 1,
+                        "max_iterations": runtime_tool_policy.max_iterations,
+                        "calls_requested": tool_calls_requested,
+                        "calls_executed": tool_calls_executed,
+                        "calls_reused": tool_calls_reused,
+                        "max_calls": runtime_tool_policy.max_calls,
+                    }
+                )
+                if convergence_reason:
+                    break
             else:
+                if not final_content:
+                    convergence_reason = "tool_iteration_budget"
+
+            if not final_content:
                 await emit(
                     {
                         "type": "tool_iteration_limit_reached",
-                        "iterations": settings.max_tool_iterations,
-                        "message": "工具调用达到上限，正在基于已取得的真实结果强制收敛并生成最终答案。",
+                        "iterations": runtime_tool_policy.max_iterations,
+                        "calls_requested": tool_calls_requested,
+                        "calls_executed": tool_calls_executed,
+                        "calls_reused": tool_calls_reused,
+                        "reason": convergence_reason or "tool_iteration_budget",
+                        "message": "本节点已完成允许的资料调用，正在基于真实结果整理最终答案。",
                     }
                 )
+                recovery_messages, compacted_chars = self._compact_tool_messages(
+                    messages, runtime_tool_policy.context_char_limit
+                )
+                if compacted_chars:
+                    await emit(
+                        {
+                            "type": "tool_context_compacted",
+                            "iteration": runtime_tool_policy.max_iterations + 1,
+                            "removed_chars": compacted_chars,
+                            "context_char_limit": runtime_tool_policy.context_char_limit,
+                        }
+                    )
                 recovery = await self._chat(
                     provider,
-                    messages
+                    recovery_messages
                     + [
                         {
                             "role": "user",
@@ -779,6 +1086,7 @@ class AgentEngine:
                     top_p=generation_config.top_p,
                     max_output_tokens=effective_max_output_tokens,
                 )
+                model_calls += 1
                 total_tokens += recovery.tokens
                 final_content = recovery.content.strip()
                 await emit(
@@ -815,7 +1123,12 @@ class AgentEngine:
                         rag_result,
                         generation_config,
                     )
-                if quality_issues and endpoint and generation_config.repair_retry:
+                if (
+                    quality_issues
+                    and endpoint
+                    and generation_config.repair_retry
+                    and runtime_tool_policy.allow_repair_retry
+                ):
                     await emit(
                         {
                             "type": "generation_repair_started",
@@ -841,6 +1154,7 @@ class AgentEngine:
                         top_p=generation_config.top_p,
                         max_output_tokens=effective_max_output_tokens,
                     )
+                    model_calls += 1
                     total_tokens += repair.tokens
                     if repair.content.strip():
                         final_content = repair.content.strip()
@@ -867,7 +1181,11 @@ class AgentEngine:
                     }
                 )
 
-            if research_requested and final_content:
+            if (
+                research_requested
+                and final_content
+                and runtime_tool_policy.allow_quality_review
+            ):
                 try:
                     await emit({"type": "quality_review_started", "sources": len(research_sources)})
                     review = await provider.chat(
@@ -889,6 +1207,7 @@ class AgentEngine:
                         temperature=min(agent.temperature, 0.4),
                         max_output_tokens=effective_max_output_tokens,
                     )
+                    model_calls += 1
                     total_tokens += review.tokens
                     if review.content.strip():
                         final_content = review.content.strip()
@@ -1025,6 +1344,11 @@ class AgentEngine:
                     "type": "run_completed",
                     "duration_ms": run.duration_ms,
                     "token_usage": total_tokens,
+                    "model_calls": model_calls,
+                    "tool_calls_requested": tool_calls_requested,
+                    "tool_calls_executed": tool_calls_executed,
+                    "tool_calls_reused": tool_calls_reused,
+                    "tool_policy": runtime_tool_policy.preset,
                 }
             )
             await audit(
@@ -1065,25 +1389,42 @@ class AgentEngine:
         conversation_messages: list[dict[str, str]] | None = None,
         image_generation_available: bool = False,
         math_query: bool = False,
+        available_tools: set[str] | None = None,
+        tool_policy: AgentToolPolicy | None = None,
     ) -> str:
+        available_tools = available_tools or set()
         parts = [
             agent.system_prompt,
             "你运行在 EvoAgent 中。关键结论必须说明依据；不确定时明确标注。",
             "所有输出均为 AI 生成内容，涉及高风险领域必须建议人工复核。",
             (
-                "当用户提到桌面、本地路径、文件或目录时，必须优先使用 list_directory、read_file、"
-                "search_files 或 exec，禁止把本地请求改成网页搜索。不要猜测文件名；需要读取"
-                "文件时先确认实际路径。路径可以是绝对路径，但必须符合本轮安全配置。"
-            ),
-            (
                 f"本轮安全配置：文件系统模式 {security.filesystem_mode}；命令模式 "
                 f"{security.command_mode}；授权根目录：{'；'.join(security.roots)}。"
             ),
-            (
-                "你已具备 exec 命令执行能力，但必须遵循本轮安全范围和审批方式。"
-                "需要操作项目、运行测试或检查环境时，应主动使用工具并依据真实结果回答。"
-            ),
         ]
+        local_tools = available_tools.intersection(
+            {"list_directory", "read_file", "search_files", "write_file", "run_powershell", "exec"}
+        )
+        if local_tools:
+            parts.append(
+                "本轮可用本地工具："
+                + "、".join(sorted(local_tools))
+                + "。仅当任务确实依赖本地事实或操作时调用；不要为确认已知信息而调用，"
+                "不要使用相同参数重复调用。路径必须符合本轮安全配置。"
+            )
+        else:
+            parts.append(
+                "本节点不开放主动本地工具调用。请直接依据用户输入、上游结果与系统已附加的"
+                "知识上下文完成本节点职责，不要索要或猜测工具结果。"
+            )
+        if tool_policy:
+            parts.append(
+                "【工具停止条件】\n"
+                f"策略：{tool_policy.preset}；最多 {tool_policy.max_iterations} 轮、"
+                f"{tool_policy.max_calls} 次模型工具请求。已有证据足以形成交付时必须立即停止调用并输出；"
+                "不得重复查询相同参数，也不得为了扩写篇幅继续搜索。预算用尽时基于已有真实结果收敛，"
+                "明确证据缺口，禁止编造。"
+            )
         parts.append(intent_service.prompt(intent))
         if reply_style_prompt:
             parts.append(reply_style_prompt)
@@ -1181,12 +1522,14 @@ class AgentEngine:
                     approval_run_id=execution.approval_run_id,
                     permission_mode=execution.permission_mode,
                     approval_policy_id=execution.approval_policy_id,
+                    tool_policy=execution.tool_policy,
                 ),
                 user_context={
                     "security_profile": security_context.profile,
                     "user_id": execution.user_id,
                     "reply_style_prompt": execution.reply_style_prompt,
                 },
+                tool_policy=execution.tool_policy,
             )
             return {
                 "status": child.status,

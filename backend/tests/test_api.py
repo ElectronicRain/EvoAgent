@@ -1946,6 +1946,193 @@ def test_custom_agent_group_crud_and_membership(client):
     assert refreshed_agent.json()["group_id"] is None
 
 
+def test_workflow_planning_policy_uses_one_model_call_and_no_tools(client, monkeypatch):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+
+    calls: list[list[dict]] = []
+
+    class PlanningBudgetProvider:
+        async def chat(self, messages, *, model, temperature, tools=None):
+            calls.append(tools or [])
+            if tools:
+                return LLMResponse(
+                    content="",
+                    tokens=3,
+                    tool_calls=[
+                        {
+                            "id": "should-not-run",
+                            "name": "list_directory",
+                            "arguments": {"path": "."},
+                        }
+                    ],
+                )
+            return LLMResponse(content="# 综述提纲\n\n1. 研究范围\n2. 证据要求", tokens=5)
+
+    provider = PlanningBudgetProvider()
+    monkeypatch.setattr(agents_service, "get_provider", lambda _provider: provider)
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "工具预算规划 Agent",
+            "slug": "tool-budget-planning-agent",
+            "system_prompt": "根据用户目标输出结构完整、可执行、可验证的研究提纲。",
+            "provider": "planning-budget-test",
+            "model": "test-model",
+            "tools": ["list_directory", "read_file", "exec"],
+            "permissions": {"tool_mode": "auto"},
+        },
+    ).json()
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+            {
+                "id": "plan",
+                "type": "agent",
+                "label": "综述提纲规划",
+                "config": {
+                    "agent_id": agent["id"],
+                    "auto_input": True,
+                    "tool_policy": "auto",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": {"result": "{{nodes.plan.output}}"}},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "plan"},
+            {"source": "plan", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "规划节点预算回归", "description": "禁止无关工具调用", "definition": definition},
+    ).json()
+    response = client.post(
+        f"/api/workflows/{workflow['id']}/run/stream",
+        json={"input": {"task": "为网格质量评估综述规划提纲"}},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    agent_events = [
+        item["step"]["agent_event"]
+        for item in events
+        if item.get("type") == "step"
+        and item.get("step", {}).get("type") == "workflow_agent_event"
+    ]
+
+    assert len(calls) == 1
+    assert calls == [[]]
+    policy = next(item for item in agent_events if item["type"] == "tool_policy_applied")
+    completed = next(item for item in agent_events if item["type"] == "run_completed")
+    assert policy["preset"] == "planning"
+    assert policy["max_calls"] == 0
+    assert completed["model_calls"] == 1
+    assert completed["tool_calls_executed"] == 0
+
+
+def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+
+    model_calls = 0
+
+    class DuplicateToolProvider:
+        async def chat(self, messages, *, model, temperature, tools=None):
+            nonlocal model_calls
+            model_calls += 1
+            if not tools:
+                return LLMResponse(content="已根据一次真实目录结果完成检查。", tokens=3)
+            return LLMResponse(
+                content="",
+                tokens=2,
+                tool_calls=[
+                    {
+                        "id": f"duplicate-{model_calls}",
+                        "name": "list_directory",
+                        "arguments": {"path": "."},
+                    }
+                ],
+            )
+
+    monkeypatch.setattr(
+        agents_service, "get_provider", lambda _provider: DuplicateToolProvider()
+    )
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "重复调用去重 Agent",
+            "slug": "duplicate-tool-dedupe-agent",
+            "system_prompt": "检查一次真实结果后立即形成结论，不重复执行相同参数。",
+            "provider": "duplicate-tool-test",
+            "model": "test-model",
+            "tools": ["list_directory"],
+            "permissions": {"tool_mode": "auto"},
+        },
+    ).json()
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+            {
+                "id": "inspect",
+                "type": "agent",
+                "label": "执行项目检查",
+                "config": {
+                    "agent_id": agent["id"],
+                    "auto_input": True,
+                    "tool_policy": "balanced",
+                    "max_tool_iterations": 3,
+                    "max_tool_calls": 6,
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": {"result": "{{nodes.inspect.output}}"}},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "inspect"},
+            {"source": "inspect", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "重复工具调用去重回归", "description": "缓存相同结果", "definition": definition},
+    ).json()
+    response = client.post(
+        f"/api/workflows/{workflow['id']}/run/stream",
+        json={"input": {"task": "完成项目状态检查"}, "permission_mode": "auto"},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    agent_events = [
+        item["step"]["agent_event"]
+        for item in events
+        if item.get("type") == "step"
+        and item.get("step", {}).get("type") == "workflow_agent_event"
+    ]
+    completed = next(item for item in agent_events if item["type"] == "run_completed")
+
+    assert model_calls == 3
+    assert sum(item["type"] == "tool_result" for item in agent_events) == 1
+    assert sum(item["type"] == "tool_result_reused" for item in agent_events) == 1
+    assert completed["tool_calls_requested"] == 2
+    assert completed["tool_calls_executed"] == 1
+    assert completed["tool_calls_reused"] == 1
+
+
 def test_missing_file_tool_result_does_not_abort_agent(client, monkeypatch):
     from backend.app.services import agents as agents_service
     from backend.app.services.llm import LLMResponse

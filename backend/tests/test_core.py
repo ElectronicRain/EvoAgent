@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from backend.app.services.agents import AgentEngine, AgentToolPolicy
 from backend.app.services.knowledge import chunk_text
 from backend.app.services.intent import intent_service
 from backend.app.services.secrets import secret_store
@@ -56,6 +57,48 @@ def test_workflow_node_retry_only_accepts_transient_failures():
     assert engine._retryable_node_error(RuntimeError("HTTP 503: busy")) is True
     assert engine._retryable_node_error(RuntimeError("HTTP 402: insufficient")) is False
     assert engine._retryable_node_error(LookupError("Agent 不存在")) is False
+
+
+def test_workflow_agent_roles_receive_cost_aware_tool_policies():
+    engine = WorkflowEngine()
+
+    assert engine.agent_node_policy_preset("综述提纲规划") == "planning"
+    assert engine.agent_node_policy_preset("前沿文献检索") == "research"
+    assert engine.agent_node_policy_preset("SCI 综述撰写") == "writing"
+    assert engine.agent_node_policy_preset("学术质量评审") == "review"
+    assert engine.agent_node_policy_preset("执行项目测试") == "balanced"
+
+    planning = AgentToolPolicy.resolve(
+        engine.agent_node_tool_policy("综述提纲规划", {"tool_policy": "auto"})
+    )
+    research = AgentToolPolicy.resolve(
+        engine.agent_node_tool_policy("前沿文献检索", {"tool_policy": "auto"})
+    )
+    assert planning.max_calls == 0
+    assert planning.allow_mcp is False
+    assert research.allowed_tools == frozenset({"web_research"})
+    assert research.allow_quality_review is False
+    assert engine.agent_node_rag_policy("综述提纲规划")["mode"] == "agent"
+    assert engine.agent_node_rag_policy("SCI 综述撰写")["mode"] == "off"
+    assert engine.agent_node_rag_policy("学术质量评审")["query_rewrite"] is False
+
+
+def test_tool_results_are_bounded_without_losing_head_and_tail():
+    payload = {"status": "completed", "tool": "read_file", "content": "A" * 9000 + "TAIL"}
+    compacted = AgentEngine._tool_result_for_model(payload, 1800)
+
+    assert len(compacted) < 2200
+    assert '"truncated": true' in compacted
+    assert "TAIL" in compacted
+
+
+def test_corrupted_workflow_prompt_is_detected_and_replaced_with_utf8_default():
+    engine = WorkflowEngine()
+    assert engine.prompt_looks_corrupted("?" * 40 + "{{input.task}}") is True
+    repaired = engine.default_agent_node_prompt("综述提纲规划")
+    assert "可执行提纲" in repaired
+    assert "不要读取本地文件" in repaired
+    assert "只输出完整修订稿" in engine.default_agent_node_prompt("论文修订")
 
 
 def test_academic_workflow_quality_gate_rejects_truncated_unverified_review():
