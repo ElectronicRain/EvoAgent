@@ -18,8 +18,12 @@ def test_openai_compatible_provider_retries_v1_after_root_404(monkeypatch):
     calls = []
 
     class FakeClient:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *_args): return None
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
         async def post(self, url, **_kwargs):
             calls.append(url)
             request = httpx.Request("POST", url)
@@ -54,8 +58,12 @@ def test_openai_compatible_provider_retries_transient_http_failure(monkeypatch):
     calls = 0
 
     class FakeClient:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *_args): return None
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
         async def post(self, url, **_kwargs):
             nonlocal calls
             calls += 1
@@ -733,9 +741,7 @@ def test_custom_model_endpoint_agent_full_chain(client, monkeypatch):
                 200,
                 request=request,
                 json={
-                    "choices": [
-                        {"message": {"content": "自定义模型全链路正常", "tool_calls": []}}
-                    ],
+                    "choices": [{"message": {"content": "自定义模型全链路正常", "tool_calls": []}}],
                     "usage": {"total_tokens": 12},
                 },
             )
@@ -831,9 +837,7 @@ def test_image_model_endpoint_generates_only_when_needed(client, monkeypatch):
     )
     assert endpoint.status_code == 201
     assert endpoint.json()["modality"] == "image"
-    tested = client.post(
-        f"/api/model-endpoints/{endpoint.json()['id']}/test"
-    ).json()
+    tested = client.post(f"/api/model-endpoints/{endpoint.json()['id']}/test").json()
     assert tested["status"] == "healthy"
 
     rejected = client.post(
@@ -890,9 +894,7 @@ def test_math_question_automatically_uses_jsxgraph_skill(client):
         if item["name"] == "jsxgraph-math-visualization"
     )
     assert skill["enabled"] is True
-    agent = next(
-        item for item in client.get("/api/agents").json() if item["slug"] == "planner"
-    )
+    agent = next(item for item in client.get("/api/agents").json() if item["slug"] == "planner")
     run = client.post(
         f"/api/agents/{agent['id']}/run",
         json={
@@ -915,9 +917,7 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     knowledge_before = {
         item["id"]: [
             document["id"]
-            for document in client.get(
-                f"/api/knowledge-bases/{item['id']}/documents"
-            ).json()
+            for document in client.get(f"/api/knowledge-bases/{item['id']}/documents").json()
         ]
         for item in client.get("/api/knowledge-bases").json()
     }
@@ -972,13 +972,12 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     ]
     assert first_step_types.index("intent_detected") < first_step_types.index("context_ready")
     assert first_events[-1]["type"] == "done"
-    assert next(step for step in first_steps if step["type"] == "context_ready")[
-        "history_messages"
-    ] == 0
-    assert any(event["type"] == "assistant" for event in first_events)
-    persistence_step = next(
-        step for step in first_steps if step["type"] == "database_persisted"
+    assert (
+        next(step for step in first_steps if step["type"] == "context_ready")["history_messages"]
+        == 0
     )
+    assert any(event["type"] == "assistant" for event in first_events)
+    persistence_step = next(step for step in first_steps if step["type"] == "database_persisted")
     run_id = next(step["run_id"] for step in first_steps if step["type"] == "run_started")
     assert persistence_step["run_id"] == run_id
     assert persistence_step["conversation_id"] == conversation["id"]
@@ -989,9 +988,7 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     assert knowledge_before == {
         item["id"]: [
             document["id"]
-            for document in client.get(
-                f"/api/knowledge-bases/{item['id']}/documents"
-            ).json()
+            for document in client.get(f"/api/knowledge-bases/{item['id']}/documents").json()
         ]
         for item in client.get("/api/knowledge-bases").json()
     }
@@ -1064,8 +1061,7 @@ def test_agent_output_persists_to_database_without_knowledge_archive(client):
     assert messages[-1]["id"] == persistence_step["message_id"]
     assert messages[-1]["content"]
     assert all(
-        item["name"] != "Agent 任务成果"
-        for item in client.get("/api/knowledge-bases").json()
+        item["name"] != "Agent 任务成果" for item in client.get("/api/knowledge-bases").json()
     )
 
 
@@ -1098,14 +1094,8 @@ def test_multiple_agents_can_complete_conversations_concurrently(client):
             for line in response.text.splitlines()
             if line.startswith("data: ")
         ]
-        step_types = [
-            event["step"]["type"]
-            for event in events
-            if event["type"] == "step"
-        ]
-        messages = client.get(
-            f"/api/conversations/{conversation['id']}/messages"
-        ).json()
+        step_types = [event["step"]["type"] for event in events if event["type"] == "step"]
+        messages = client.get(f"/api/conversations/{conversation['id']}/messages").json()
         assert response.status_code == 200
         assert events[-1]["type"] == "done"
         assert "run_completed" in step_types
@@ -1114,9 +1104,7 @@ def test_multiple_agents_can_complete_conversations_concurrently(client):
         assert [item["role"] for item in messages] == ["user", "assistant"]
 
 
-def test_research_trace_survives_refresh_and_creates_database_artifact(
-    client, monkeypatch
-):
+def test_research_trace_survives_refresh_and_creates_database_artifact(client, monkeypatch):
     from backend.app.services.web_research import web_research_service
 
     async def fake_collect(task, on_event):
@@ -1164,13 +1152,17 @@ def test_research_trace_survives_refresh_and_creates_database_artifact(
         if line.startswith("data: ")
     ]
     types = [
-        event["step"]["type"] if event["type"] == "step" else event["type"]
-        for event in events
+        event["step"]["type"] if event["type"] == "step" else event["type"] for event in events
     ]
     messages = client.get(f"/api/conversations/{conversation['id']}/messages").json()
     artifacts = client.get(f"/api/conversations/{conversation['id']}/artifacts").json()
 
-    assert {"web_search_started", "web_page_fetched", "quality_review_started", "artifact_created"} <= set(types)
+    assert {
+        "web_search_started",
+        "web_page_fetched",
+        "quality_review_started",
+        "artifact_created",
+    } <= set(types)
     assert messages[0]["run_id"]
     assert messages[0]["run_status"] == "completed"
     assert "web_page_fetched" in messages[0]["run_trace_json"]
@@ -1217,9 +1209,7 @@ def test_research_trace_survives_refresh_and_creates_database_artifact(
             "credibility": {"score": 82, "level": "较高"},
         },
     )
-    reviews = client.get(
-        f"/api/conversations/{conversation['id']}/source-reviews"
-    ).json()
+    reviews = client.get(f"/api/conversations/{conversation['id']}/source-reviews").json()
     assert reviewed.status_code == 200
     assert reviews[0]["decision"] == "confirmed"
     assert '"score": 82' in reviews[0]["credibility_json"]
@@ -1367,14 +1357,12 @@ def test_workflow_stream_reports_live_node_progress(client):
     agent_steps = [
         event["step"]
         for event in events
-        if event["type"] == "step"
-        and event["step"]["type"] == "workflow_agent_event"
+        if event["type"] == "step" and event["step"]["type"] == "workflow_agent_event"
     ]
     completed_steps = [
         event["step"]
         for event in events
-        if event["type"] == "step"
-        and event["step"]["type"] == "workflow_node_completed"
+        if event["type"] == "step" and event["step"]["type"] == "workflow_node_completed"
     ]
     result = next(event["run"] for event in events if event["type"] == "workflow_result")
 
@@ -1386,9 +1374,9 @@ def test_workflow_stream_reports_live_node_progress(client):
     assert {"run_started", "model_response", "run_completed"}.issubset(
         {step["agent_event"]["type"] for step in agent_steps}
     )
-    assert next(
-        step for step in completed_steps if step["node_id"] == "agent_stream"
-    )["result"]["output_preview"]
+    assert next(step for step in completed_steps if step["node_id"] == "agent_stream")["result"][
+        "output_preview"
+    ]
     assert result["status"] == "completed"
     assert events[-1]["type"] == "done"
 
@@ -1435,8 +1423,7 @@ def test_workflow_stream_marks_failed_node_with_readable_error(client):
     failed_step = next(
         event["step"]
         for event in events
-        if event["type"] == "step"
-        and event["step"]["type"] == "workflow_node_failed"
+        if event["type"] == "step" and event["step"]["type"] == "workflow_node_failed"
     )
     result = next(event["run"] for event in events if event["type"] == "workflow_result")
 
@@ -1487,7 +1474,11 @@ def test_workflow_run_security_waits_for_inline_approval_and_exposes_reconnect_s
     }
     workflow = client.post(
         "/api/workflows",
-        json={"name": "工作流审批恢复测试", "description": "审批与状态恢复", "definition": definition},
+        json={
+            "name": "工作流审批恢复测试",
+            "description": "审批与状态恢复",
+            "definition": definition,
+        },
     ).json()
     existing_ids = {item["id"] for item in client.get("/api/approvals").json()}
 
@@ -1522,13 +1513,9 @@ def test_workflow_run_security_waits_for_inline_approval_and_exposes_reconnect_s
             assert running is not None
             assert approval is not None
             assert approval["run_id"] == running["id"]
-            scoped = client.get(
-                f"/api/approvals?status=pending&run_id={running['id']}"
-            ).json()
+            scoped = client.get(f"/api/approvals?status=pending&run_id={running['id']}").json()
             assert [item["id"] for item in scoped] == [approval["id"]]
-            buffered = client.get(
-                f"/api/workflow-runs/{running['id']}/events?after=0"
-            ).json()
+            buffered = client.get(f"/api/workflow-runs/{running['id']}/events?after=0").json()
             assert buffered["active"] is True
             assert any(
                 event.get("agent_event", {}).get("type") == "approval_required"
@@ -1662,10 +1649,7 @@ def test_professional_workflow_branches_loops_and_persists_artifacts(client):
     assert run["status"] == "completed"
     assert run["iteration_count"] == 2
     assert "已通过：形成最终方案" in output["result"]
-    assert sum(
-        step["status"] == "skipped" and step["node_id"] == "rejected"
-        for step in trace
-    ) == 2
+    assert sum(step["status"] == "skipped" and step["node_id"] == "rejected" for step in trace) == 2
     assert len(artifacts) == 4
     assert {item["iteration"] for item in artifacts} == {1, 2}
     assert all(item["run_id"] == run["id"] for item in artifacts)
@@ -1763,9 +1747,7 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
     assert materialized.status_code == 200
     result = materialized.json()
     created = result["created_agents"]
-    enabled_skill_ids = {
-        item["id"] for item in client.get("/api/skills").json() if item["enabled"]
-    }
+    enabled_skill_ids = {item["id"] for item in client.get("/api/skills").json() if item["enabled"]}
     enabled_mcp_ids = {
         item["id"]
         for item in client.get("/api/extensions").json()
@@ -1779,14 +1761,9 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
         )
         for item in created
     )
+    assert all(enabled_skill_ids.issubset(set(json.loads(item["skills_json"]))) for item in created)
     assert all(
-        enabled_skill_ids.issubset(set(json.loads(item["skills_json"])))
-        for item in created
-    )
-    assert all(
-        enabled_mcp_ids.issubset(
-            set(json.loads(item["permissions_json"])["mcp_extensions"])
-        )
+        enabled_mcp_ids.issubset(set(json.loads(item["permissions_json"])["mcp_extensions"]))
         for item in created
     )
     assert all(
@@ -1795,14 +1772,12 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
         for item in created
     )
     assert all(
-        json.loads(item["generation_config_json"])["max_output_tokens"] >= 8192
-        for item in created
+        json.loads(item["generation_config_json"])["max_output_tokens"] >= 8192 for item in created
     )
     assert all(json.loads(item["generation_config_json"]) for item in created)
     assert not result["agent_drafts"]
     assert all(
-        node["config"].get("agent_id")
-        and "agent_draft_key" not in node["config"]
+        node["config"].get("agent_id") and "agent_draft_key" not in node["config"]
         for node in result["definition"]["nodes"]
         if node["type"] == "agent"
     )
@@ -1823,9 +1798,7 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
     assert run.status_code == 200
     assert run.json()["status"] == "completed"
     assert run.json()["iteration_count"] == 2
-    assert client.get(
-        f"/api/workflow-runs/{run.json()['id']}/artifacts"
-    ).json()
+    assert client.get(f"/api/workflow-runs/{run.json()['id']}/artifacts").json()
 
 
 def test_offline_agent_create_and_existing_agent_update(client):
@@ -1958,9 +1931,7 @@ def test_agent_rag_settings_preview_and_complete_five_point_context(client):
     assert run_data["status"] == "completed"
     assert "5. 按需加载页面" in run_data["output_text"]
     verification = next(
-        item
-        for item in json.loads(run_data["trace_json"])
-        if item["type"] == "generation_verified"
+        item for item in json.loads(run_data["trace_json"]) if item["type"] == "generation_verified"
     )
     assert verification["passed"] is True
     evaluation_case = client.post(
@@ -1985,12 +1956,7 @@ def test_agent_rag_settings_preview_and_complete_five_point_context(client):
     assert evaluation_data["summary"]["recall_at_k"] == 1
     assert evaluation_data["summary"]["mrr"] == 1
     assert evaluation_data["results"][0]["list_items"] == 5
-    assert (
-        client.delete(
-            f"/api/evaluation-cases/{evaluation_case.json()['id']}"
-        ).status_code
-        == 204
-    )
+    assert client.delete(f"/api/evaluation-cases/{evaluation_case.json()['id']}").status_code == 204
 
 
 def test_agent_rag_rejects_zero_hybrid_weights(client):
@@ -2118,7 +2084,11 @@ def test_workflow_planning_policy_uses_one_model_call_and_no_tools(client, monke
     }
     workflow = client.post(
         "/api/workflows",
-        json={"name": "规划节点预算回归", "description": "禁止无关工具调用", "definition": definition},
+        json={
+            "name": "规划节点预算回归",
+            "description": "禁止无关工具调用",
+            "definition": definition,
+        },
     ).json()
     response = client.post(
         f"/api/workflows/{workflow['id']}/run/stream",
@@ -2132,8 +2102,7 @@ def test_workflow_planning_policy_uses_one_model_call_and_no_tools(client, monke
     agent_events = [
         item["step"]["agent_event"]
         for item in events
-        if item.get("type") == "step"
-        and item.get("step", {}).get("type") == "workflow_agent_event"
+        if item.get("type") == "step" and item.get("step", {}).get("type") == "workflow_agent_event"
     ]
 
     assert len(calls) == 1
@@ -2233,8 +2202,7 @@ def test_workflow_research_policy_collects_once_then_calls_model_once(client, mo
     agent_events = [
         item["step"]["agent_event"]
         for item in events
-        if item.get("type") == "step"
-        and item.get("step", {}).get("type") == "workflow_agent_event"
+        if item.get("type") == "step" and item.get("step", {}).get("type") == "workflow_agent_event"
     ]
 
     policy = next(item for item in agent_events if item["type"] == "tool_policy_applied")
@@ -2243,6 +2211,92 @@ def test_workflow_research_policy_collects_once_then_calls_model_once(client, mo
     assert policy["deterministic_research"] is True
     assert policy["available_tools"] == ["web_research"]
     assert any(item["type"] == "research_context_ready" for item in agent_events)
+
+
+def test_workflow_research_stops_before_model_when_sources_are_missing(client, monkeypatch):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+    from backend.app.services.web_research import web_research_service
+
+    model_calls = 0
+
+    class ModelMustNotRun:
+        async def chat(self, messages, *, model, temperature, tools=None, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            return LLMResponse(content="不应生成", tokens=1)
+
+    async def fake_collect(_task, _on_event):
+        return []
+
+    monkeypatch.setattr(
+        agents_service,
+        "get_provider",
+        lambda _provider: ModelMustNotRun(),
+    )
+    monkeypatch.setattr(web_research_service, "collect", fake_collect)
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "零来源拦截 Agent",
+            "slug": "zero-source-research-guard-agent",
+            "system_prompt": "只基于真实来源形成证据表。",
+            "provider": "research-guard-test",
+            "model": "test-model",
+            "tools": ["web_research"],
+        },
+    ).json()
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+            {
+                "id": "research",
+                "type": "agent",
+                "label": "前沿文献检索",
+                "config": {
+                    "agent_id": agent["id"],
+                    "auto_input": True,
+                    "tool_policy": "auto",
+                    "retry_count": 0,
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": {"result": "{{nodes.research.output}}"}},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "research"},
+            {"source": "research", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "零来源拦截回归", "description": "禁止虚构", "definition": definition},
+    ).json()
+    response = client.post(
+        f"/api/workflows/{workflow['id']}/run/stream",
+        json={"input": {"task": "请检索 40 篇真实论文并完成综述"}},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    agent_events = [
+        item["step"]["agent_event"]
+        for item in events
+        if item.get("type") == "step" and item.get("step", {}).get("type") == "workflow_agent_event"
+    ]
+
+    assert model_calls == 0
+    assert any(item["type"] == "web_research_empty" for item in agent_events)
+    assert any(item["type"] == "research_requirements_unmet" for item in agent_events)
+    result = next(item["run"] for item in events if item["type"] == "workflow_result")
+    assert result["status"] == "failed"
+    assert "要求 40 条，实际取得 0 条" in result["error"]
 
 
 def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch):
@@ -2269,9 +2323,7 @@ def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch)
                 ],
             )
 
-    monkeypatch.setattr(
-        agents_service, "get_provider", lambda _provider: DuplicateToolProvider()
-    )
+    monkeypatch.setattr(agents_service, "get_provider", lambda _provider: DuplicateToolProvider())
     agent = client.post(
         "/api/agents",
         json={
@@ -2313,7 +2365,11 @@ def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch)
     }
     workflow = client.post(
         "/api/workflows",
-        json={"name": "重复工具调用去重回归", "description": "缓存相同结果", "definition": definition},
+        json={
+            "name": "重复工具调用去重回归",
+            "description": "缓存相同结果",
+            "definition": definition,
+        },
     ).json()
     response = client.post(
         f"/api/workflows/{workflow['id']}/run/stream",
@@ -2327,8 +2383,7 @@ def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch)
     agent_events = [
         item["step"]["agent_event"]
         for item in events
-        if item.get("type") == "step"
-        and item.get("step", {}).get("type") == "workflow_agent_event"
+        if item.get("type") == "step" and item.get("step", {}).get("type") == "workflow_agent_event"
     ]
     completed = next(item for item in agent_events if item["type"] == "run_completed")
 
@@ -2347,7 +2402,9 @@ def test_missing_file_tool_result_does_not_abort_agent(client, monkeypatch):
     class MissingFileThenRecoverProvider:
         async def chat(self, messages, *, model, temperature, tools=None):
             if any(message.get("role") == "tool" for message in messages):
-                return LLMResponse(content="文件缺失已记录，已改用现有上下文继续完成任务。", tokens=8)
+                return LLMResponse(
+                    content="文件缺失已记录，已改用现有上下文继续完成任务。", tokens=8
+                )
             return LLMResponse(
                 content="",
                 tokens=4,
@@ -2453,9 +2510,7 @@ def test_agent_has_exec_skills_and_can_call_selected_mcp(client, monkeypatch):
 
     monkeypatch.setattr(agents_service, "get_provider", lambda _provider: CapabilityProvider())
     knowledge_mcp = next(
-        item
-        for item in client.get("/api/extensions").json()
-        if item["name"] == "学科知识库 MCP"
+        item for item in client.get("/api/extensions").json() if item["name"] == "学科知识库 MCP"
     )
     created = client.post(
         "/api/agents",
@@ -2475,9 +2530,7 @@ def test_agent_has_exec_skills_and_can_call_selected_mcp(client, monkeypatch):
     ).json()
     assert "exec" in json.loads(created["tools_json"])
 
-    run = client.post(
-        f"/api/agents/{created['id']}/run", json={"input": "列出当前知识库"}
-    ).json()
+    run = client.post(f"/api/agents/{created['id']}/run", json={"input": "列出当前知识库"}).json()
     trace = json.loads(run["trace_json"])
     tool_names = {item["function"]["name"] for item in captured["tools"]}
     context = next(item for item in trace if item["type"] == "context_ready")
@@ -2540,9 +2593,7 @@ def test_evolution_requires_evaluation_before_activation(client, monkeypatch):
         if line.startswith("data: ")
     ]
     step_types = [event["step"]["type"] for event in events if event["type"] == "step"]
-    evaluated = next(
-        event["proposal"] for event in events if event["type"] == "evolution_result"
-    )
+    evaluated = next(event["proposal"] for event in events if event["type"] == "evolution_result")
     assert "stream_connected" in step_types
     assert step_types.count("evaluation_case_started") == 3
     assert step_types.count("evaluation_case_completed") == 3
@@ -2599,9 +2650,7 @@ def test_evolution_requires_evaluation_before_activation(client, monkeypatch):
 
 
 def test_evolution_goal_analysis_parallel_versions_and_case_management(client):
-    agent = next(
-        item for item in client.get("/api/agents").json() if item["status"] == "active"
-    )
+    agent = next(item for item in client.get("/api/agents").json() if item["status"] == "active")
     analysis = client.post(
         "/api/evolution/analyze-goal",
         json={
@@ -2682,9 +2731,7 @@ def test_user_auth_usage_memory_profile_and_reply_style(client, monkeypatch):
             captured_system_prompts.append(messages[0]["content"])
             return LLMResponse(content="已完成用户画像测试。", tokens=37)
 
-    monkeypatch.setattr(
-        agents_module, "get_provider", lambda _provider: CapturingProvider()
-    )
+    monkeypatch.setattr(agents_module, "get_provider", lambda _provider: CapturingProvider())
     monkeypatch.setattr(
         agents_module, "provider_from_endpoint", lambda _endpoint: CapturingProvider()
     )
@@ -2721,9 +2768,7 @@ def test_user_auth_usage_memory_profile_and_reply_style(client, monkeypatch):
     assert custom.status_code == 200
     assert custom.json()["reply_style_id"] == "custom"
 
-    agent = next(
-        item for item in client.get("/api/agents").json() if item["status"] == "active"
-    )
+    agent = next(item for item in client.get("/api/agents").json() if item["status"] == "active")
     conversation = client.post(
         f"/api/agents/{agent['id']}/conversations",
         headers=headers,

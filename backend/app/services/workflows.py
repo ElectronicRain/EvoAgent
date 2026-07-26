@@ -98,8 +98,7 @@ def intent_prompt_value(
         }
     if isinstance(value, (list, tuple)):
         return [
-            intent_prompt_value(item, depth + 1, string_limit=string_limit)
-            for item in value[:16]
+            intent_prompt_value(item, depth + 1, string_limit=string_limit) for item in value[:16]
         ]
     return value
 
@@ -172,11 +171,7 @@ def _condition_expression(expression: str) -> bool:
             return False
         if lowered in {"none", "null"}:
             return None
-        if (
-            len(raw) >= 2
-            and raw[0] == raw[-1]
-            and raw[0] in {"'", '"'}
-        ):
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
             return raw[1:-1]
         try:
             return float(raw)
@@ -296,9 +291,7 @@ class WorkflowEngine:
         cls, label: str, config: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         config = config or {}
-        policy: dict[str, Any] = {
-            "preset": cls.agent_node_policy_preset(label, config)
-        }
+        policy: dict[str, Any] = {"preset": cls.agent_node_policy_preset(label, config)}
         overrides = {
             "max_tool_iterations": "max_iterations",
             "max_tool_calls": "max_calls",
@@ -364,9 +357,11 @@ class WorkflowEngine:
     @staticmethod
     def prompt_looks_corrupted(value: str) -> bool:
         compact = re.sub(r"\s+", "", value or "")
-        return len(compact) >= 20 and compact.count("?") >= 10 and (
-            compact.count("?") / len(compact)
-        ) >= 0.3
+        return (
+            len(compact) >= 20
+            and compact.count("?") >= 10
+            and (compact.count("?") / len(compact)) >= 0.3
+        )
 
     @staticmethod
     def _bounded_node_text(value: str, limit: int) -> tuple[str, int]:
@@ -375,7 +370,7 @@ class WorkflowEngine:
         marker = f"\n\n…[节点上下文已压缩 {len(value) - limit:,} 个字符]…\n\n"
         available = max(200, limit - len(marker))
         head = int(available * 0.7)
-        compacted = f"{value[:head]}{marker}{value[-(available - head):]}"
+        compacted = f"{value[:head]}{marker}{value[-(available - head) :]}"
         return compacted, len(value) - len(compacted)
 
     @classmethod
@@ -402,9 +397,7 @@ class WorkflowEngine:
         return {
             "run_id": run_id,
             "active": True,
-            "events": [
-                event for event in control.events if int(event.get("event_id", 0)) > after
-            ],
+            "events": [event for event in control.events if int(event.get("event_id", 0)) > after],
             "latest_event_id": control.event_sequence,
         }
 
@@ -478,7 +471,9 @@ class WorkflowEngine:
                 if target not in reachable:
                     reachable.add(target)
                     queue.append(target)
-        missing = [node_map[node_id].get("label") or node_id for node_id in ids if node_id not in reachable]
+        missing = [
+            node_map[node_id].get("label") or node_id for node_id in ids if node_id not in reachable
+        ]
         if missing:
             raise ValueError(f"以下节点无法从任务输入到达：{'、'.join(map(str, missing))}")
         can_reach_output = {output_id}
@@ -526,9 +521,7 @@ class WorkflowEngine:
     def _extract_json_object(content: str) -> dict[str, Any] | None:
         fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.S)
         candidate = (
-            fenced.group(1)
-            if fenced
-            else content[content.find("{") : content.rfind("}") + 1]
+            fenced.group(1) if fenced else content[content.find("{") : content.rfind("}") + 1]
         )
         if not candidate:
             return None
@@ -578,18 +571,33 @@ class WorkflowEngine:
         minimum_length = max(4500, min(12000, (requested or 12) * 220))
         issues: list[str] = []
         if len(text) < minimum_length:
-            issues.append(f"综述正文仅 {len(text)} 字符，低于本任务完整交付的最低篇幅 {minimum_length} 字符")
+            issues.append(
+                f"综述正文仅 {len(text)} 字符，低于本任务完整交付的最低篇幅 {minimum_length} 字符"
+            )
         required_sections = {
-            "摘要/Abstract": r"(?:^|\n)#{1,3}\s*(?:摘要|abstract)\b",
-            "引言/Introduction": r"(?:^|\n)#{1,3}\s*(?:引言|绪论|introduction)\b",
-            "结论/Conclusion": r"(?:^|\n)#{1,3}\s*(?:结论|总结与展望|conclusions?|discussion\s+and\s+conclusion)\b",
-            "参考文献/References": r"(?:^|\n)#{1,3}\s*(?:参考文献|references|bibliography)\b",
+            "摘要/Abstract": (
+                r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+                r"(?:摘要|abstract)\b"
+            ),
+            "引言/Introduction": (
+                r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+                r"(?:引言|绪论|introduction)\b"
+            ),
+            "结论/Conclusion": (
+                r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+                r"(?:结论|总结与展望|conclusions?|discussion\s+and\s+conclusion)\b"
+            ),
+            "参考文献/References": (
+                r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+                r"(?:参考文献|references|bibliography)\b"
+            ),
         }
         for label, pattern in required_sections.items():
             if not re.search(pattern, text, re.I):
                 issues.append(f"缺少完整的“{label}”章节")
         reference_match = re.search(
-            r"(?:^|\n)#{1,3}\s*(?:参考文献|references|bibliography)\b([\s\S]*)$",
+            r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+            r"(?:参考文献|references|bibliography)\b(?:\*\*)?([\s\S]*)$",
             text,
             re.I,
         )
@@ -599,10 +607,14 @@ class WorkflowEngine:
         numbered_refs = re.findall(r"(?m)^\s*(?:\[\d+\]|\d+[.)])\s+\S", reference_block)
         reference_count = max(len(doi_refs), len(linked_refs), len(numbered_refs))
         if requested and reference_count < requested:
-            issues.append(f"用户要求纳入 {requested} 篇文献，但参考文献列表仅识别到 {reference_count} 条")
+            issues.append(
+                f"用户要求纳入 {requested} 篇文献，但参考文献列表仅识别到 {reference_count} 条"
+            )
         source_count = cls._research_source_count(context)
         if requested and source_count < requested:
-            issues.append(f"真实联网检索仅记录 {source_count} 条可追溯来源，未达到用户要求的 {requested} 篇")
+            issues.append(
+                f"真实联网检索仅记录 {source_count} 条可追溯来源，未达到用户要求的 {requested} 篇"
+            )
         elif source_count == 0:
             issues.append("没有记录任何真实联网文献来源，不能作为文献综述最终稿交付")
         tail = text[-180:].strip()
@@ -623,6 +635,31 @@ class WorkflowEngine:
         context: dict[str, Any],
         control: WorkflowControl,
     ) -> tuple[Any, dict[str, Any]]:
+        deterministic_issues = self._delivery_quality_issues(
+            workflow_input,
+            final_output,
+            context,
+        )
+        task = str(workflow_input.get("task") or workflow_input)
+        if deterministic_issues or ACADEMIC_REVIEW_PATTERN.search(task):
+            passed = not deterministic_issues
+            validation = {
+                "passed": passed,
+                "score": 100 if passed else 0,
+                "issues": deterministic_issues,
+                "improved": False,
+                "quality_issues": deterministic_issues,
+                "mode": "deterministic",
+                "tokens": 0,
+            }
+            await control.emit(
+                {
+                    "type": "workflow_intent_validation_completed",
+                    **validation,
+                }
+            )
+            return final_output, validation
+
         endpoint = await db.scalar(
             select(ModelEndpoint)
             .where(
@@ -668,9 +705,7 @@ class WorkflowEngine:
                 string_limit=32000,
             ),
             "node_results": node_evidence,
-            "deterministic_quality_issues": self._delivery_quality_issues(
-                workflow_input, final_output, context
-            ),
+            "deterministic_quality_issues": deterministic_issues,
         }
         system_prompt = (
             "你是工作流最终交付审校器。判断当前结果是否直接完成用户原始意图，而不是只输出"
@@ -698,9 +733,7 @@ class WorkflowEngine:
             except (TypeError, ValueError):
                 score = 0
             issues = [
-                str(item)[:300]
-                for item in (parsed.get("issues") or [])
-                if str(item).strip()
+                str(item)[:300] for item in (parsed.get("issues") or []) if str(item).strip()
             ][:12]
             improved_result = parsed.get("final_result")
             improved_text = str(improved_result or "").strip()
@@ -722,9 +755,7 @@ class WorkflowEngine:
                     final_output = {**final_output, "result": improved_result}
                 else:
                     final_output = improved_result
-            quality_issues = self._delivery_quality_issues(
-                workflow_input, final_output, context
-            )
+            quality_issues = self._delivery_quality_issues(workflow_input, final_output, context)
             issues = list(dict.fromkeys([*issues, *quality_issues]))[:12]
             passed = bool(passed and not quality_issues)
             improved = bool(improved and not quality_issues)
@@ -746,9 +777,7 @@ class WorkflowEngine:
             )
             return final_output, validation
         except Exception as exc:
-            quality_issues = self._delivery_quality_issues(
-                workflow_input, final_output, context
-            )
+            quality_issues = self._delivery_quality_issues(workflow_input, final_output, context)
             validation = {
                 "passed": False,
                 "score": 0,
@@ -830,17 +859,16 @@ class WorkflowEngine:
     @staticmethod
     def _edge_enabled(edge: dict[str, Any], result: Any, node_type: str) -> bool:
         source_slot = str(
-            edge.get("source_slot")
-            or edge.get("sourceHandle")
-            or edge.get("branch")
-            or "output"
+            edge.get("source_slot") or edge.get("sourceHandle") or edge.get("branch") or "output"
         )
         if node_type == "condition" and source_slot in {"true", "false"}:
             return str(result.get("route", "false")) == source_slot
         edge_condition = edge.get("condition")
         if isinstance(edge_condition, dict):
             left = render_value(edge_condition.get("left"), {"result": result})
-            return _condition(left, str(edge_condition.get("operator", "equals")), edge_condition.get("right"))
+            return _condition(
+                left, str(edge_condition.get("operator", "equals")), edge_condition.get("right")
+            )
         return True
 
     @staticmethod
@@ -865,9 +893,7 @@ class WorkflowEngine:
             output = result
             summary = {}
         preview = output if isinstance(output, str) else dumps(output)
-        summary["output_preview"] = (
-            preview if len(preview) <= 1800 else f"{preview[:1800]}…"
-        )
+        summary["output_preview"] = preview if len(preview) <= 1800 else f"{preview[:1800]}…"
         return summary
 
     async def _create_artifact(
@@ -935,9 +961,7 @@ class WorkflowEngine:
         if node_type == "input":
             return workflow_input
         if node_type == "agent":
-            original_intent = str(
-                workflow_input.get("task") or dumps(workflow_input)
-            ).strip()
+            original_intent = str(workflow_input.get("task") or dumps(workflow_input)).strip()
             if config.get("auto_input", False) and active_parent_ids:
                 parent_inputs: list[str] = []
                 for parent_id in active_parent_ids:
@@ -946,20 +970,12 @@ class WorkflowEngine:
                         parent_value = parent.get("output", parent.get("task", parent))
                     else:
                         parent_value = parent
-                    text = (
-                        parent_value
-                        if isinstance(parent_value, str)
-                        else dumps(parent_value)
-                    )
+                    text = parent_value if isinstance(parent_value, str) else dumps(parent_value)
                     if str(text).strip():
-                        parent_inputs.append(
-                            f"【上游节点：{parent_id}】\n{str(text).strip()}"
-                        )
+                        parent_inputs.append(f"【上游节点：{parent_id}】\n{str(text).strip()}")
                 routed_input = "\n\n".join(parent_inputs).strip()
             else:
-                routed_input = str(
-                    config.get("input", workflow_input.get("task", ""))
-                ).strip()
+                routed_input = str(config.get("input", workflow_input.get("task", ""))).strip()
             node_prompt = str(config.get("prompt") or "").strip()
             if self.prompt_looks_corrupted(node_prompt):
                 node_prompt = self.default_agent_node_prompt(node_label)
@@ -1011,18 +1027,12 @@ class WorkflowEngine:
                 str(config["agent_id"]),
                 node_input,
                 user_context={
-                    "security_profile": str(
-                        runtime.get("security_profile") or "default"
-                    ),
+                    "security_profile": str(runtime.get("security_profile") or "default"),
                 },
                 execution=ExecutionContext(
                     approval_run_id=run.id,
-                    permission_mode=(
-                        permission_mode if permission_mode != "inherit" else None
-                    ),
-                    approval_policy_id=(
-                        str(runtime.get("approval_policy_id") or "") or None
-                    )
+                    permission_mode=(permission_mode if permission_mode != "inherit" else None),
+                    approval_policy_id=(str(runtime.get("approval_policy_id") or "") or None)
                     if permission_mode == "inherit"
                     else None,
                 ),
@@ -1037,7 +1047,8 @@ class WorkflowEngine:
             )
             agent_trace = loads(agent_run.trace_json, [])
             research_events = [
-                item for item in agent_trace
+                item
+                for item in agent_trace
                 if isinstance(item, dict) and item.get("type") == "research_sources_selected"
             ]
             research_count = max(
@@ -1062,13 +1073,13 @@ class WorkflowEngine:
             return result
         if node_type == "knowledge":
             knowledge_base_id = str(config.get("knowledge_base_id") or "")
-            knowledge_base = await db.get(KnowledgeBase, knowledge_base_id) if knowledge_base_id else None
+            knowledge_base = (
+                await db.get(KnowledgeBase, knowledge_base_id) if knowledge_base_id else None
+            )
             if not knowledge_base:
                 raise LookupError(f"知识库节点“{node_label}”绑定的知识库不存在")
             query = str(
-                config.get("query")
-                or config.get("input")
-                or workflow_input.get("task", "")
+                config.get("query") or config.get("input") or workflow_input.get("task", "")
             ).strip()
             if not query:
                 raise ValueError(f"知识库节点“{node_label}”没有可检索的问题")
@@ -1109,15 +1120,11 @@ class WorkflowEngine:
             run_security_profile = str(
                 runtime.get("security_profile") or config.get("security_profile") or "default"
             )
-            security = await runtime_security_service.resolve(
-                db, run_security_profile
-            )
+            security = await runtime_security_service.resolve(db, run_security_profile)
             run_permission_mode = str(runtime.get("permission_mode") or "inherit")
             if run_permission_mode != "inherit":
                 security.command_mode = (
-                    "always_ask"
-                    if run_permission_mode == "ask"
-                    else run_permission_mode
+                    "always_ask" if run_permission_mode == "ask" else run_permission_mode
                 )
             permission_mode = (
                 run_permission_mode
@@ -1129,9 +1136,7 @@ class WorkflowEngine:
                 str(config["tool"]),
                 dict(config.get("arguments", {})),
                 run_id=run.id,
-                policy_id=(
-                    str(runtime.get("approval_policy_id") or "") or None
-                )
+                policy_id=(str(runtime.get("approval_policy_id") or "") or None)
                 if run_permission_mode == "inherit"
                 else None,
                 permission_mode=permission_mode,
@@ -1207,15 +1212,25 @@ class WorkflowEngine:
             output = str(config.get("template") or "")
             return {"output": output}
         if node_type == "function":
-            output = _safe_function(str(config.get("function") or "concat"), config.get("arguments", []))
+            output = _safe_function(
+                str(config.get("function") or "concat"), config.get("arguments", [])
+            )
             return {"output": output}
         if node_type == "merge":
-            values = [context["nodes"][node_id] for node_id in active_parent_ids if node_id in context["nodes"]]
+            values = [
+                context["nodes"][node_id]
+                for node_id in active_parent_ids
+                if node_id in context["nodes"]
+            ]
             mode = str(config.get("mode") or "text")
             if mode == "list":
                 output: Any = values
             elif mode == "object":
-                output = {node_id: context["nodes"][node_id] for node_id in active_parent_ids if node_id in context["nodes"]}
+                output = {
+                    node_id: context["nodes"][node_id]
+                    for node_id in active_parent_ids
+                    if node_id in context["nodes"]
+                }
             else:
                 output = str(config.get("separator", "\n\n")).join(
                     str(value.get("output", value) if isinstance(value, dict) else value)
@@ -1268,9 +1283,13 @@ class WorkflowEngine:
         try:
             definition = loads(workflow.definition_json, {"nodes": [], "edges": []})
             execution = dict(definition.get("execution") or {})
-            execution.update({key: value for key, value in (run_options or {}).items() if value is not None})
+            execution.update(
+                {key: value for key, value in (run_options or {}).items() if value is not None}
+            )
             loop_enabled = bool(execution.get("loop_enabled", False))
-            total_iterations = max(1, min(int(execution.get("loop_count", 1) if loop_enabled else 1), 50))
+            total_iterations = max(
+                1, min(int(execution.get("loop_count", 1) if loop_enabled else 1), 50)
+            )
             artifact_enabled = bool(execution.get("artifact_enabled", True))
             variable_definitions = definition.get("variables", [])
             variables = {
@@ -1292,15 +1311,9 @@ class WorkflowEngine:
                     "total_iterations": total_iterations,
                     "previous_output": None,
                     "guidance": [],
-                    "security_profile": str(
-                        execution.get("security_profile") or "default"
-                    ),
-                    "permission_mode": str(
-                        execution.get("permission_mode") or "inherit"
-                    ),
-                    "approval_policy_id": str(
-                        execution.get("approval_policy_id") or ""
-                    ),
+                    "security_profile": str(execution.get("security_profile") or "default"),
+                    "permission_mode": str(execution.get("permission_mode") or "inherit"),
+                    "approval_policy_id": str(execution.get("approval_policy_id") or ""),
                 },
             }
             run.control_json = dumps(context["runtime"])
@@ -1376,6 +1389,7 @@ class WorkflowEngine:
                         }
                     )
                     active_parent_ids = [str(edge.get("source")) for edge in active_incoming]
+
                     async def publish_agent_event(
                         agent_event: dict[str, Any],
                         *,
@@ -1416,17 +1430,12 @@ class WorkflowEngine:
                                 context,
                                 active_parent_ids,
                                 on_agent_event=(
-                                    publish_agent_event
-                                    if node_type in {"agent", "tool"}
-                                    else None
+                                    publish_agent_event if node_type in {"agent", "tool"} else None
                                 ),
                             )
                             break
                         except Exception as exc:
-                            if (
-                                attempt <= retry_count
-                                and self._retryable_node_error(exc)
-                            ):
+                            if attempt <= retry_count and self._retryable_node_error(exc):
                                 delay_ms = min(3000, 500 * attempt)
                                 await control.emit(
                                     {
@@ -1444,17 +1453,14 @@ class WorkflowEngine:
                                 await asyncio.sleep(delay_ms / 1000)
                                 continue
                             node_error = (
-                                str(exc).strip()
-                                or f"{type(exc).__name__}：节点执行未返回错误详情"
+                                str(exc).strip() or f"{type(exc).__name__}：节点执行未返回错误详情"
                             )
                             failed_event = {
                                 "node_id": node_id,
                                 "type": node_type,
                                 "status": "failed",
                                 "iteration": iteration,
-                                "duration_ms": int(
-                                    (time.perf_counter() - started_node) * 1000
-                                ),
+                                "duration_ms": int((time.perf_counter() - started_node) * 1000),
                                 "error": node_error,
                             }
                             trace.append(failed_event)
@@ -1523,8 +1529,7 @@ class WorkflowEngine:
                             "type": "intent_validation",
                             "status": (
                                 "completed"
-                                if validation.get("passed")
-                                or validation.get("improved")
+                                if validation.get("passed") or validation.get("improved")
                                 else "warning"
                             ),
                             "iteration": iteration,
@@ -1534,9 +1539,7 @@ class WorkflowEngine:
                 context["runtime"]["previous_output"] = final_output
                 if artifact_enabled:
                     quality_issues = list(
-                        context["runtime"].get("intent_validation", {}).get(
-                            "quality_issues", []
-                        )
+                        context["runtime"].get("intent_validation", {}).get("quality_issues", [])
                     )
                     artifact = await self._create_artifact(
                         db,
@@ -1555,9 +1558,7 @@ class WorkflowEngine:
                         metadata={
                             "source": "workflow_iteration",
                             "workflow_version": workflow.version,
-                            "delivery_status": (
-                                "needs_revision" if quality_issues else "ready"
-                            ),
+                            "delivery_status": ("needs_revision" if quality_issues else "ready"),
                             "quality_issues": quality_issues,
                         },
                     )
@@ -1570,9 +1571,7 @@ class WorkflowEngine:
                         }
                     )
                 quality_issues = list(
-                    context["runtime"].get("intent_validation", {}).get(
-                        "quality_issues", []
-                    )
+                    context["runtime"].get("intent_validation", {}).get("quality_issues", [])
                 )
                 if quality_issues:
                     await control.emit(
@@ -1582,9 +1581,7 @@ class WorkflowEngine:
                             "issues": quality_issues,
                         }
                     )
-                    raise RuntimeError(
-                        "最终交付质量校验未通过：" + "；".join(quality_issues)
-                    )
+                    raise RuntimeError("最终交付质量校验未通过：" + "；".join(quality_issues))
                 await control.emit(
                     {
                         "type": "workflow_iteration_completed",
@@ -1611,9 +1608,7 @@ class WorkflowEngine:
                     **context["runtime"],
                     "loop_enabled": loop_enabled,
                     "requested_iterations": total_iterations,
-                    "intent_validation": context["runtime"].get(
-                        "intent_validation", {}
-                    ),
+                    "intent_validation": context["runtime"].get("intent_validation", {}),
                 }
             )
             run.duration_ms = int((time.perf_counter() - started) * 1000)

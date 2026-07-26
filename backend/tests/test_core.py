@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import pytest
 
@@ -121,6 +122,46 @@ def test_web_research_honors_requested_academic_source_count():
     assert service.requested_source_count("请检索并纳入 40 篇文献完成综述") == 40
     assert service.requested_source_count("review 120 papers") == 80
     assert service.requested_source_count("普通调研") == 12
+
+
+def test_web_research_extracts_short_subject_and_constraints_from_workflow_prompt():
+    service = WebResearchService()
+    task = """【用户原始意图】
+围绕网格质量评估给一份综述
+【运行前已确认的执行要求】
+- 文献规模：40篇
+- 文献时间范围：近 10 年
+【当前工作流节点】
+前沿文献检索：检索可追溯来源并形成证据表。
+"""
+
+    assert service.research_subject(task) == "围绕网格质量评估给一份综述"
+    assert service.explicit_source_count(task) == 40
+    assert service.requested_year_range(task) == (date.today().year - 10, date.today().year)
+    queries = service.query_variants(task)
+    assert queries[0] == "mesh quality assessment"
+    assert len(queries) == 4
+    assert all("【" not in query and len(query) < 100 for query in queries)
+
+
+def test_academic_quality_gate_accepts_numbered_and_bold_markdown_sections():
+    references = "\n".join(
+        f"[{index}] Author. Verified study {index}. https://doi.org/10.1234/mesh.{index}"
+        for index in range(1, 41)
+    )
+    document = (
+        "# Mesh Quality Review\n\n"
+        "**Abstract**\n\nA complete abstract.\n\n"
+        "## 1. Introduction\n\nA complete introduction.\n\n"
+        "## 2. Evidence synthesis\n\n"
+        + ("Evidence-based synthesis of verified mesh-quality studies. " * 220)
+        + "\n\n## 8. Conclusion\n\nA complete conclusion.\n\n"
+        "## References\n\n" + references
+    )
+    task = {"task": "Write an English literature review using 40 papers about mesh quality"}
+    context = {"nodes": {"research": {"research": {"source_count": 40}}}}
+
+    assert WorkflowEngine._delivery_quality_issues(task, {"result": document}, context) == []
 
 
 def test_web_research_context_keeps_all_citations_inside_budget():

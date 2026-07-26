@@ -4,7 +4,7 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-0.3.19-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-0.3.20-1769c2)](#windows-桌面端)
 
 EvoAgent 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。当前版本已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、安全审批、用户记忆和成果数据库交付。
 
@@ -41,7 +41,7 @@ cd EvoAgent
 - Agent 联动：Agent 可通过 `call_agent` 互相调用，具备深度限制和循环检测。
 - Agent 对话：可同时打开多个浮动对话窗口，支持全屏、最小化堆叠和跨页面悬浮；关闭、最小化或切换页面不会终止后台任务。支持持久化多轮会话、刷新恢复、上下文续聊、流式执行事件和历史步骤回放。
 - 全链路 RAG：包括检索（Retrieval）、增强（Augmentation）和生成（Generation）；支持问题独立化、查询扩展、向量与全文混合召回、结果融合、Rerank、父子块上下文组装、引用生成、生成质量校验和修复。
-- 联网研究：根据任务自动分流；论文、文献、综述等学术任务使用 Google Scholar 学术检索入口与 Crossref 元数据，学校、企业、产品、新闻等调查任务使用普通网页与权威官网检索。研究节点先执行一次确定性联网检索，再把有界证据上下文交给模型综合；即使任务中包含“执行”等字样也不会误判为本地命令，40 篇等大批量来源会在上下文预算内保留完整题录。
+- 联网研究：根据任务自动分流；论文、文献、综述等学术任务使用 Google Scholar 学术检索入口与 Crossref 元数据，学校、企业、产品、新闻等调查任务使用普通网页与权威官网检索。工作流会从节点包装文本中提取用户原始主题，生成简短检索式并应用文献数量与年份约束；检索源异常会显示在运行详情中，Crossref 限流会自动退避重试。只有真实来源数量达到用户明确要求后才调用模型综合，避免零来源虚构和无效额度消耗。
 - 来源展示：学术结果展示原文与 Google Scholar 精确题名入口；普通网页只展示网页搜索及原文入口。所有来源均显示可信度等级、评分与理由。
 - 来源复核：网页可在软件内预览，并可对每条来源执行“确认采用”或“排除”，复核结果持久化到 SQLite。
 - 成果交付：Agent 和工作流产出、运行轨迹及文档元数据写入 SQLite；结果区会安全渲染 Markdown、表格、代码、公式和图片，每份工作流成果及整次运行都可下载为排版规范的 `.docx` Word 文档。
@@ -69,8 +69,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.19_x64-setup.exe
-frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.19_x64_en-US.msi
+frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.20_x64-setup.exe
+frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.20_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -175,7 +175,7 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **v0.3.19**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **v0.3.20**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
 
 若使用本地源码版快捷方式，推荐目标为：
 

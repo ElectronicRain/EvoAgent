@@ -129,7 +129,10 @@ class AgentToolPolicy:
         }
         if preset not in presets:
             preset = "balanced"
-        resolved = {**presets[preset], **{key: item for key, item in raw.items() if item is not None}}
+        resolved = {
+            **presets[preset],
+            **{key: item for key, item in raw.items() if item is not None},
+        }
         allowed = resolved.get("allowed_tools")
         return cls(
             preset=preset,
@@ -138,9 +141,7 @@ class AgentToolPolicy:
                 min(int(resolved.get("max_iterations", 1)), settings.max_tool_iterations),
             ),
             max_calls=max(0, min(int(resolved.get("max_calls", 0)), 64)),
-            result_char_limit=max(
-                1000, min(int(resolved.get("result_char_limit", 6000)), 24000)
-            ),
+            result_char_limit=max(1000, min(int(resolved.get("result_char_limit", 6000)), 24000)),
             context_char_limit=max(
                 4000, min(int(resolved.get("context_char_limit", 20000)), 100000)
             ),
@@ -288,9 +289,7 @@ class AgentEngine:
         cls, messages: list[dict[str, Any]], limit: int
     ) -> tuple[list[dict[str, Any]], int]:
         copied = [dict(item) for item in messages]
-        tool_indexes = [
-            index for index, item in enumerate(copied) if item.get("role") == "tool"
-        ]
+        tool_indexes = [index for index, item in enumerate(copied) if item.get("role") == "tool"]
         total = sum(len(str(copied[index].get("content") or "")) for index in tool_indexes)
         if total <= limit:
             return copied, 0
@@ -328,9 +327,7 @@ class AgentEngine:
 
     @staticmethod
     def generation_config(agent: AgentDefinition) -> AgentGenerationConfig:
-        return AgentGenerationConfig.model_validate(
-            loads(agent.generation_config_json, {})
-        )
+        return AgentGenerationConfig.model_validate(loads(agent.generation_config_json, {}))
 
     async def _standalone_rag_query(
         self,
@@ -408,9 +405,7 @@ class AgentEngine:
         config = self.rag_config(agent)
         knowledge_base_ids = loads(agent.knowledge_bases_json, [])
         enabled = config.enabled if enabled_override is None else enabled_override
-        if not enabled or not (
-            knowledge_base_ids or config.knowledge_group_ids
-        ):
+        if not enabled or not (knowledge_base_ids or config.knowledge_group_ids):
             return {
                 "enabled": False,
                 "query": query,
@@ -456,9 +451,7 @@ class AgentEngine:
             lexical_weight=config.lexical_weight,
             context_char_budget=config.context_char_budget,
             query_rewrite=(
-                config.query_rewrite
-                if query_rewrite_override is None
-                else query_rewrite_override
+                config.query_rewrite if query_rewrite_override is None else query_rewrite_override
             ),
             cross_language=(
                 config.cross_language
@@ -512,7 +505,9 @@ class AgentEngine:
         for key, value in variables.items():
             prompt = prompt.replace(f"{{{key}}}", str(value))
         if generation.grounded_refusal:
-            prompt += "\n\n证据不足时必须回答“当前知识库中未找到足以回答该问题的依据”，并指出缺失信息。"
+            prompt += (
+                "\n\n证据不足时必须回答“当前知识库中未找到足以回答该问题的依据”，并指出缺失信息。"
+            )
         return prompt
 
     async def preview_rag(
@@ -553,13 +548,8 @@ class AgentEngine:
         if not rag_result.get("enabled") or not rag_result.get("chunks"):
             return []
         issues: list[str] = []
-        citation_numbers = {
-            int(value)
-            for value in re.findall(r"\[资料\s*(\d+)\]", answer)
-        }
-        valid_numbers = {
-            int(item["number"]) for item in rag_result.get("citations", [])
-        }
+        citation_numbers = {int(value) for value in re.findall(r"\[资料\s*(\d+)\]", answer)}
+        valid_numbers = {int(item["number"]) for item in rag_result.get("citations", [])}
         if generation.citation_required and not citation_numbers:
             issues.append("回答没有使用 [资料 N] 引用")
         invalid = sorted(citation_numbers - valid_numbers)
@@ -585,9 +575,7 @@ class AgentEngine:
     ) -> tuple[list[dict[str, Any]], dict[str, tuple[Extension, str]], list[str], list[str]]:
         extensions = (
             await db.scalars(
-                select(Extension).where(
-                    Extension.kind == "mcp", Extension.enabled.is_(True)
-                )
+                select(Extension).where(Extension.kind == "mcp", Extension.enabled.is_(True))
             )
         ).all()
         selected = permissions.get("mcp_extensions")
@@ -597,9 +585,7 @@ class AgentEngine:
         else:
             # Legacy Agents inherit the two local built-in MCP services. Custom remote
             # services are opt-in so a stale endpoint cannot delay every conversation.
-            extensions = [
-                item for item in extensions if extension_service._builtin_endpoint(item)
-            ]
+            extensions = [item for item in extensions if extension_service._builtin_endpoint(item)]
         schemas: list[dict[str, Any]] = []
         bindings: dict[str, tuple[Extension, str]] = {}
         services: list[str] = []
@@ -653,9 +639,7 @@ class AgentEngine:
         if user_context:
             execution.user_id = str(user_context.get("user_id") or execution.user_id or "") or None
             execution.reply_style_prompt = str(
-                user_context.get("reply_style_prompt")
-                or execution.reply_style_prompt
-                or ""
+                user_context.get("reply_style_prompt") or execution.reply_style_prompt or ""
             )
         if execution.depth >= settings.max_agent_depth:
             raise RuntimeError("已达到 Agent 最大调用深度")
@@ -667,9 +651,7 @@ class AgentEngine:
             raise RuntimeError(f"检测到 Agent 循环调用: {chain}")
 
         agent_permissions = loads(agent.permissions_json, {})
-        runtime_tool_policy = AgentToolPolicy.resolve(
-            tool_policy or execution.tool_policy
-        )
+        runtime_tool_policy = AgentToolPolicy.resolve(tool_policy or execution.tool_policy)
         execution.tool_policy = runtime_tool_policy.as_dict()
         security_profile = str(
             (user_context or {}).get("security_profile")
@@ -679,9 +661,7 @@ class AgentEngine:
         security_context = await runtime_security_service.resolve(db, security_profile)
         if execution.permission_mode:
             security_context.command_mode = (
-                "always_ask"
-                if execution.permission_mode == "ask"
-                else execution.permission_mode
+                "always_ask" if execution.permission_mode == "ask" else execution.permission_mode
             )
         run = AgentRun(
             agent_id=agent.id,
@@ -733,8 +713,8 @@ class AgentEngine:
                 or (not local_request and intent.category == "web_research")
             )
             if runtime_tool_policy.allow_mcp and runtime_tool_policy.max_calls > 0:
-                mcp_schemas, mcp_bindings, mcp_services, mcp_errors = (
-                    await self._mcp_catalog(db, permissions)
+                mcp_schemas, mcp_bindings, mcp_services, mcp_errors = await self._mcp_catalog(
+                    db, permissions
                 )
             else:
                 mcp_schemas, mcp_bindings, mcp_services, mcp_errors = [], {}, [], []
@@ -804,9 +784,7 @@ class AgentEngine:
                 }
             )
             schemas = [
-                item
-                for item in tool_runtime.schemas()
-                if item["function"]["name"] in allowed_tools
+                item for item in tool_runtime.schemas() if item["function"]["name"] in allowed_tools
             ]
             if "call_agent" in allowed_tools:
                 schemas.append(self.call_agent_schema())
@@ -823,15 +801,15 @@ class AgentEngine:
                     "max_calls": runtime_tool_policy.max_calls,
                     "result_char_limit": runtime_tool_policy.result_char_limit,
                     "context_char_limit": runtime_tool_policy.context_char_limit,
-                    "available_tools": [
-                        item["function"]["name"] for item in schemas
-                    ]
+                    "available_tools": [item["function"]["name"] for item in schemas]
                     + (["web_research"] if research_requested else []),
                     "deterministic_research": research_requested,
                     "mcp_enabled": runtime_tool_policy.allow_mcp,
                 }
             )
-            provider = provider_from_endpoint(endpoint) if endpoint else get_provider(agent.provider)
+            provider = (
+                provider_from_endpoint(endpoint) if endpoint else get_provider(agent.provider)
+            )
             model_name = endpoint.default_model if endpoint else agent.model
             total_tokens = 0
             model_calls = 0
@@ -839,32 +817,48 @@ class AgentEngine:
             research_sources: list[dict[str, Any]] = []
             if research_requested:
                 research_sources = await web_research_service.collect(input_text, emit)
-                if research_sources:
-                    research_context = web_research_service.context(
-                        research_sources,
-                        char_limit=runtime_tool_policy.context_char_limit,
-                    )
-                    system_prompt += (
-                        "\n\n系统已经代表你完成了真实联网检索，以下资料来自本轮实时搜索。"
-                        "必须基于这些来源回答并给出可点击链接；不得声称自己无法联网、网络访问受限，"
-                        "也不得把模型训练记忆冒充本轮检索结果。\n\n"
-                        + research_context
-                    )
-                    await emit(
-                        {
-                            "type": "research_context_ready",
-                            "sources": len(research_sources),
-                            "context_chars": len(research_context),
-                            "context_char_limit": runtime_tool_policy.context_char_limit,
-                        }
-                    )
-                else:
+                explicit_source_count = web_research_service.explicit_source_count(input_text)
+                if not research_sources:
                     await emit(
                         {
                             "type": "web_research_empty",
-                            "message": "联网检索未取得可用页面，将基于现有上下文继续并标记待核验项。",
+                            "message": "联网检索未取得可追溯来源，已停止模型生成以防止虚构资料。",
                         }
                     )
+                if not research_sources or (
+                    explicit_source_count and len(research_sources) < explicit_source_count
+                ):
+                    required = explicit_source_count or 1
+                    await emit(
+                        {
+                            "type": "research_requirements_unmet",
+                            "required_sources": required,
+                            "actual_sources": len(research_sources),
+                            "message": "真实来源数量不足，未调用模型综合。",
+                        }
+                    )
+                    raise RuntimeError(
+                        "真实联网检索来源不足："
+                        f"要求 {required} 条，实际取得 {len(research_sources)} 条；"
+                        "已在模型生成前停止，避免基于零来源编造文献或继续消耗额度"
+                    )
+                research_context = web_research_service.context(
+                    research_sources,
+                    char_limit=runtime_tool_policy.context_char_limit,
+                )
+                system_prompt += (
+                    "\n\n系统已经代表你完成了真实联网检索，以下资料来自本轮实时搜索。"
+                    "必须基于这些来源回答并给出可点击链接；不得声称自己无法联网、网络访问受限，"
+                    "也不得把模型训练记忆冒充本轮检索结果。\n\n" + research_context
+                )
+                await emit(
+                    {
+                        "type": "research_context_ready",
+                        "sources": len(research_sources),
+                        "context_chars": len(research_context),
+                        "context_char_limit": runtime_tool_policy.context_char_limit,
+                    }
+                )
                 await emit(
                     {
                         "type": "research_synthesis_started",
@@ -872,7 +866,9 @@ class AgentEngine:
                     }
                 )
 
-            local_plan = None if intent.needs_clarification else tool_runtime.plan_local_request(input_text)
+            local_plan = (
+                None if intent.needs_clarification else tool_runtime.plan_local_request(input_text)
+            )
             if local_plan:
                 planned_tool = str(local_plan["tool"])
                 await emit(
@@ -1026,9 +1022,7 @@ class AgentEngine:
                                 "recovery": "请检查参数；读取文件前先调用 list_directory，或跳过该文件继续任务。",
                             }
                         tool_calls_executed += 1
-                        result = await self._publish_tool_result(
-                            db, emit, item["name"], result
-                        )
+                        result = await self._publish_tool_result(db, emit, item["name"], result)
                         tool_cache[cache_key] = result
                     messages.append(
                         {
@@ -1188,17 +1182,11 @@ class AgentEngine:
                         "type": "generation_verified",
                         "passed": not quality_issues,
                         "issues": quality_issues,
-                        "citation_count": len(
-                            re.findall(r"\[资料\s*\d+\]", final_content)
-                        ),
+                        "citation_count": len(re.findall(r"\[资料\s*\d+\]", final_content)),
                     }
                 )
 
-            if (
-                research_requested
-                and final_content
-                and runtime_tool_policy.allow_quality_review
-            ):
+            if research_requested and final_content and runtime_tool_policy.allow_quality_review:
                 try:
                     await emit({"type": "quality_review_started", "sources": len(research_sources)})
                     review = await provider.chat(
@@ -1235,18 +1223,11 @@ class AgentEngine:
                 except Exception as exc:
                     await emit({"type": "quality_review_skipped", "message": str(exc)[:240]})
 
-            final_content, suggested_image_prompt = self._extract_image_prompt(
-                final_content
+            final_content, suggested_image_prompt = self._extract_image_prompt(final_content)
+            explicit_image_request = bool(self.image_request_pattern.search(input_text)) and (
+                not math_query or bool(re.search(r"(图片|插画|海报|封面|位图)", input_text))
             )
-            explicit_image_request = bool(
-                self.image_request_pattern.search(input_text)
-            ) and (
-                not math_query
-                or bool(re.search(r"(图片|插画|海报|封面|位图)", input_text))
-            )
-            should_generate_image = bool(
-                suggested_image_prompt or explicit_image_request
-            )
+            should_generate_image = bool(suggested_image_prompt or explicit_image_request)
             if should_generate_image and image_endpoint:
                 image_prompt = suggested_image_prompt or (
                     "根据以下用户需求生成一张信息准确、主体清晰、构图专业的图片。"
@@ -1262,9 +1243,7 @@ class AgentEngine:
                             "model": image_endpoint.default_model,
                         }
                     )
-                    image = await image_provider_from_endpoint(
-                        image_endpoint
-                    ).generate(
+                    image = await image_provider_from_endpoint(image_endpoint).generate(
                         image_prompt,
                         model=image_endpoint.default_model,
                     )
@@ -1297,8 +1276,7 @@ class AgentEngine:
                     )
                     if explicit_image_request:
                         final_content = (
-                            f"{final_content.rstrip()}\n\n"
-                            f"> 图片生成失败：{str(exc)[:240]}"
+                            f"{final_content.rstrip()}\n\n> 图片生成失败：{str(exc)[:240]}"
                         )
             elif explicit_image_request and not image_endpoint:
                 final_content = (
@@ -1454,9 +1432,7 @@ class AgentEngine:
         if skill_ids:
             skill_query = skill_query.where(Skill.id.in_(skill_ids))
         skills = list((await db.scalars(skill_query.order_by(Skill.name))).all())
-        if math_query and not any(
-            skill.name == "jsxgraph-math-visualization" for skill in skills
-        ):
+        if math_query and not any(skill.name == "jsxgraph-math-visualization" for skill in skills):
             math_skill = await db.scalar(
                 select(Skill).where(
                     Skill.enabled.is_(True),
@@ -1485,16 +1461,9 @@ class AgentEngine:
                 rag_result,
                 conversation_messages,
             )
-            if (
-                rag_result.get("context")
-                and "【知识库检索结果】" not in rendered_rag_prompt
-            ):
-                rendered_rag_prompt += (
-                    "\n\n【知识库检索结果】\n" + str(rag_result["context"])
-                )
-            parts.append(
-                rendered_rag_prompt
-            )
+            if rag_result.get("context") and "【知识库检索结果】" not in rendered_rag_prompt:
+                rendered_rag_prompt += "\n\n【知识库检索结果】\n" + str(rag_result["context"])
+            parts.append(rendered_rag_prompt)
         return "\n\n".join(parts)
 
     async def _execute_tool(
@@ -1625,5 +1594,6 @@ class AgentEngine:
             }
         )
         return resolved
+
 
 agent_engine = AgentEngine()

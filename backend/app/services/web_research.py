@@ -4,6 +4,7 @@ import asyncio
 import html
 import ipaddress
 import re
+from datetime import date
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -71,8 +72,9 @@ class WebResearchService:
     def research_mode(self, task: str) -> str:
         return "academic" if self.academic_trigger.search(task) else "web"
 
-    def requested_source_count(self, task: str) -> int:
-        """Return a bounded, user-requested evidence count for research tasks."""
+    def explicit_source_count(self, task: str) -> int | None:
+        """Return an explicit evidence count, or None when the user did not set one."""
+
         patterns = (
             r"(?:至少|不少于|约|大约|检索|搜寻|纳入|包含|覆盖)?\s*(\d{1,3})\s*(?:篇|条)\s*(?:文献|论文|资料)?",
             r"(\d{1,3})\s*(?:papers?|articles?|references?|studies)",
@@ -81,7 +83,50 @@ class WebResearchService:
             match = re.search(pattern, task, re.I)
             if match:
                 return max(5, min(int(match.group(1)), 80))
-        return 12
+        return None
+
+    def requested_source_count(self, task: str) -> int:
+        """Return a bounded evidence target for research tasks."""
+
+        return self.explicit_source_count(task) or 12
+
+    @staticmethod
+    def requested_year_range(task: str) -> tuple[int, int] | None:
+        current_year = date.today().year
+        explicit = re.search(
+            r"\b(19\d{2}|20\d{2})\s*(?:[-–—~至到]|to)\s*(19\d{2}|20\d{2})\b",
+            task,
+            re.I,
+        )
+        if explicit:
+            start, end = sorted((int(explicit.group(1)), int(explicit.group(2))))
+            return max(1900, start), min(current_year + 1, end)
+        recent = re.search(r"(?:近|最近|过去)\s*(\d{1,2})\s*年", task)
+        if recent:
+            years = max(1, min(int(recent.group(1)), 50))
+            return current_year - years, current_year
+        since = re.search(r"(?:自|从)\s*(19\d{2}|20\d{2})\s*年?(?:以来|起)", task)
+        if since:
+            return int(since.group(1)), current_year
+        return None
+
+    @staticmethod
+    def research_subject(task: str) -> str:
+        """Extract the user's topic from workflow wrappers before building search queries."""
+
+        for pattern in (
+            r"【用户原始意图】\s*([\s\S]*?)(?=\n\s*【|$)",
+            r"(?:^|\n)原始任务\s*[：:]\s*([\s\S]*?)(?=\n\s*【|\n\s*\n|$)",
+        ):
+            match = re.search(pattern, task, re.I)
+            if match and match.group(1).strip():
+                return " ".join(match.group(1).split())[:400]
+        before_metadata = re.split(r"\n\s*【", task, maxsplit=1)[0].strip()
+        first_line = next(
+            (line.strip() for line in before_metadata.splitlines() if line.strip()),
+            task.strip(),
+        )
+        return " ".join(first_line.split())[:400]
 
     def institution_name(self, task: str) -> str | None:
         match = re.search(r"([\u4e00-\u9fff]{2,24}(?:大学|学院))", task)
@@ -96,6 +141,7 @@ class WebResearchService:
 
     def query_variants(self, task: str) -> list[str]:
         mode = self.research_mode(task)
+        subject = self.research_subject(task)
         institution = self.institution_name(task)
         if institution and mode == "web":
             return [
@@ -106,10 +152,15 @@ class WebResearchService:
             ]
 
         cleaned = re.sub(
-            r"帮我|请|关于|完成|写一份|总结|综述|调查|调研|查询|查找",
+            r"帮我|请|关于|完成|总结|综述|调查|调研|查询|查找",
             " ",
-            task,
+            subject,
             flags=re.I,
+        )
+        cleaned = re.sub(
+            r"^(?:围绕|针对|有关|就)\s*|(?:给|写|生成|提供|撰写)\s*一(?:份|篇)",
+            " ",
+            cleaned,
         )
         cleaned = cleaned.replace("的", " ")
         cleaned = " ".join(cleaned.split()).strip(" ：:，,。")
@@ -125,7 +176,7 @@ class WebResearchService:
         for source, target in translations.items():
             english = english.replace(source, f" {target} ")
         english = " ".join(english.split())
-        values = []
+        values: list[str] = []
         if english != cleaned and re.search(r"[a-z]", english, re.I):
             # Search the disambiguated English terminology first. Scholarly indexes
             # otherwise tend to match broad Chinese words such as “结构/质量/评估”.
@@ -137,31 +188,52 @@ class WebResearchService:
                         "2D structured grid mesh quality evaluation CFD",
                     ]
                 )
-        base_query = cleaned or task
-        values.append(base_query)
-        if len(values) == 1:
-            if mode == "academic":
+        base_query = cleaned or subject
+        if mode == "academic":
+            academic_base = english if re.search(r"[a-z]", english, re.I) else base_query
+            # Prefer concise English scholarly terms when we could translate the
+            # subject. Sending the Chinese workflow sentence as a second query
+            # reduces precision and can consume one of the four provider slots.
+            if academic_base == base_query:
+                values.append(base_query)
+            if re.search(
+                r"(?:mesh|grid).*(?:quality|assessment)|(?:quality|assessment).*(?:mesh|grid)",
+                academic_base,
+                re.I,
+            ):
                 values.extend(
                     [
-                        f"{base_query} literature review",
-                        f"{base_query} methods evaluation",
-                        f"{base_query} latest research",
+                        '"mesh quality assessment" review metrics',
+                        '"mesh quality metrics" Jacobian skewness orthogonality',
+                        '"mesh quality evaluation" finite element CFD',
+                        '"mesh quality" machine learning prediction',
                     ]
                 )
             else:
                 values.extend(
                     [
-                        f"{base_query} 官方 权威来源",
-                        f"{base_query} 最新 数据 报告",
-                        f"{base_query} 背景 现状",
+                        f"{academic_base} literature review",
+                        f"{academic_base} methods evaluation",
+                        f"{academic_base} latest research",
                     ]
                 )
+        else:
+            values.append(base_query)
+        if mode != "academic" and len(values) == 1:
+            values.extend(
+                [
+                    f"{base_query} 官方 权威来源",
+                    f"{base_query} 最新 数据 报告",
+                    f"{base_query} 背景 现状",
+                ]
+            )
         return list(dict.fromkeys(values))[:4]
 
     async def collect(self, task: str, on_event: EventHandler) -> list[dict[str, Any]]:
         mode = self.research_mode(task)
         queries = self.query_variants(task)
         target_sources = self.requested_source_count(task) if mode == "academic" else 12
+        year_range = self.requested_year_range(task) if mode == "academic" else None
         await on_event(
             {
                 "type": "research_planning",
@@ -169,6 +241,7 @@ class WebResearchService:
                 "strategy": "comprehensive",
                 "mode": mode,
                 "target_sources": target_sources,
+                "year_range": list(year_range) if year_range else None,
             }
         )
         candidates: list[dict[str, Any]] = []
@@ -188,14 +261,26 @@ class WebResearchService:
                         "mode": mode,
                         "search_url": search_url,
                         "search_label": (
-                            "Google Scholar 学术检索"
-                            if mode == "academic"
-                            else "普通网页检索"
+                            "Google Scholar 学术检索" if mode == "academic" else "普通网页检索"
                         ),
                         "scholar_url": search_url if mode == "academic" else None,
                     }
                 )
-                results = await self._search(client, query, mode, target_sources)
+                results, provider_errors = await self._search(
+                    client,
+                    query,
+                    mode,
+                    target_sources,
+                    year_range=year_range,
+                )
+                for provider_error in provider_errors:
+                    await on_event(
+                        {
+                            "type": "web_search_provider_error",
+                            "query": query,
+                            **provider_error,
+                        }
+                    )
                 relevant = self._rank_results(task, results)
                 await on_event(
                     {
@@ -291,9 +376,7 @@ class WebResearchService:
                 )
         return enriched
 
-    def _rank_results(
-        self, task: str, results: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _rank_results(self, task: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         task_lower = task.lower()
         groups: list[tuple[str, list[str], int, bool]] = []
         institution = self.institution_name(task)
@@ -324,9 +407,7 @@ class WebResearchService:
 
         ranked: dict[str, dict[str, Any]] = {}
         for item in results:
-            text = html.unescape(
-                f"{item.get('title', '')} {item.get('description', '')}"
-            ).lower()
+            text = html.unescape(f"{item.get('title', '')} {item.get('description', '')}").lower()
             matched: list[str] = []
             score = 2 if item.get("source") == "Crossref" else 0
             required_ok = True
@@ -364,32 +445,57 @@ class WebResearchService:
         return sorted(ranked.values(), key=lambda item: item.get("relevance", 0), reverse=True)
 
     async def _search(
-        self, client: httpx.AsyncClient, query: str, mode: str, target_sources: int = 12
-    ) -> list[dict[str, Any]]:
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        mode: str,
+        target_sources: int = 12,
+        *,
+        year_range: tuple[int, int] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         if mode == "academic":
-            tasks = [
-                self._search_google_scholar(client, query),
-                self._search_crossref(client, query, rows=max(12, target_sources)),
+            providers = [
+                ("Google Scholar", self._search_google_scholar(client, query)),
+                (
+                    "Crossref",
+                    self._search_crossref(
+                        client,
+                        query,
+                        rows=max(20, min(target_sources * 2, 80)),
+                        year_range=year_range,
+                    ),
+                ),
             ]
         else:
-            tasks = [
-                self._search_360(client, query),
-                self._search_duckduckgo(client, query),
-                self._search_bing(client, query),
+            providers = [
+                ("360 Web Search", self._search_360(client, query)),
+                ("DuckDuckGo", self._search_duckduckgo(client, query)),
+                ("Bing", self._search_bing(client, query)),
             ]
         # Individual provider failures do not suppress the remaining providers.
-        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        batches = await asyncio.gather(
+            *(task for _name, task in providers),
+            return_exceptions=True,
+        )
         results: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
         seen: set[str] = set()
-        for batch in batches:
+        for (provider_name, _task), batch in zip(providers, batches, strict=True):
             if isinstance(batch, BaseException):
+                errors.append(
+                    {
+                        "provider": provider_name,
+                        "error_type": type(batch).__name__,
+                        "error": str(batch).strip()[:240] or "接口未返回错误正文",
+                    }
+                )
                 continue
             for item in batch:
                 key = item["url"].lower()
                 if key not in seen:
                     seen.add(key)
                     results.append(item)
-        return results[:50]
+        return results[: max(50, target_sources)], errors
 
     async def _search_google_scholar(
         self, client: httpx.AsyncClient, query: str
@@ -423,9 +529,7 @@ class WebResearchService:
             url = html.unescape(title_match.group(1))
             title = html.unescape(re.sub(r"<[^>]+>", " ", title_match.group(2)))
             title = " ".join(title.split())
-            snippet_match = re.search(
-                r'<div class="gs_rs">([\s\S]*?)</div>', block, flags=re.I
-            )
+            snippet_match = re.search(r'<div class="gs_rs">([\s\S]*?)</div>', block, flags=re.I)
             description = ""
             if snippet_match:
                 description = html.unescape(re.sub(r"<[^>]+>", " ", snippet_match.group(1)))
@@ -448,9 +552,7 @@ class WebResearchService:
             )
         return items
 
-    async def _search_360(
-        self, client: httpx.AsyncClient, query: str
-    ) -> list[dict[str, Any]]:
+    async def _search_360(self, client: httpx.AsyncClient, query: str) -> list[dict[str, Any]]:
         response = await client.get(
             "https://www.so.com/s",
             params={"q": query},
@@ -465,12 +567,14 @@ class WebResearchService:
         return self._parse_360_results(response.text)
 
     def _parse_360_results(self, body: str) -> list[dict[str, Any]]:
-        anchors = list(re.finditer(
-            r'<h3[^>]*class="[^"]*(?:res-title|title)[^"]*"[^>]*>'
-            r"[\s\S]*?<a\s+([^>]*)>([\s\S]*?)</a>",
-            body,
-            flags=re.I,
-        ))
+        anchors = list(
+            re.finditer(
+                r'<h3[^>]*class="[^"]*(?:res-title|title)[^"]*"[^>]*>'
+                r"[\s\S]*?<a\s+([^>]*)>([\s\S]*?)</a>",
+                body,
+                flags=re.I,
+            )
+        )
         items = []
         for anchor in anchors[:12]:
             attributes, raw_title = anchor.group(1), anchor.group(2)
@@ -490,9 +594,7 @@ class WebResearchService:
             )
             description = ""
             if snippet_match:
-                description = html.unescape(
-                    re.sub(r"<[^>]+>", " ", snippet_match.group(1))
-                )
+                description = html.unescape(re.sub(r"<[^>]+>", " ", snippet_match.group(1)))
                 description = " ".join(description.split())
             if not target.startswith(("http://", "https://")):
                 continue
@@ -579,31 +681,71 @@ class WebResearchService:
         return items
 
     async def _search_crossref(
-        self, client: httpx.AsyncClient, query: str, rows: int = 12
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+        rows: int = 12,
+        *,
+        year_range: tuple[int, int] | None = None,
     ) -> list[dict[str, Any]]:
-        response = await client.get(
-            "https://api.crossref.org/works",
-            params={
-                "query.bibliographic": query,
-                "rows": max(5, min(int(rows), 80)),
-                "sort": "relevance",
-                "select": (
-                    "DOI,title,URL,abstract,published,type,publisher,container-title,"
-                    "is-referenced-by-count,author,ISSN"
-                ),
-            },
-        )
+        params: dict[str, Any] = {
+            "query.bibliographic": query,
+            "rows": max(5, min(int(rows), 80)),
+            "sort": "relevance",
+            "select": (
+                "DOI,title,URL,abstract,published,type,publisher,container-title,"
+                "is-referenced-by-count,author,ISSN"
+            ),
+        }
+        if year_range:
+            params["filter"] = (
+                f"from-pub-date:{year_range[0]}-01-01,until-pub-date:{year_range[1]}-12-31"
+            )
+        response: httpx.Response | None = None
+        for attempt in range(3):
+            response = await client.get(
+                "https://api.crossref.org/works",
+                params=params,
+                headers={
+                    "User-Agent": (
+                        "EvoAgent/0.3.20 "
+                        "(+https://github.com/ElectronicRain/EvoAgent)"
+                    )
+                },
+            )
+            if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                break
+            retry_after = response.headers.get("Retry-After", "")
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = float(2**attempt)
+            await asyncio.sleep(max(0.5, min(delay, 5.0)))
+        assert response is not None
         response.raise_for_status()
         items = []
         for entry in response.json().get("message", {}).get("items", []):
             titles = entry.get("title") or []
-            url = entry.get("URL") or (f"https://doi.org/{entry['DOI']}" if entry.get("DOI") else "")
+            url = entry.get("URL") or (
+                f"https://doi.org/{entry['DOI']}" if entry.get("DOI") else ""
+            )
             if not url:
                 continue
             abstract = re.sub(r"<[^>]+>", " ", entry.get("abstract") or "")
             title = html.unescape(titles[0] if titles else entry.get("DOI", "学术文献"))
             source_type = str(entry.get("type") or "")
             citation_count = int(entry.get("is-referenced-by-count") or 0)
+            date_parts = (entry.get("published") or {}).get("date-parts") or []
+            published_year = (
+                int(date_parts[0][0]) if date_parts and date_parts[0] and date_parts[0][0] else None
+            )
+            authors = []
+            for author in entry.get("author") or []:
+                name = " ".join(
+                    part for part in [author.get("given"), author.get("family")] if part
+                )
+                if name:
+                    authors.append(name)
             items.append(
                 {
                     "title": title,
@@ -615,6 +757,8 @@ class WebResearchService:
                     "source_type": source_type,
                     "publisher": entry.get("publisher"),
                     "venue": (entry.get("container-title") or [None])[0],
+                    "published_year": published_year,
+                    "authors": authors[:12],
                     "citation_count": citation_count,
                     "credibility": self._credibility(
                         source="Crossref",
@@ -743,17 +887,24 @@ class WebResearchService:
         metadata_blocks: list[str] = []
         contents: list[str] = []
         for index, item in enumerate(sources, 1):
-            content = str(
-                item.get("content") or item.get("description") or "仅取得题录信息"
-            )
+            content = str(item.get("content") or item.get("description") or "仅取得题录信息")
             scholar_line = (
-                f"Google Scholar: {item['scholar_url']}\n"
-                if item.get("scholar_url")
-                else ""
+                f"Google Scholar: {item['scholar_url']}\n" if item.get("scholar_url") else ""
             )
+            authors = ", ".join(str(value) for value in (item.get("authors") or [])[:8])
+            bibliographic_lines = ""
+            if authors:
+                bibliographic_lines += f"作者: {authors}\n"
+            if item.get("published_year"):
+                bibliographic_lines += f"年份: {item['published_year']}\n"
+            if item.get("venue"):
+                bibliographic_lines += f"期刊/会议: {item['venue']}\n"
+            if item.get("doi"):
+                bibliographic_lines += f"DOI: {item['doi']}\n"
             metadata_blocks.append(
                 f"[{index}] {str(item['title'])[:240]}\nURL: {str(item['url'])[:360]}\n"
                 f"{scholar_line}"
+                f"{bibliographic_lines}"
                 f"来源: {item.get('source', 'Web')}\n"
                 f"可信度: {(item.get('credibility') or {}).get('level', '待核验')} "
                 f"{(item.get('credibility') or {}).get('score', 0)}/100\n"

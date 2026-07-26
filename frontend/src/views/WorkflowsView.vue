@@ -425,7 +425,9 @@ function agentEventInfo(event: Entity) {
     research_planning: { title: '已制定联网检索计划', stage: '联网检索 · 规划', progress: 22 },
     web_search_started: { title: '正在检索外部资料', stage: '联网检索 · 搜索', progress: 30 },
     web_search_results: { title: '取得一批检索结果', stage: '联网检索 · 筛选', progress: 38 },
+    web_search_provider_error: { title: '一个检索源暂时不可用', stage: '联网检索 · 数据源', progress: 38 },
     research_sources_selected: { title: '已选定可信资料来源', stage: '联网检索 · 来源选择', progress: 45 },
+    research_requirements_unmet: { title: '真实来源数量不足，已停止生成', stage: '联网检索 · 前置校验', progress: 48 },
     web_fetch_started: { title: '正在读取来源正文', stage: '联网检索 · 正文抓取', progress: 50 },
     web_page_fetched: { title: '已读取一个资料来源', stage: '联网检索 · 正文抓取', progress: 57 },
     research_context_ready: { title: '检索证据已压缩并注入', stage: '联网检索 · 上下文整理', progress: 60 },
@@ -469,7 +471,9 @@ function agentEventInfo(event: Entity) {
   else if (type === 'research_planning') detail = `${event.mode === 'academic' ? '学术' : '网页'}模式 · ${event.queries?.length || 0} 组检索词`
   else if (type === 'web_search_started') detail = String(event.query || '')
   else if (type === 'web_search_results') detail = `取得 ${event.count || 0} 条 · 排除 ${event.discarded || 0} 条`
+  else if (type === 'web_search_provider_error') detail = `${event.provider || '检索源'} · ${event.error_type || ''} · ${event.error || '暂时不可用'}`
   else if (type === 'research_sources_selected') detail = `选定 ${event.count || 0} 个可追溯来源`
+  else if (type === 'research_requirements_unmet') detail = `要求 ${event.required_sources || 0} 条 · 实际 ${event.actual_sources || 0} 条 · 未调用模型综合`
   else if (type === 'research_context_ready') detail = `${event.sources || 0} 个来源 · ${event.context_chars || 0}/${event.context_char_limit || 0} 字符`
   else if (type === 'web_page_fetched') detail = `${event.title || event.url || ''} · ${event.status || '已读取'}`
   else if (type === 'model_response') detail = `第 ${event.iteration || 1} 次响应 · ${event.stage || 'answer'}${event.tool_calls?.length ? ` · 调用 ${event.tool_calls.join('、')}` : ''}`
