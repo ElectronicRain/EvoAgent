@@ -79,7 +79,7 @@ onMounted(async () => {
         <LockKeyhole :size="18" />
         <div class="security-copy"><strong>本地安全模式</strong><span>工作区隔离 · 全程审计</span></div>
       </div>
-      <div class="version">EvoAgent v0.3.2</div>
+      <div class="version">EvoAgent v0.3.13</div>
     </aside>
 
     <section class="main-shell">

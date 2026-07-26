@@ -79,7 +79,7 @@ class EvolutionService:
                 if event.get("status") == "failed" or event.get("type") in {
                     "tool_error",
                     "mcp_unavailable",
-                    "knowledge_archive_failed",
+                    "database_persistence_failed",
                 }:
                     message = str(
                         event.get("error")

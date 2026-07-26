@@ -1,0 +1,7 @@
+interface:
+  display_name: "JSXGraph 数学推导与图表"
+  short_description: "为数学问题生成公式推导和交互式 JSXGraph 图表"
+  default_prompt: "Use $jsxgraph-math-visualization to solve this math problem with derivation and an interactive graph."
+
+policy:
+  allow_implicit_invocation: true

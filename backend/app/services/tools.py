@@ -8,8 +8,9 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..db import SessionLocal
 from ..models import Approval
-from .common import audit, dumps
+from .common import audit, dumps, loads
 from .policies import approval_policy_service
 from .security import RuntimeSecurityContext
 
@@ -282,6 +283,20 @@ class ToolRuntime:
         if tool == "write_file":
             return "medium"
         return "low"
+
+    @staticmethod
+    async def wait_for_approval(approval_id: str) -> dict[str, Any]:
+        """Wait without retaining the caller's SQLite transaction or page connection."""
+        for _attempt in range(1200):
+            async with SessionLocal() as session:
+                approval = await session.get(Approval, approval_id)
+                if approval and approval.status != "pending":
+                    if approval.status == "approved":
+                        result = loads(approval.execution_result_json, {})
+                        return result or {"status": "completed", "message": "操作已批准"}
+                    return {"status": "denied", "message": "用户拒绝了该操作"}
+            await asyncio.sleep(0.5)
+        return {"status": "denied", "message": "等待用户审批超时"}
 
     async def execute(
         self,

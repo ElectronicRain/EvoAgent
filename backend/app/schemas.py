@@ -2,11 +2,86 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+DEFAULT_AGENT_PROMPT_TEMPLATE = """你是一个以证据为中心的智能助手。
+只依据“检索证据”回答知识性问题；证据不足时明确说明，不得编造。
+关键结论必须使用 [资料 N] 引用。若用户要求全部要点或编号列表，必须保持原顺序完整列出。
+
+【对话历史】
+{history}
+
+【知识库检索结果】
+{knowledge}
+
+【可用引用】
+{citations}
+
+【用户问题】
+{question}"""
+
+
+class AgentRAGConfig(BaseModel):
+    enabled: bool = True
+    knowledge_group_ids: list[str] = Field(default_factory=list)
+    similarity_threshold: float = Field(default=0.0, ge=0, le=1)
+    dense_weight: float = Field(default=0.65, ge=0, le=1)
+    lexical_weight: float = Field(default=0.35, ge=0, le=1)
+    candidate_k: int = Field(default=30, ge=5, le=100)
+    rerank_k: int = Field(default=12, ge=1, le=50)
+    top_k: int = Field(default=6, ge=1, le=20)
+    context_char_budget: int = Field(default=12000, ge=1000, le=100_000)
+    query_rewrite: bool = True
+    multi_turn: bool = True
+    max_history_messages: int = Field(default=8, ge=0, le=20)
+    cross_language: bool = False
+    knowledge_graph: bool = False
+    parent_expansion: bool = True
+    complete_list_expansion: bool = True
+    rerank_model: str = Field(default="", max_length=180)
+
+    @model_validator(mode="after")
+    def validate_weights(self) -> "AgentRAGConfig":
+        if self.dense_weight + self.lexical_weight <= 0:
+            raise ValueError("向量与全文检索权重不能同时为 0")
+        if self.rerank_k < self.top_k:
+            self.rerank_k = self.top_k
+        if self.candidate_k < self.rerank_k:
+            self.candidate_k = self.rerank_k
+        return self
+
+
+class AgentGenerationConfig(BaseModel):
+    opening_message: str = Field(default="", max_length=2000)
+    suggested_questions: list[str] = Field(default_factory=list, max_length=8)
+    prompt_template: str = Field(default=DEFAULT_AGENT_PROMPT_TEMPLATE, min_length=20)
+    top_p: float = Field(default=0.9, gt=0, le=1)
+    max_output_tokens: int = Field(default=2048, ge=128, le=32768)
+    grounded_refusal: bool = True
+    citation_required: bool = True
+    verify_answer: bool = True
+    repair_retry: bool = True
+    custom_variables: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_template(self) -> "AgentGenerationConfig":
+        required = {"{question}", "{knowledge}"}
+        missing = sorted(item for item in required if item not in self.prompt_template)
+        if missing:
+            raise ValueError(f"提示词模板缺少保留变量：{', '.join(missing)}")
+        reserved = {"question", "knowledge", "history", "citations"}
+        collision = sorted(reserved.intersection(self.custom_variables))
+        if collision:
+            raise ValueError(f"自定义变量不能覆盖保留变量：{', '.join(collision)}")
+        self.suggested_questions = [
+            value.strip() for value in self.suggested_questions if value.strip()
+        ][:8]
+        return self
 
 
 class AgentCreate(BaseModel):
@@ -16,12 +91,15 @@ class AgentCreate(BaseModel):
     system_prompt: str = Field(min_length=10)
     provider: str = "demo"
     model_endpoint_id: str | None = None
+    image_model_endpoint_id: str | None = None
     group_id: str | None = None
     model: str = "demo-model"
     temperature: float = Field(default=0.3, ge=0, le=2)
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     knowledge_bases: list[str] = Field(default_factory=list)
+    rag_config: AgentRAGConfig = Field(default_factory=AgentRAGConfig)
+    generation_config: AgentGenerationConfig = Field(default_factory=AgentGenerationConfig)
     permissions: dict[str, Any] = Field(default_factory=dict)
     is_template: bool = False
 
@@ -32,12 +110,15 @@ class AgentUpdate(BaseModel):
     system_prompt: str | None = None
     provider: str | None = None
     model_endpoint_id: str | None = None
+    image_model_endpoint_id: str | None = None
     group_id: str | None = None
     model: str | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     tools: list[str] | None = None
     skills: list[str] | None = None
     knowledge_bases: list[str] | None = None
+    rag_config: AgentRAGConfig | None = None
+    generation_config: AgentGenerationConfig | None = None
     permissions: dict[str, Any] | None = None
     status: str | None = None
 
@@ -66,11 +147,14 @@ class AgentRead(ORMModel):
     system_prompt: str
     provider: str
     model_endpoint_id: str | None
+    image_model_endpoint_id: str | None
     model: str
     temperature: float
     tools_json: str
     skills_json: str
     knowledge_bases_json: str
+    rag_config_json: str
+    generation_config_json: str
     permissions_json: str
     version: int
     status: str
@@ -82,6 +166,16 @@ class AgentRunRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentRAGPreviewRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=20)
+
+
+class AgentRAGEvaluationRequest(BaseModel):
+    case_ids: list[str] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
 class AgentConversationCreate(BaseModel):
     title: str = Field(default="新会话", min_length=1, max_length=160)
 
@@ -91,6 +185,9 @@ class AgentMessageCreate(BaseModel):
     security_profile: Literal[
         "default",
         "read_only",
+        "workspace",
+        "custom",
+        "unrestricted",
         "workspace_ask",
         "workspace_auto",
         "custom_ask",
@@ -165,6 +262,48 @@ class WorkflowCreate(BaseModel):
 
 class WorkflowRunRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
+    loop_enabled: bool | None = None
+    loop_count: int | None = Field(default=None, ge=1, le=50)
+    artifact_enabled: bool | None = None
+    security_profile: Literal[
+        "default",
+        "read_only",
+        "workspace",
+        "custom",
+        "unrestricted",
+        "workspace_ask",
+        "workspace_auto",
+        "custom_ask",
+        "custom_auto",
+        "unrestricted_ask",
+        "unrestricted_auto",
+    ] = "default"
+    permission_mode: Literal["inherit", "ask", "auto", "deny"] = "inherit"
+    approval_policy_id: str | None = None
+
+
+class WorkflowRunControlRequest(BaseModel):
+    action: Literal["pause", "resume", "interrupt", "guide"]
+    message: str = Field(default="", max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_guidance(self) -> "WorkflowRunControlRequest":
+        if self.action == "guide" and not self.message.strip():
+            raise ValueError("引导内容不能为空")
+        return self
+
+
+class WorkflowExpertChatRequest(BaseModel):
+    message: str = Field(min_length=2, max_length=8000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=30)
+    current_definition: dict[str, Any] | None = None
+    current_agent_drafts: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    workflow_name: str = Field(default="", max_length=120)
+    workflow_description: str = Field(default="", max_length=4000)
+
+
+class WorkflowExpertMaterializeRequest(BaseModel):
+    proposal: dict[str, Any]
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -324,6 +463,7 @@ class ApprovalPolicyCreate(BaseModel):
 
 class ModelEndpointCreate(BaseModel):
     name: str
+    modality: Literal["chat", "image"] = "chat"
     provider_type: Literal["openai-compatible", "spark-compatible", "custom"] = (
         "openai-compatible"
     )
@@ -338,6 +478,7 @@ class ModelEndpointCreate(BaseModel):
 
 class ModelEndpointUpdate(BaseModel):
     name: str | None = None
+    modality: Literal["chat", "image"] | None = None
     provider_type: str | None = None
     base_url: str | None = None
     api_key: str | None = None

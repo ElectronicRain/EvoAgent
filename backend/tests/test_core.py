@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from backend.app.services.knowledge import chunk_text
 from backend.app.services.intent import intent_service
 from backend.app.services.secrets import secret_store
 from backend.app.services.tools import ToolRuntime
-from backend.app.services.workflows import WorkflowEngine, render_value
+from backend.app.services.workflows import (
+    WorkflowControl,
+    WorkflowEngine,
+    _condition_expression,
+    render_value,
+)
 
 
 def test_template_rendering_preserves_typed_values():
@@ -22,6 +29,60 @@ def test_workflow_cycle_detection():
     }
     with pytest.raises(ValueError, match="循环"):
         WorkflowEngine()._order_nodes(definition)
+
+
+def test_workflow_definition_requires_complete_condition_branches():
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input"},
+            {"id": "gate", "type": "condition", "label": "质量门"},
+            {"id": "output", "type": "output"},
+        ],
+        "edges": [
+            {"source": "input", "target": "gate"},
+            {"source": "gate", "target": "output", "source_slot": "true"},
+        ],
+    }
+
+    with pytest.raises(ValueError, match="TRUE 和 FALSE"):
+        WorkflowEngine().validate_definition(definition)
+
+
+def test_workflow_node_retry_only_accepts_transient_failures():
+    engine = WorkflowEngine()
+
+    assert engine._retryable_node_error(RuntimeError("ReadTimeout")) is True
+    assert engine._retryable_node_error(RuntimeError("HTTP 503: busy")) is True
+    assert engine._retryable_node_error(RuntimeError("HTTP 402: insufficient")) is False
+    assert engine._retryable_node_error(LookupError("Agent 不存在")) is False
+
+
+def test_workflow_legacy_condition_expression_is_evaluated_without_exec():
+    assert _condition_expression("true == true") is True
+    assert _condition_expression("3 >= 2") is True
+    assert _condition_expression("'PASS' == 'REVISE'") is False
+
+
+def test_workflow_runtime_control_supports_pause_guidance_resume_and_interrupt():
+    async def exercise():
+        engine = WorkflowEngine()
+        control = WorkflowControl("test-run")
+        engine.controls[control.run_id] = control
+
+        paused = await engine.control(control.run_id, "pause")
+        guided = await engine.control(control.run_id, "guide", "优先核验引用")
+        resumed = await engine.control(control.run_id, "resume")
+        interrupted = await engine.control(control.run_id, "interrupt")
+
+        assert paused["status"] == "pausing"
+        assert guided["status"] == "guided"
+        assert control.guidance == ["优先核验引用"]
+        assert resumed["status"] == "running"
+        assert interrupted["status"] == "interrupting"
+        assert control.interrupted is True
+        assert control.gate.is_set()
+
+    asyncio.run(exercise())
 
 
 def test_knowledge_chunking_has_overlap_safe_output():

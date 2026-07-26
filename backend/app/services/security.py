@@ -12,6 +12,9 @@ from .common import dumps, loads
 
 
 SECURITY_PROFILES: dict[str, dict[str, Any]] = {
+    "workspace": {"filesystem_mode": "workspace"},
+    "custom": {"filesystem_mode": "custom"},
+    "unrestricted": {"filesystem_mode": "unrestricted"},
     "read_only": {"read_only": True, "command_mode": "deny"},
     "workspace_ask": {"filesystem_mode": "workspace", "command_mode": "always_ask"},
     "workspace_auto": {"filesystem_mode": "workspace", "command_mode": "auto"},

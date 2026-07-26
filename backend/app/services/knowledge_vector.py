@@ -122,9 +122,11 @@ class EmbeddingClient:
 
 
 class RerankClient:
-    def __init__(self, config: KnowledgeProviderConfig) -> None:
+    def __init__(
+        self, config: KnowledgeProviderConfig, *, model_override: str = ""
+    ) -> None:
         self.url = config.rerank_base_url or DEFAULT_RERANK_URL
-        self.model = config.rerank_model or DEFAULT_RERANK_MODEL
+        self.model = model_override or config.rerank_model or DEFAULT_RERANK_MODEL
         self.api_key = knowledge_api_key(config)
 
     async def rerank(

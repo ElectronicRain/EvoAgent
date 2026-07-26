@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EvoAgent"
-    version: str = "0.3.2"
+    version: str = "0.3.13"
     debug: bool = True
     database_url: str = f"sqlite+aiosqlite:///{(DATA_ROOT / 'evoagent.db').as_posix()}"
     workspace_root: Path = DATA_ROOT / "workspace"
@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    require_online_agents: bool = True
     siliconflow_api_key: str = ""
     max_agent_depth: int = 5
     max_tool_iterations: int = 8

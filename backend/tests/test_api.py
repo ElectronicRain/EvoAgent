@@ -45,6 +45,46 @@ def test_openai_compatible_provider_retries_v1_after_root_404(monkeypatch):
     ]
 
 
+def test_openai_compatible_provider_retries_transient_http_failure(monkeypatch):
+    from backend.app.services.llm import OpenAICompatibleProvider
+
+    calls = 0
+
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def post(self, url, **_kwargs):
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", url)
+            if calls < 3:
+                return httpx.Response(503, request=request, text="busy")
+            return httpx.Response(
+                200,
+                request=request,
+                json={"choices": [{"message": {"content": "recovered"}}]},
+            )
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    response = asyncio.run(
+        OpenAICompatibleProvider(
+            "https://api.example.com/v1",
+            "secret",
+        ).chat(
+            [{"role": "user", "content": "测试重试"}],
+            model="example-model",
+            temperature=0,
+        )
+    )
+
+    assert response.content == "recovered"
+    assert calls == 3
+
+
 def test_teaching_plan_uses_structured_model_script():
     from backend.app.services.llm import LLMResponse
     from backend.app.services.teaching import teaching_service
@@ -637,8 +677,140 @@ def test_custom_model_endpoint_agent_full_chain(client, monkeypatch):
     assert "chain-secret" not in str(client.get("/api/model-endpoints").json())
 
 
+def test_image_model_endpoint_generates_only_when_needed(client, monkeypatch):
+    captured: list[dict] = []
+
+    class MockImageClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, json, headers):
+            captured.append({"url": url, "json": json, "headers": headers})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={
+                    "data": [
+                        {
+                            "b64_json": "aW1hZ2UtYnl0ZXM=",
+                            "revised_prompt": "蓝色几何机器人",
+                        }
+                    ]
+                },
+            )
+
+    monkeypatch.setattr("backend.app.services.llm.httpx.AsyncClient", MockImageClient)
+    endpoint = client.post(
+        "/api/model-endpoints",
+        json={
+            "name": "测试图片生成接口",
+            "modality": "image",
+            "provider_type": "openai-compatible",
+            "base_url": "https://mock-image.example/v1",
+            "api_key": "image-secret",
+            "default_model": "image-model",
+            "request_options": {"size": "512x512"},
+            "enabled": True,
+        },
+    )
+    assert endpoint.status_code == 201
+    assert endpoint.json()["modality"] == "image"
+    tested = client.post(
+        f"/api/model-endpoints/{endpoint.json()['id']}/test"
+    ).json()
+    assert tested["status"] == "healthy"
+
+    rejected = client.post(
+        "/api/agents",
+        json={
+            "name": "错误模型绑定 Agent",
+            "slug": "invalid-image-as-chat",
+            "system_prompt": "验证图片接口不能被错误绑定为普通回答模型。",
+            "model_endpoint_id": endpoint.json()["id"],
+        },
+    )
+    assert rejected.status_code == 422
+
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "图片回答 Agent",
+            "slug": "image-answer-agent",
+            "system_prompt": "根据用户目标回答，并在确有必要时配合图片生成能力。",
+            "provider": "demo",
+            "image_model_endpoint_id": endpoint.json()["id"],
+            "tools": [],
+            "skills": [],
+        },
+    )
+    assert agent.status_code == 201
+    run = client.post(
+        f"/api/agents/{agent.json()['id']}/run",
+        json={"input": "请生成一张蓝色几何机器人图片", "context": {}},
+    ).json()
+
+    assert run["status"] == "completed"
+    assert "## 生成图片" in run["output_text"]
+    assert "data:image/png;base64,aW1hZ2UtYnl0ZXM=" in run["output_text"]
+    trace = json.loads(run["trace_json"])
+    assert any(step["type"] == "image_generated" for step in trace)
+    assert captured[-1]["json"]["model"] == "image-model"
+    assert captured[-1]["json"]["size"] == "512x512"
+    assert captured[-1]["headers"]["Authorization"] == "Bearer image-secret"
+    generated_call_count = len(captured)
+    plain_run = client.post(
+        f"/api/agents/{agent.json()['id']}/run",
+        json={"input": "请用一句话说明今天的任务安排", "context": {}},
+    ).json()
+    assert plain_run["status"] == "completed"
+    assert "## 生成图片" not in plain_run["output_text"]
+    assert len(captured) == generated_call_count
+
+
+def test_math_question_automatically_uses_jsxgraph_skill(client):
+    skill = next(
+        item
+        for item in client.get("/api/skills").json()
+        if item["name"] == "jsxgraph-math-visualization"
+    )
+    assert skill["enabled"] is True
+    agent = next(
+        item for item in client.get("/api/agents").json() if item["slug"] == "planner"
+    )
+    run = client.post(
+        f"/api/agents/{agent['id']}/run",
+        json={
+            "input": "求函数 y=x^2 在 x=1 处的导数和切线，并绘制对应图像",
+            "context": {},
+        },
+    ).json()
+
+    assert run["status"] == "completed"
+    assert "$$f'(x)=2x$$" in run["output_text"]
+    assert "```jsxgraph" in run["output_text"]
+    assert '"type":"functiongraph"' in run["output_text"]
+    trace = json.loads(run["trace_json"])
+    context = next(step for step in trace if step["type"] == "context_ready")
+    assert context["capabilities"]["math_visualization"] is True
+
+
 def test_agent_conversation_streams_steps_and_keeps_history(client):
     planner = next(item for item in client.get("/api/agents").json() if item["slug"] == "planner")
+    knowledge_before = {
+        item["id"]: [
+            document["id"]
+            for document in client.get(
+                f"/api/knowledge-bases/{item['id']}/documents"
+            ).json()
+        ]
+        for item in client.get("/api/knowledge-bases").json()
+    }
     conversation = client.post(
         f"/api/agents/{planner['id']}/conversations",
         json={"title": "新会话"},
@@ -655,36 +827,64 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     ]
     first_steps = [event["step"] for event in first_events if event["type"] == "step"]
     assert first.status_code == 200
-    assert [step["type"] for step in first_steps] == [
-        "stream_connected",
-        "run_started",
-        "intent_detected",
-        "context_ready",
-        "model_response",
-        "run_completed",
-        "knowledge_archived",
+    first_step_types = [step["type"] for step in first_steps]
+    assert first_step_types[:2] == ["stream_connected", "run_started"]
+    assert first_step_types[-2:] == ["run_completed", "database_persisted"]
+    assert first_step_types.index("model_response") < first_step_types.index(
+        "generation_verification_started"
+    )
+    assert "generation_verified" in first_step_types
+    assert [
+        name
+        for name in first_step_types
+        if name
+        in {
+            "rag_query_condensed",
+            "rag_query_rewrite_started",
+            "rag_query_rewritten",
+            "rag_hybrid_retrieval_started",
+            "rag_hybrid_retrieval_completed",
+            "rag_fusion_completed",
+            "rag_rerank_started",
+            "rag_rerank_completed",
+            "rag_context_assembled",
+        }
+    ] == [
+        "rag_query_condensed",
+        "rag_query_rewrite_started",
+        "rag_query_rewritten",
+        "rag_hybrid_retrieval_started",
+        "rag_hybrid_retrieval_completed",
+        "rag_fusion_completed",
+        "rag_rerank_started",
+        "rag_rerank_completed",
+        "rag_context_assembled",
     ]
+    assert first_step_types.index("intent_detected") < first_step_types.index("context_ready")
     assert first_events[-1]["type"] == "done"
     assert next(step for step in first_steps if step["type"] == "context_ready")[
         "history_messages"
     ] == 0
     assert any(event["type"] == "assistant" for event in first_events)
-    archive_step = next(step for step in first_steps if step["type"] == "knowledge_archived")
+    persistence_step = next(
+        step for step in first_steps if step["type"] == "database_persisted"
+    )
     run_id = next(step["run_id"] for step in first_steps if step["type"] == "run_started")
-    assert archive_step["run_id"] == run_id
-    assert archive_step["knowledge_base_ids"]
-    for knowledge_base_id in archive_step["knowledge_base_ids"]:
-        documents = client.get(
-            f"/api/knowledge-bases/{knowledge_base_id}/documents"
-        ).json()
-        archived_document = next(
-            item for item in documents if item["source"] == f"Agent 运行 · {run_id}"
-        )
-        metadata = json.loads(archived_document["metadata_json"])
-        assert archived_document["status"] == "ready"
-        assert metadata["kind"] == "agent_task_result"
-        assert metadata["conversation_id"] == conversation["id"]
-        assert metadata["auto_archived"] is True
+    assert persistence_step["run_id"] == run_id
+    assert persistence_step["conversation_id"] == conversation["id"]
+    assert persistence_step["storage"] == "business_database"
+    assert persistence_step["knowledge_base_updated"] is False
+    assert persistence_step["artifact_count"] == 0
+    assert "agent_messages" in persistence_step["tables"]
+    assert knowledge_before == {
+        item["id"]: [
+            document["id"]
+            for document in client.get(
+                f"/api/knowledge-bases/{item['id']}/documents"
+            ).json()
+        ]
+        for item in client.get("/api/knowledge-bases").json()
+    }
 
     second = client.post(
         f"/api/conversations/{conversation['id']}/messages/stream",
@@ -712,7 +912,7 @@ def test_agent_conversation_streams_steps_and_keeps_history(client):
     assert "run_completed" in messages[-1]["trace_json"]
 
 
-def test_agent_without_bound_knowledge_base_archives_to_default_base(client):
+def test_agent_output_persists_to_database_without_knowledge_archive(client):
     agent = client.post(
         "/api/agents",
         json={
@@ -740,19 +940,23 @@ def test_agent_without_bound_knowledge_base_archives_to_default_base(client):
         for line in response.text.splitlines()
         if line.startswith("data: ")
     ]
-    archive_step = next(
+    persistence_step = next(
         event["step"]
         for event in events
-        if event["type"] == "step" and event["step"]["type"] == "knowledge_archived"
+        if event["type"] == "step" and event["step"]["type"] == "database_persisted"
     )
 
     assert response.status_code == 200
-    assert archive_step["knowledge_base_names"] == ["Agent 任务成果"]
-    documents = client.get(
-        f"/api/knowledge-bases/{archive_step['knowledge_base_ids'][0]}/documents"
-    ).json()
-    document = next(item for item in documents if item["id"] in archive_step["document_ids"])
-    assert json.loads(document["metadata_json"])["agent_id"] == agent["id"]
+    assert persistence_step["storage"] == "business_database"
+    assert persistence_step["knowledge_base_updated"] is False
+    messages = client.get(f"/api/conversations/{conversation['id']}/messages").json()
+    assert [item["role"] for item in messages] == ["user", "assistant"]
+    assert messages[-1]["id"] == persistence_step["message_id"]
+    assert messages[-1]["content"]
+    assert all(
+        item["name"] != "Agent 任务成果"
+        for item in client.get("/api/knowledge-bases").json()
+    )
 
 
 def test_multiple_agents_can_complete_conversations_concurrently(client):
@@ -795,14 +999,14 @@ def test_multiple_agents_can_complete_conversations_concurrently(client):
         assert response.status_code == 200
         assert events[-1]["type"] == "done"
         assert "run_completed" in step_types
-        assert "knowledge_archived" in step_types
+        assert "database_persisted" in step_types
+        assert "knowledge_archived" not in step_types
         assert [item["role"] for item in messages] == ["user", "assistant"]
 
 
-def test_research_trace_survives_refresh_and_creates_markdown(
-    client, monkeypatch, tmp_path
+def test_research_trace_survives_refresh_and_creates_database_artifact(
+    client, monkeypatch
 ):
-    from backend.app.config import settings
     from backend.app.services.web_research import web_research_service
 
     async def fake_collect(task, on_event):
@@ -835,7 +1039,6 @@ def test_research_trace_survives_refresh_and_creates_markdown(
             }
         ]
 
-    monkeypatch.setattr(settings, "workspace_root", tmp_path)
     monkeypatch.setattr(web_research_service, "collect", fake_collect)
     planner = next(item for item in client.get("/api/agents").json() if item["slug"] == "planner")
     conversation = client.post(
@@ -863,8 +1066,10 @@ def test_research_trace_survives_refresh_and_creates_markdown(
     assert "web_page_fetched" in messages[0]["run_trace_json"]
     assert messages[-1]["run_status"] == "completed"
     assert len(artifacts) == 1
-    assert artifacts[0]["relative_path"].endswith(".md")
-    assert (tmp_path / artifacts[0]["relative_path"]).is_file()
+    assert artifacts[0]["relative_path"].startswith("database://agent-artifacts/")
+    assert artifacts[0]["storage"] == "business_database"
+    assert artifacts[0]["format"] == "MARKDOWN"
+    assert artifacts[0]["content_characters"] == len(artifacts[0]["content"])
     assert "https://example.org/paper" in artifacts[0]["content"]
     assert "Google Scholar" in artifacts[0]["content"]
 
@@ -1049,14 +1254,420 @@ def test_workflow_stream_reports_live_node_progress(client):
         if line.startswith("data: ")
     ]
     step_types = [event["step"]["type"] for event in events if event["type"] == "step"]
+    agent_steps = [
+        event["step"]
+        for event in events
+        if event["type"] == "step"
+        and event["step"]["type"] == "workflow_agent_event"
+    ]
+    completed_steps = [
+        event["step"]
+        for event in events
+        if event["type"] == "step"
+        and event["step"]["type"] == "workflow_node_completed"
+    ]
     result = next(event["run"] for event in events if event["type"] == "workflow_result")
 
     assert response.status_code == 200
     assert "stream_connected" in step_types
     assert step_types.count("workflow_node_started") == 3
     assert step_types.count("workflow_node_completed") == 3
+    assert agent_steps
+    assert {"run_started", "model_response", "run_completed"}.issubset(
+        {step["agent_event"]["type"] for step in agent_steps}
+    )
+    assert next(
+        step for step in completed_steps if step["node_id"] == "agent_stream"
+    )["result"]["output_preview"]
     assert result["status"] == "completed"
     assert events[-1]["type"] == "done"
+
+
+def test_workflow_stream_marks_failed_node_with_readable_error(client):
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入"},
+            {
+                "id": "missing_agent",
+                "type": "agent",
+                "label": "不可用 Agent",
+                "config": {
+                    "agent_id": "00000000-0000-0000-0000-000000000000",
+                    "input": "{{input.task}}",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": "{{nodes.missing_agent.output}}"},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "missing_agent"},
+            {"source": "missing_agent", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "失败节点可视化", "description": "节点失败事件", "definition": definition},
+    ).json()
+
+    response = client.post(
+        f"/api/workflows/{workflow['id']}/run/stream",
+        json={"input": {"task": "验证失败节点"}},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    failed_step = next(
+        event["step"]
+        for event in events
+        if event["type"] == "step"
+        and event["step"]["type"] == "workflow_node_failed"
+    )
+    result = next(event["run"] for event in events if event["type"] == "workflow_result")
+
+    assert failed_step["node_id"] == "missing_agent"
+    assert failed_step["label"] == "不可用 Agent"
+    assert "Agent 不存在或未启用" in failed_step["error"]
+    assert result["status"] == "failed"
+
+
+def test_workflow_run_security_waits_for_inline_approval_and_exposes_reconnect_state(
+    client, tmp_path
+):
+    workspace = tmp_path / "workflow-approval"
+    workspace.mkdir()
+    client.put(
+        "/api/security/runtime",
+        json={
+            "filesystem_mode": "custom",
+            "workspace_roots": [str(workspace)],
+            "command_mode": "risk_based",
+            "block_critical_commands": True,
+        },
+    )
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入"},
+            {
+                "id": "write",
+                "type": "tool",
+                "label": "写入文件",
+                "config": {
+                    "tool": "write_file",
+                    "arguments": {"path": "approved.txt", "content": "workflow-approved"},
+                    "permission_mode": "auto",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": "{{nodes.write.output}}"},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "write"},
+            {"source": "write", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "工作流审批恢复测试", "description": "审批与状态恢复", "definition": definition},
+    ).json()
+    existing_ids = {item["id"] for item in client.get("/api/approvals").json()}
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                client.post,
+                f"/api/workflows/{workflow['id']}/run",
+                json={
+                    "input": {"task": "写入测试文件"},
+                    "security_profile": "custom",
+                    "permission_mode": "ask",
+                },
+            )
+            running = None
+            approval = None
+            for _attempt in range(120):
+                rows = client.get(
+                    f"/api/workflow-runs?workflow_id={workflow['id']}&status=running"
+                ).json()
+                running = rows[0] if rows else None
+                pending = [
+                    item
+                    for item in client.get("/api/approvals?status=pending").json()
+                    if item["id"] not in existing_ids
+                ]
+                approval = pending[0] if pending else None
+                if running and approval:
+                    break
+                time.sleep(0.05)
+
+            assert running is not None
+            assert approval is not None
+            assert approval["run_id"] == running["id"]
+            scoped = client.get(
+                f"/api/approvals?status=pending&run_id={running['id']}"
+            ).json()
+            assert [item["id"] for item in scoped] == [approval["id"]]
+            buffered = client.get(
+                f"/api/workflow-runs/{running['id']}/events?after=0"
+            ).json()
+            assert buffered["active"] is True
+            assert any(
+                event.get("agent_event", {}).get("type") == "approval_required"
+                for event in buffered["events"]
+            )
+
+            decision = client.post(
+                f"/api/approvals/{approval['id']}/decide",
+                json={"approved": True, "decided_by": "pytest-workflow"},
+            )
+            assert decision.status_code == 200
+            response = future.result(timeout=10)
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
+        assert (workspace / "approved.txt").read_text("utf-8") == "workflow-approved"
+    finally:
+        client.put(
+            "/api/security/runtime",
+            json={
+                "filesystem_mode": "workspace",
+                "workspace_roots": ["data/workspace"],
+                "command_mode": "risk_based",
+                "block_critical_commands": True,
+            },
+        )
+
+
+def test_professional_workflow_branches_loops_and_persists_artifacts(client):
+    definition = {
+        "variables": [
+            {
+                "name": "route",
+                "type": "string",
+                "default": "通过",
+                "description": "条件分支测试变量",
+            }
+        ],
+        "execution": {
+            "loop_enabled": True,
+            "loop_count": 2,
+            "artifact_enabled": True,
+        },
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入"},
+            {
+                "id": "assign",
+                "type": "variable",
+                "label": "设置路由",
+                "config": {
+                    "assignments": [
+                        {
+                            "name": "route",
+                            "operation": "set",
+                            "value": "{{input.route}}",
+                        }
+                    ]
+                },
+            },
+            {
+                "id": "gate",
+                "type": "condition",
+                "label": "质量分支",
+                "config": {
+                    "left": "{{variables.route}}",
+                    "operator": "equals",
+                    "right": "通过",
+                },
+            },
+            {
+                "id": "accepted",
+                "type": "template",
+                "label": "通过模板",
+                "config": {"template": "已通过：{{input.task}}"},
+            },
+            {
+                "id": "rejected",
+                "type": "template",
+                "label": "驳回模板",
+                "config": {"template": "待修改：{{input.task}}"},
+            },
+            {
+                "id": "merge",
+                "type": "merge",
+                "label": "分支聚合",
+                "config": {"mode": "text", "separator": "\n"},
+            },
+            {
+                "id": "artifact",
+                "type": "artifact",
+                "label": "专业交付",
+                "config": {
+                    "title": "分支结果",
+                    "content": "# 结果\n\n{{nodes.merge.output}}",
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": {"result": "{{nodes.artifact.output}}"}},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "assign", "source_slot": "output"},
+            {"source": "assign", "target": "gate", "source_slot": "output"},
+            {"source": "gate", "target": "accepted", "source_slot": "true"},
+            {"source": "gate", "target": "rejected", "source_slot": "false"},
+            {"source": "accepted", "target": "merge", "source_slot": "output"},
+            {"source": "rejected", "target": "merge", "source_slot": "output"},
+            {"source": "merge", "target": "artifact", "source_slot": "output"},
+            {"source": "artifact", "target": "output", "source_slot": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={
+            "name": "专业分支循环工作流",
+            "description": "验证变量、槽位、条件分支、循环与产出文档",
+            "definition": definition,
+        },
+    ).json()
+    run = client.post(
+        f"/api/workflows/{workflow['id']}/run",
+        json={"input": {"task": "形成最终方案", "route": "通过"}},
+    ).json()
+    trace = json.loads(run["trace_json"])
+    output = json.loads(run["output_json"])
+    artifacts = client.get(f"/api/workflow-runs/{run['id']}/artifacts").json()
+
+    assert run["status"] == "completed"
+    assert run["iteration_count"] == 2
+    assert "已通过：形成最终方案" in output["result"]
+    assert sum(
+        step["status"] == "skipped" and step["node_id"] == "rejected"
+        for step in trace
+    ) == 2
+    assert len(artifacts) == 4
+    assert {item["iteration"] for item in artifacts} == {1, 2}
+    assert all(item["run_id"] == run["id"] for item in artifacts)
+
+
+def test_workflow_expert_builds_editable_executable_draft(client):
+    response = client.post(
+        "/api/workflow-expert/chat",
+        json={
+            "message": "请编排一个需要知识库检索、Agent 分析并循环 3 次的工作流，每轮生成产出文档。",
+            "history": [],
+            "workflow_name": "",
+            "workflow_description": "",
+        },
+    )
+    result = response.json()
+    definition = result["definition"]
+
+    assert response.status_code == 200
+    assert definition["execution"]["loop_enabled"] is True
+    assert definition["execution"]["loop_count"] == 3
+    assert any(node["type"] == "agent" for node in definition["nodes"])
+    assert any(node["type"] == "artifact" for node in definition["nodes"])
+    assert any(node["type"] == "output" for node in definition["nodes"])
+    assert definition["variables"]
+    assert result["resource_snapshot"]["agent_count"] >= 1
+
+
+def test_workflow_expert_creates_new_agents_and_executable_branches(client):
+    for endpoint in client.get("/api/model-endpoints").json():
+        client.patch(
+            f"/api/model-endpoints/{endpoint['id']}",
+            json={"enabled": False},
+        )
+    response = client.post(
+        "/api/workflow-expert/chat",
+        json={
+            "message": (
+                "请创建一个新的需求分析 Agent 和一个质量审核 Agent，"
+                "建立通过与不通过的新分支，循环 2 次，每轮生成产出文档。"
+            ),
+            "history": [],
+            "workflow_name": "智能需求评审流",
+            "workflow_description": "验证新 Agent 与条件支路的完整实体化",
+        },
+    )
+    assert response.status_code == 200
+    proposal = response.json()
+    definition = proposal["definition"]
+    draft_keys = {item["key"] for item in proposal["agent_drafts"]}
+
+    assert len(proposal["agent_drafts"]) >= 2
+    assert {"需求分析 Agent", "质量审核 Agent"}.issubset(
+        {item["name"] for item in proposal["agent_drafts"]}
+    )
+    assert all(item["system_prompt"] for item in proposal["agent_drafts"])
+    assert all("exec" in item["tools"] for item in proposal["agent_drafts"])
+    assert all(item["rag_config"] for item in proposal["agent_drafts"])
+    assert all(item["generation_config"] for item in proposal["agent_drafts"])
+    assert {
+        node["config"]["agent_draft_key"]
+        for node in definition["nodes"]
+        if node["type"] == "agent" and node["config"].get("agent_draft_key")
+    } == draft_keys
+    assert any(node["type"] == "condition" for node in definition["nodes"])
+    assert {"true", "false"}.issubset(
+        {
+            edge["source_slot"]
+            for edge in definition["edges"]
+            if edge["source_slot"] in {"true", "false"}
+        }
+    )
+    assert definition["execution"]["loop_count"] == 2
+
+    materialized = client.post(
+        "/api/workflow-expert/materialize",
+        json={"proposal": proposal},
+    )
+    assert materialized.status_code == 200
+    result = materialized.json()
+    created = result["created_agents"]
+    assert len(created) == len(draft_keys)
+    assert all(item["status"] == "candidate" for item in created)
+    assert all("exec" in json.loads(item["tools_json"]) for item in created)
+    assert all(json.loads(item["generation_config_json"]) for item in created)
+    assert not result["agent_drafts"]
+    assert all(
+        node["config"].get("agent_id")
+        and "agent_draft_key" not in node["config"]
+        for node in result["definition"]["nodes"]
+        if node["type"] == "agent"
+    )
+
+    workflow = client.post(
+        "/api/workflows",
+        json={
+            "name": "新 Agent 分支执行验收",
+            "description": "验证专家生成结果可以直接执行",
+            "definition": result["definition"],
+        },
+    )
+    assert workflow.status_code == 201
+    run = client.post(
+        f"/api/workflows/{workflow.json()['id']}/run",
+        json={"input": {"task": "分析需求并完成质量审核"}},
+    )
+    assert run.status_code == 200
+    assert run.json()["status"] == "completed"
+    assert run.json()["iteration_count"] == 2
+    assert client.get(
+        f"/api/workflow-runs/{run.json()['id']}/artifacts"
+    ).json()
 
 
 def test_offline_agent_create_and_existing_agent_update(client):
@@ -1093,6 +1704,149 @@ def test_offline_agent_create_and_existing_agent_update(client):
     assert updated.json()["name"] == "测试编辑后的 Agent"
     assert updated.json()["temperature"] == 0.6
     assert json.loads(updated.json()["tools_json"]) == ["read_file", "search_files", "exec"]
+
+
+def test_agent_rag_settings_preview_and_complete_five_point_context(client):
+    suffix = str(time.time_ns())
+    knowledge_base = client.post(
+        "/api/knowledge-bases",
+        json={
+            "name": f"虚拟内存专项-{suffix}",
+            "discipline": "计算机",
+            "description": "验证每 Agent RAG 全链路",
+        },
+    ).json()
+    document = client.post(
+        f"/api/knowledge-bases/{knowledge_base['id']}/documents/text",
+        json={
+            "title": "虚拟内存五点说明",
+            "source": "操作系统课程",
+            "content": (
+                "虚拟内存具有以下五点核心内容：\n"
+                "1. 通过地址映射扩展进程可见的内存空间。\n"
+                "2. 使用页表将虚拟页关联到物理页框。\n"
+                "3. 借助页面置换缓解物理内存容量不足。\n"
+                "4. 通过进程地址空间隔离提高系统安全性。\n"
+                "5. 按需加载页面以降低程序启动时的内存占用。"
+            ),
+        },
+    )
+    assert document.status_code == 201
+    created = client.post(
+        "/api/agents",
+        json={
+            "name": "虚拟内存 RAG Agent",
+            "slug": f"virtual-memory-rag-{suffix}",
+            "description": "验证加权混合检索、多轮改写和完整列表扩展",
+            "system_prompt": "你是操作系统知识助手，必须根据检索证据完整回答问题。",
+            "knowledge_bases": [knowledge_base["id"]],
+            "rag_config": {
+                "enabled": True,
+                "similarity_threshold": 0,
+                "dense_weight": 0.7,
+                "lexical_weight": 0.3,
+                "candidate_k": 24,
+                "rerank_k": 10,
+                "top_k": 6,
+                "context_char_budget": 8000,
+                "query_rewrite": True,
+                "multi_turn": True,
+                "cross_language": False,
+                "knowledge_graph": True,
+                "parent_expansion": True,
+                "complete_list_expansion": True,
+            },
+            "generation_config": {
+                "opening_message": "我会完整检索并引用操作系统知识。",
+                "suggested_questions": ["虚拟内存包括哪五点？"],
+                "prompt_template": "证据：\n{knowledge}\n历史：{history}\n引用：{citations}\n问题：{question}",
+                "citation_required": True,
+                "verify_answer": True,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    agent = created.json()
+    saved_rag = json.loads(agent["rag_config_json"])
+    saved_generation = json.loads(agent["generation_config_json"])
+    assert saved_rag["dense_weight"] == 0.7
+    assert saved_rag["knowledge_graph"] is True
+    assert saved_generation["opening_message"].startswith("我会完整检索")
+
+    preview = client.post(
+        f"/api/agents/{agent['id']}/rag/preview",
+        json={
+            "query": "它包括哪五点？请完整列出。",
+            "history": [{"role": "user", "content": "虚拟内存是什么？"}],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    result = preview.json()
+    assert result["standalone_query"].startswith("虚拟内存是什么")
+    assert "1. 通过地址映射" in result["context"]
+    assert "5. 按需加载页面" in result["context"]
+    assert result["trace"]["dense_weight"] == 0.7
+    assert result["trace"]["lexical_weight"] == 0.3
+    assert result["trace"]["knowledge_graph"] is True
+    assert result["trace"]["exhaustive_query"] is True
+    assert "{knowledge}" not in result["rendered_prompt"]
+    assert any(item["type"] == "context_assembled" for item in result["pipeline"])
+    run = client.post(
+        f"/api/agents/{agent['id']}/run",
+        json={"input": "虚拟内存包括哪五点？请完整列出。"},
+    )
+    assert run.status_code == 200
+    run_data = run.json()
+    assert run_data["status"] == "completed"
+    assert "5. 按需加载页面" in run_data["output_text"]
+    verification = next(
+        item
+        for item in json.loads(run_data["trace_json"])
+        if item["type"] == "generation_verified"
+    )
+    assert verification["passed"] is True
+    evaluation_case = client.post(
+        "/api/evaluation-cases",
+        json={
+            "name": f"虚拟内存五点完整性-{suffix}",
+            "discipline": "计算机",
+            "category": "evidence",
+            "input": "虚拟内存包括哪五点？",
+            "expected_keywords": ["地址映射", "页表", "页面置换", "地址空间隔离", "按需加载"],
+            "requires_citation": True,
+        },
+    )
+    assert evaluation_case.status_code == 201
+    evaluation = client.post(
+        f"/api/agents/{agent['id']}/rag/evaluate",
+        json={"case_ids": [evaluation_case.json()["id"]]},
+    )
+    assert evaluation.status_code == 200
+    evaluation_data = evaluation.json()
+    assert evaluation_data["summary"]["cases"] == 1
+    assert evaluation_data["summary"]["recall_at_k"] == 1
+    assert evaluation_data["summary"]["mrr"] == 1
+    assert evaluation_data["results"][0]["list_items"] == 5
+    assert (
+        client.delete(
+            f"/api/evaluation-cases/{evaluation_case.json()['id']}"
+        ).status_code
+        == 204
+    )
+
+
+def test_agent_rag_rejects_zero_hybrid_weights(client):
+    response = client.post(
+        "/api/agents",
+        json={
+            "name": "非法权重 Agent",
+            "slug": f"invalid-rag-{time.time_ns()}",
+            "system_prompt": "你是用于验证 RAG 参数校验的测试智能体。",
+            "rag_config": {"dense_weight": 0, "lexical_weight": 0},
+        },
+    )
+    assert response.status_code == 422
+    assert "不能同时为 0" in response.text
 
 
 def test_custom_agent_group_crud_and_membership(client):
@@ -1569,3 +2323,43 @@ def test_user_auth_usage_memory_profile_and_reply_style(client, monkeypatch):
 
     assert client.post("/api/auth/logout", headers=headers).status_code == 204
     assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+
+def test_production_agent_creation_forces_existing_online_endpoint(client):
+    from backend.app.config import settings
+
+    previous = settings.require_online_agents
+    settings.require_online_agents = True
+    try:
+        endpoint = client.post(
+            "/api/model-endpoints",
+            json={
+                "name": "生产在线路由测试",
+                "modality": "chat",
+                "provider_type": "openai-compatible",
+                "base_url": "https://online-routing.example/v1",
+                "api_key": "routing-secret",
+                "default_model": "routing-model",
+                "enabled": True,
+            },
+        )
+        assert endpoint.status_code == 201
+        endpoint_id = endpoint.json()["id"]
+
+        created = client.post(
+            "/api/agents",
+            json={
+                "name": "强制在线 Agent",
+                "slug": "required-online-agent",
+                "system_prompt": "始终使用已配置的在线接口完成真实模型推理任务。",
+                "provider": "demo",
+                "model": "demo-model",
+            },
+        )
+        assert created.status_code == 201
+        agent = created.json()
+        assert agent["model_endpoint_id"] == endpoint_id
+        assert agent["provider"] == "openai-compatible"
+        assert agent["model"] == "routing-model"
+    finally:
+        settings.require_online_agents = previous

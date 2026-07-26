@@ -18,7 +18,8 @@ export type BackgroundAgentTask = {
   runId: string
   startedAt: string
   finishedAt?: string
-  knowledgeBaseNames: string[]
+  artifactCount: number
+  storage: 'business_database'
   detail: string
 }
 
@@ -117,6 +118,13 @@ export const useAgentChatStore = defineStore('agent-chat', {
       item.position = position
       persistPosition(item.agent.id, position)
     },
+    updateAgent(id: string, agent: Entity) {
+      const item = this.windows.find(windowItem => windowItem.id === id)
+      if (item) item.agent = agent
+      this.tasks.forEach(task => {
+        if (task.agent.id === agent.id) task.agent = agent
+      })
+    },
     trackTask(task: Pick<BackgroundAgentTask, 'conversationId' | 'agent' | 'input'>) {
       const id = `${task.conversationId}:${Date.now()}`
       this.tasks.unshift({
@@ -125,8 +133,9 @@ export const useAgentChatStore = defineStore('agent-chat', {
         status: 'running',
         runId: '',
         startedAt: new Date().toISOString(),
-        knowledgeBaseNames: [],
-        detail: '任务正在后台执行',
+        artifactCount: 0,
+        storage: 'business_database',
+        detail: '任务正在后台执行，结果将保存到业务数据库',
       })
       this.tasks = this.tasks.slice(0, 30)
       return id

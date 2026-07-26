@@ -43,6 +43,9 @@ class AgentDefinition(TimestampMixin, Base):
     model_endpoint_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_endpoints.id"), nullable=True
     )
+    image_model_endpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_endpoints.id"), nullable=True
+    )
     group_id: Mapped[str | None] = mapped_column(
         ForeignKey("agent_groups.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -56,6 +59,8 @@ class AgentDefinition(TimestampMixin, Base):
     tools_json: Mapped[str] = mapped_column(Text, default="[]")
     skills_json: Mapped[str] = mapped_column(Text, default="[]")
     knowledge_bases_json: Mapped[str] = mapped_column(Text, default="[]")
+    rag_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    generation_config_json: Mapped[str] = mapped_column(Text, default="{}")
     permissions_json: Mapped[str] = mapped_column(Text, default="{}")
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(30), default="active", index=True)
@@ -215,8 +220,29 @@ class WorkflowRun(TimestampMixin, Base):
     input_json: Mapped[str] = mapped_column(Text, default="{}")
     output_json: Mapped[str] = mapped_column(Text, default="{}")
     trace_json: Mapped[str] = mapped_column(Text, default="[]")
+    control_json: Mapped[str] = mapped_column(Text, default="{}")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    iteration_count: Mapped[int] = mapped_column(Integer, default=0)
+    current_node_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+class WorkflowArtifact(TimestampMixin, Base):
+    __tablename__ = "workflow_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True
+    )
+    node_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    iteration: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(30), default="markdown")
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class KnowledgeBase(TimestampMixin, Base):
@@ -429,6 +455,7 @@ class ModelEndpoint(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120), unique=True)
+    modality: Mapped[str] = mapped_column(String(30), default="chat", index=True)
     provider_type: Mapped[str] = mapped_column(String(50), default="openai-compatible")
     base_url: Mapped[str] = mapped_column(Text)
     api_key_ciphertext: Mapped[str] = mapped_column(Text, default="")

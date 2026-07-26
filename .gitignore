@@ -19,6 +19,8 @@ data/workspace/*
 !data/workspace/.gitkeep
 data/skills/*
 !data/skills/.gitkeep
+!data/skills/jsxgraph-math-visualization/
+!data/skills/jsxgraph-math-visualization/**
 data/plugins/*
 !data/plugins/.gitkeep
 frontend/node_modules/

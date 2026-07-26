@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "evoagent-desktop"
-version = "0.3.2"
+version = "0.3.13"
 dependencies = [
  "serde",
  "serde_json",

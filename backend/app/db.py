@@ -58,6 +58,12 @@ async def init_db() -> None:
         migrations = {
             "agents": {
                 "group_id": "VARCHAR(36)",
+                "image_model_endpoint_id": "VARCHAR(36)",
+                "rag_config_json": "TEXT NOT NULL DEFAULT '{}'",
+                "generation_config_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "model_endpoints": {
+                "modality": "VARCHAR(30) NOT NULL DEFAULT 'chat'",
             },
             "agent_runs": {
                 "security_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -92,6 +98,11 @@ async def init_db() -> None:
                 "content_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             },
+            "workflow_runs": {
+                "control_json": "TEXT NOT NULL DEFAULT '{}'",
+                "iteration_count": "INTEGER NOT NULL DEFAULT 0",
+                "current_node_id": "VARCHAR(120)",
+            },
         }
         for table_name, columns in migrations.items():
             existing = {
@@ -119,6 +130,12 @@ async def init_db() -> None:
         )
         await connection.execute(
             text(
+                "CREATE INDEX IF NOT EXISTS ix_model_endpoints_modality "
+                "ON model_endpoints(modality)"
+            )
+        )
+        await connection.execute(
+            text(
                 "CREATE INDEX IF NOT EXISTS ix_agent_runs_user_id "
                 "ON agent_runs(user_id)"
             )
@@ -139,6 +156,18 @@ async def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_parent_chunk_id "
                 "ON knowledge_chunks(parent_chunk_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_workflow_artifacts_workflow_id "
+                "ON workflow_artifacts(workflow_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_workflow_artifacts_run_id "
+                "ON workflow_artifacts(run_id)"
             )
         )
 

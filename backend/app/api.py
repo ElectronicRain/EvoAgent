@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,7 +10,6 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete, desc, func, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -40,6 +41,7 @@ from .models import (
     Skill,
     UserAccount,
     Workflow,
+    WorkflowArtifact,
     WorkflowRun,
 )
 from .schemas import (
@@ -48,6 +50,8 @@ from .schemas import (
     AgentGroupCreate,
     AgentGroupUpdate,
     AgentMessageCreate,
+    AgentRAGEvaluationRequest,
+    AgentRAGPreviewRequest,
     AgentRunRequest,
     AgentUpdate,
     ApprovalDecision,
@@ -86,6 +90,9 @@ from .schemas import (
     UserRegister,
     UserReplyStyleUpdate,
     WorkflowCreate,
+    WorkflowExpertChatRequest,
+    WorkflowExpertMaterializeRequest,
+    WorkflowRunControlRequest,
     WorkflowRunRequest,
 )
 from .services.agents import agent_engine
@@ -96,13 +103,27 @@ from .services.knowledge import knowledge_service
 from .services.knowledge_processing import extract_sections
 from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
-from .services.llm import OpenAICompatibleProvider, get_provider, provider_from_endpoint
+from .services.llm import (
+    OpenAICompatibleImageProvider,
+    OpenAICompatibleProvider,
+    get_provider,
+    provider_from_endpoint,
+)
+from .services.model_routing import (
+    OnlineModelRequired,
+    bind_agent_to_endpoint,
+    latest_chat_endpoint,
+    migrate_agents_to_online_endpoint,
+    resolve_agent_chat_endpoint,
+    validate_chat_endpoint,
+)
 from .services.secrets import secret_store
 from .services.security import RuntimeSecurityContext, runtime_security_service
 from .services.teaching import teaching_service
 from .services.tools import tool_runtime
 from .services.users import REPLY_STYLES, user_service
 from .services.workflows import workflow_engine
+from .services.workflow_expert import workflow_expert
 
 
 router = APIRouter(prefix="/api")
@@ -285,107 +306,41 @@ async def update_reply_style(
     }
 
 
-async def archive_agent_run_to_knowledge(
+async def describe_agent_run_persistence(
     db: AsyncSession,
     *,
     conversation: AgentConversation,
-    agent: AgentDefinition,
     result: AgentRun,
-    input_text: str,
+    assistant_message: AgentMessage,
 ) -> dict[str, Any]:
-    """Persist a completed Agent result as searchable, vectorized knowledge."""
+    """Describe the business-database records that make a completed turn durable.
 
-    configured_ids = [
-        str(item)
-        for item in loads(agent.knowledge_bases_json, [])
-        if isinstance(item, str) and item
-    ]
-    knowledge_bases: list[KnowledgeBase] = []
-    if configured_ids:
-        knowledge_bases = list(
-            (
-                await db.scalars(
-                    select(KnowledgeBase).where(KnowledgeBase.id.in_(configured_ids))
-                )
-            ).all()
-        )
+    Agent output is deliberately kept separate from knowledge bases. A knowledge
+    base is changed only by an explicit import/archive action from the user.
+    """
 
-    if not knowledge_bases:
-        default_name = "Agent 任务成果"
-        default_base = await db.scalar(
-            select(KnowledgeBase).where(KnowledgeBase.name == default_name)
-        )
-        if default_base is None:
-            try:
-                async with db.begin_nested():
-                    default_base = KnowledgeBase(
-                        name=default_name,
-                        discipline="Agent 运行记录",
-                        description="自动保存 Agent 已完成任务的输入、结果与可审计运行信息。",
-                    )
-                    db.add(default_base)
-                    await db.flush()
-            except IntegrityError:
-                default_base = await db.scalar(
-                    select(KnowledgeBase).where(KnowledgeBase.name == default_name)
-                )
-        if default_base is None:
-            raise RuntimeError("无法创建 Agent 任务成果知识库")
-        knowledge_bases = [default_base]
-
-    source = f"Agent 运行 · {result.id}"
-    short_input = " ".join(input_text.split())
-    title = f"{agent.name} · {short_input[:90] or '已完成任务'}"[:255]
-    content = "\n\n".join(
-        [
-            f"# {agent.name} 任务成果",
-            f"## 用户任务\n{input_text.strip()}",
-            f"## Agent 结果\n{result.output_text or ''}",
-            (
-                "## 执行信息\n"
-                f"- Agent：{agent.name}\n"
-                f"- Run ID：{result.id}\n"
-                f"- Conversation ID：{conversation.id}\n"
-                f"- 完成时间：{datetime.now(timezone.utc).isoformat()}"
-            ),
-        ]
-    )
-    archived: list[dict[str, str]] = []
-    for knowledge_base in knowledge_bases:
-        document = await db.scalar(
-            select(KnowledgeDocument).where(
-                KnowledgeDocument.knowledge_base_id == knowledge_base.id,
-                KnowledgeDocument.source == source,
+    artifacts = (
+        await db.scalars(
+            select(AgentArtifact)
+            .where(
+                AgentArtifact.run_id == result.id,
+                AgentArtifact.conversation_id == conversation.id,
             )
+            .order_by(AgentArtifact.created_at)
         )
-        if document is None:
-            document = await knowledge_service.add_document(
-                db,
-                knowledge_base.id,
-                title=title,
-                content=content,
-                source=source,
-                metadata={
-                    "kind": "agent_task_result",
-                    "run_id": result.id,
-                    "conversation_id": conversation.id,
-                    "agent_id": agent.id,
-                    "auto_archived": True,
-                },
-            )
-        archived.append(
-            {
-                "knowledge_base_id": knowledge_base.id,
-                "knowledge_base_name": knowledge_base.name,
-                "document_id": document.id,
-            }
-        )
+    ).all()
     return {
-        "type": "knowledge_archived",
+        "type": "database_persisted",
         "run_id": result.id,
-        "knowledge_base_ids": [item["knowledge_base_id"] for item in archived],
-        "knowledge_base_names": [item["knowledge_base_name"] for item in archived],
-        "document_ids": [item["document_id"] for item in archived],
+        "conversation_id": conversation.id,
+        "message_id": assistant_message.id,
+        "artifact_ids": [item.id for item in artifacts],
+        "artifact_count": len(artifacts),
+        "content_characters": len(assistant_message.content or ""),
+        "storage": "business_database",
+        "tables": ["agent_runs", "agent_messages"]
+        + (["agent_artifacts"] if artifacts else []),
+        "knowledge_base_updated": False,
     }
 
 
@@ -578,8 +533,33 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
     if await db.scalar(select(AgentDefinition).where(AgentDefinition.slug == payload.slug)):
         raise HTTPException(status_code=409, detail="Agent slug 已存在")
     endpoint_id = payload.model_endpoint_id or None
-    if endpoint_id and not await db.get(ModelEndpoint, endpoint_id):
-        raise not_found("模型接口")
+    endpoint = (
+        await db.get(ModelEndpoint, endpoint_id)
+        if endpoint_id
+        else (
+            await latest_chat_endpoint(db)
+            if settings.require_online_agents
+            else None
+        )
+    )
+    if endpoint_id:
+        try:
+            validate_chat_endpoint(endpoint, label="回答模型接口")
+        except OnlineModelRequired as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if settings.require_online_agents and not endpoint:
+        raise HTTPException(
+            status_code=422,
+            detail="必须先配置并启用一个在线对话模型接口，Agent 不允许使用离线演示模型",
+        )
+    endpoint_id = endpoint.id if endpoint else None
+    image_endpoint_id = payload.image_model_endpoint_id or None
+    if image_endpoint_id:
+        image_endpoint = await db.get(ModelEndpoint, image_endpoint_id)
+        if not image_endpoint:
+            raise not_found("图片模型接口")
+        if image_endpoint.modality != "image":
+            raise HTTPException(status_code=422, detail="图片模型必须选择图片生成接口")
     group_id = payload.group_id or None
     if group_id and not await db.get(AgentGroup, group_id):
         raise not_found("Agent 分组")
@@ -588,14 +568,17 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
         slug=payload.slug,
         description=payload.description,
         system_prompt=payload.system_prompt,
-        provider=payload.provider,
+        provider=endpoint.provider_type if endpoint else payload.provider,
         model_endpoint_id=endpoint_id,
+        image_model_endpoint_id=image_endpoint_id,
         group_id=group_id,
-        model=payload.model,
+        model=endpoint.default_model if endpoint else payload.model,
         temperature=payload.temperature,
         tools_json=dumps(list(dict.fromkeys([*payload.tools, "exec"]))),
         skills_json=dumps(payload.skills),
         knowledge_bases_json=dumps(payload.knowledge_bases),
+        rag_config_json=dumps(payload.rag_config.model_dump()),
+        generation_config_json=dumps(payload.generation_config.model_dump()),
         permissions_json=dumps(payload.permissions),
         is_template=payload.is_template,
     )
@@ -625,17 +608,34 @@ async def update_agent(
         "tools": "tools_json",
         "skills": "skills_json",
         "knowledge_bases": "knowledge_bases_json",
+        "rag_config": "rag_config_json",
+        "generation_config": "generation_config_json",
         "permissions": "permissions_json",
     }
     for key, value in values.items():
         if key in json_fields:
             if key == "tools":
                 value = list(dict.fromkeys([*value, "exec"]))
-            setattr(item, json_fields[key], dumps(value))
-        elif key == "model_endpoint_id":
+            json_value = value.model_dump() if hasattr(value, "model_dump") else value
+            setattr(item, json_fields[key], dumps(json_value))
+        elif key in {"model_endpoint_id", "image_model_endpoint_id"}:
             endpoint_id = value or None
-            if endpoint_id and not await db.get(ModelEndpoint, endpoint_id):
+            endpoint = await db.get(ModelEndpoint, endpoint_id) if endpoint_id else None
+            if endpoint_id and not endpoint:
                 raise not_found("模型接口")
+            expected_modality = "image" if key == "image_model_endpoint_id" else "chat"
+            if endpoint and endpoint.modality != expected_modality:
+                label = "图片生成" if expected_modality == "image" else "对话"
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"该字段必须选择{label}模型接口",
+                )
+            if (
+                key == "model_endpoint_id"
+                and endpoint
+                and not endpoint.enabled
+            ):
+                raise HTTPException(status_code=422, detail="选择的对话模型接口已停用")
             setattr(item, key, endpoint_id)
         elif key == "group_id":
             group_id = value or None
@@ -644,8 +644,111 @@ async def update_agent(
             item.group_id = group_id
         else:
             setattr(item, key, value)
+    try:
+        endpoint = await resolve_agent_chat_endpoint(db, item)
+    except OnlineModelRequired as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if endpoint:
+        bind_agent_to_endpoint(item, endpoint)
     await audit(db, "agent.updated", "agent", item.id)
     return row(item)
+
+
+@router.post("/agents/{agent_id}/rag/preview")
+async def preview_agent_rag(
+    agent_id: str,
+    payload: AgentRAGPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    agent = await db.get(AgentDefinition, agent_id)
+    if not agent:
+        raise not_found("Agent")
+    return await agent_engine.preview_rag(
+        db,
+        agent,
+        payload.query,
+        conversation_messages=payload.history,
+    )
+
+
+@router.post("/agents/{agent_id}/rag/evaluate")
+async def evaluate_agent_rag(
+    agent_id: str,
+    payload: AgentRAGEvaluationRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    agent = await db.get(AgentDefinition, agent_id)
+    if not agent:
+        raise not_found("Agent")
+    statement = select(EvaluationCase).where(EvaluationCase.enabled.is_(True))
+    if payload.case_ids:
+        statement = statement.where(EvaluationCase.id.in_(payload.case_ids))
+    cases = (
+        await db.scalars(statement.order_by(EvaluationCase.created_at).limit(payload.limit))
+    ).all()
+    results: list[dict[str, Any]] = []
+    weighted_recall = 0.0
+    weighted_mrr = 0.0
+    weighted_ndcg = 0.0
+    total_weight = 0.0
+    for case in cases:
+        started = time.perf_counter()
+        preview = await agent_engine.preview_rag(db, agent, case.input_text)
+        chunks = preview.get("chunks", [])
+        expected = loads(case.expected_keywords_json, [])
+        context = str(preview.get("context") or "").lower()
+        matched = [keyword for keyword in expected if keyword.lower() in context]
+        recall = len(matched) / max(1, len(expected)) if expected else float(bool(chunks))
+        relevant_ranks = [
+            index
+            for index, chunk in enumerate(chunks, 1)
+            if not expected
+            or any(
+                keyword.lower() in str(chunk.get("context") or "").lower()
+                for keyword in expected
+            )
+        ]
+        reciprocal_rank = 1 / relevant_ranks[0] if relevant_ranks else 0.0
+        dcg = sum(1 / math.log2(rank + 1) for rank in relevant_ranks)
+        ideal_count = min(len(relevant_ranks), len(chunks))
+        ideal_dcg = sum(
+            1 / math.log2(rank + 1) for rank in range(1, ideal_count + 1)
+        )
+        ndcg = dcg / ideal_dcg if ideal_dcg else 0.0
+        weight = float(case.weight or 1)
+        total_weight += weight
+        weighted_recall += recall * weight
+        weighted_mrr += reciprocal_rank * weight
+        weighted_ndcg += ndcg * weight
+        results.append(
+            {
+                "case_id": case.id,
+                "name": case.name,
+                "category": case.category,
+                "recall_at_k": round(recall, 4),
+                "reciprocal_rank": round(reciprocal_rank, 4),
+                "ndcg": round(ndcg, 4),
+                "matched_keywords": matched,
+                "expected_keywords": expected,
+                "citations": len(preview.get("citations", [])),
+                "list_items": sum(
+                    int(item.get("item_count") or 0)
+                    for item in preview.get("trace", {}).get("list_contexts", [])
+                ),
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+            }
+        )
+    denominator = total_weight or 1.0
+    summary = {
+        "cases": len(results),
+        "recall_at_k": round(weighted_recall / denominator, 4),
+        "mrr": round(weighted_mrr / denominator, 4),
+        "ndcg": round(weighted_ndcg / denominator, 4),
+        "average_latency_ms": round(
+            sum(item["latency_ms"] for item in results) / max(1, len(results))
+        ),
+    }
+    return {"agent_id": agent.id, "summary": summary, "results": results}
 
 
 @router.post("/agents/{agent_id}/run")
@@ -773,7 +876,14 @@ async def list_conversation_artifacts(
             .order_by(desc(AgentArtifact.created_at))
         )
     ).all()
-    return [row(item) for item in items]
+    result = []
+    for item in items:
+        data = row(item)
+        data["storage"] = "business_database"
+        data["content_characters"] = len(item.content or "")
+        data["format"] = item.kind.upper()
+        result.append(data)
+    return result
 
 
 @router.post("/conversations/{conversation_id}/teaching-plan")
@@ -800,7 +910,10 @@ async def create_teaching_plan(
     if not endpoint:
         endpoint = await db.scalar(
             select(ModelEndpoint)
-            .where(ModelEndpoint.enabled.is_(True))
+            .where(
+                ModelEndpoint.enabled.is_(True),
+                ModelEndpoint.modality == "chat",
+            )
             .order_by(desc(ModelEndpoint.updated_at))
         )
     provider = provider_from_endpoint(endpoint) if endpoint else get_provider(agent.provider)
@@ -843,7 +956,10 @@ async def create_classroom_speech(
     if not endpoint:
         endpoint = await db.scalar(
             select(ModelEndpoint)
-            .where(ModelEndpoint.enabled.is_(True))
+            .where(
+                ModelEndpoint.enabled.is_(True),
+                ModelEndpoint.modality == "chat",
+            )
             .order_by(desc(ModelEndpoint.updated_at))
         )
     if not endpoint or "siliconflow.cn" not in endpoint.base_url.lower():
@@ -1037,6 +1153,16 @@ async def stream_conversation_message(
                     db.add(assistant_message)
                     conversation.updated_at = datetime.now(timezone.utc)
                     await db.flush()
+                    persistence_event = await describe_agent_run_persistence(
+                        db,
+                        conversation=conversation,
+                        result=result,
+                        assistant_message=assistant_message,
+                    )
+                    trace = loads(result.trace_json, [])
+                    trace.append(persistence_event)
+                    result.trace_json = dumps(trace)
+                    assistant_message.trace_json = result.trace_json
                     await audit(
                         db,
                         "conversation.turn.completed",
@@ -1045,46 +1171,8 @@ async def stream_conversation_message(
                         {"run_id": result.id, "status": result.status},
                         success=result.status == "completed",
                     )
-                    # Commit the completed run and conversation before vectorization.
-                    # An embedding/provider failure must never erase the task result.
                     await db.commit()
-                    if result.status == "completed":
-                        try:
-                            agent = await db.get(AgentDefinition, conversation.agent_id)
-                            if agent is None:
-                                raise LookupError("Agent 不存在")
-                            archive_event = await archive_agent_run_to_knowledge(
-                                db,
-                                conversation=conversation,
-                                agent=agent,
-                                result=result,
-                                input_text=payload.content,
-                            )
-                            trace = loads(result.trace_json, [])
-                            trace.append(archive_event)
-                            result.trace_json = dumps(trace)
-                            assistant_message.trace_json = result.trace_json
-                            await db.commit()
-                            await queue.put({"type": "step", "step": archive_event})
-                        except Exception as archive_error:
-                            await db.rollback()
-                            result = await db.get(AgentRun, result.id)
-                            assistant_message = await db.get(
-                                AgentMessage, assistant_message.id
-                            )
-                            archive_event = {
-                                "type": "knowledge_archive_failed",
-                                "run_id": result.id if result else None,
-                                "message": str(archive_error),
-                            }
-                            if result is not None:
-                                trace = loads(result.trace_json, [])
-                                trace.append(archive_event)
-                                result.trace_json = dumps(trace)
-                            if assistant_message is not None and result is not None:
-                                assistant_message.trace_json = result.trace_json
-                            await db.commit()
-                            await queue.put({"type": "step", "step": archive_event})
+                    await queue.put({"type": "step", "step": persistence_event})
                     await queue.put(
                         {
                             "type": "assistant",
@@ -1164,6 +1252,10 @@ async def list_workflows(db: AsyncSession = Depends(get_db)) -> list[dict[str, A
 async def create_workflow(
     payload: WorkflowCreate, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
+    try:
+        workflow_engine.validate_definition(payload.definition)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     item = Workflow(
         name=payload.name,
         description=payload.description,
@@ -1182,6 +1274,10 @@ async def update_workflow(
     item = await db.get(Workflow, workflow_id)
     if not item:
         raise not_found("工作流")
+    try:
+        workflow_engine.validate_definition(payload.definition)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     item.name = payload.name
     item.description = payload.description
     item.definition_json = dumps(payload.definition)
@@ -1195,7 +1291,19 @@ async def run_workflow(
     workflow_id: str, payload: WorkflowRunRequest, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     try:
-        result = await workflow_engine.run(db, workflow_id, payload.input)
+        result = await workflow_engine.run(
+            db,
+            workflow_id,
+            payload.input,
+            run_options={
+                "loop_enabled": payload.loop_enabled,
+                "loop_count": payload.loop_count,
+                "artifact_enabled": payload.artifact_enabled,
+                "security_profile": payload.security_profile,
+                "permission_mode": payload.permission_mode,
+                "approval_policy_id": payload.approval_policy_id,
+            },
+        )
     except LookupError as exc:
         raise not_found("工作流") from exc
     return row(result)
@@ -1219,6 +1327,14 @@ async def stream_workflow_run(
                         workflow_id,
                         payload.input,
                         on_event=publish,
+                        run_options={
+                            "loop_enabled": payload.loop_enabled,
+                            "loop_count": payload.loop_count,
+                            "artifact_enabled": payload.artifact_enabled,
+                            "security_profile": payload.security_profile,
+                            "permission_mode": payload.permission_mode,
+                            "approval_policy_id": payload.approval_policy_id,
+                        },
                     )
                     await queue.put({"type": "workflow_result", "run": row(result)})
             except Exception as exc:
@@ -1257,13 +1373,116 @@ async def stream_workflow_run(
     )
 
 
-@router.get("/workflow-runs")
-async def list_workflow_runs(
-    limit: int = 50, db: AsyncSession = Depends(get_db)
+@router.post("/workflow-expert/chat")
+async def chat_with_workflow_expert(
+    payload: WorkflowExpertChatRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    result = await workflow_expert.chat(
+        db,
+        message=payload.message,
+        history=payload.history,
+        current_definition=payload.current_definition,
+        current_agent_drafts=payload.current_agent_drafts,
+        workflow_name=payload.workflow_name,
+        workflow_description=payload.workflow_description,
+    )
+    await audit(
+        db,
+        "workflow.expert.proposed",
+        "workflow",
+        detail={
+            "message": payload.message[:500],
+            "node_count": len(result["definition"].get("nodes", [])),
+        },
+    )
+    return result
+
+
+@router.post("/workflow-expert/materialize")
+async def materialize_workflow_expert_proposal(
+    payload: WorkflowExpertMaterializeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = await workflow_expert.materialize(db, payload.proposal)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit(
+        db,
+        "workflow.expert.materialized",
+        "workflow",
+        detail={
+            "created_agent_ids": [item["id"] for item in result["created_agents"]],
+            "node_count": len(result["definition"].get("nodes", [])),
+        },
+    )
+    return result
+
+
+@router.get("/workflow-runs/{run_id}")
+async def get_workflow_run(
+    run_id: str, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    item = await db.get(WorkflowRun, run_id)
+    if not item:
+        raise not_found("工作流运行")
+    return row(item)
+
+
+@router.get("/workflow-runs/{run_id}/events")
+async def get_workflow_run_events(
+    run_id: str,
+    after: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if not await db.get(WorkflowRun, run_id):
+        raise not_found("工作流运行")
+    return workflow_engine.events(run_id, max(0, after))
+
+
+@router.post("/workflow-runs/{run_id}/control")
+async def control_workflow_run(
+    run_id: str,
+    payload: WorkflowRunControlRequest,
+) -> dict[str, Any]:
+    result = await workflow_engine.control(run_id, payload.action, payload.message)
+    if not result["accepted"]:
+        raise HTTPException(status_code=409, detail="该工作流当前不在可控制的运行状态")
+    return result
+
+
+@router.get("/workflow-runs/{run_id}/artifacts")
+async def list_workflow_artifacts(
+    run_id: str, db: AsyncSession = Depends(get_db)
 ) -> list[dict[str, Any]]:
+    if not await db.get(WorkflowRun, run_id):
+        raise not_found("工作流运行")
     items = (
         await db.scalars(
-            select(WorkflowRun).order_by(desc(WorkflowRun.created_at)).limit(min(limit, 200))
+            select(WorkflowArtifact)
+            .where(WorkflowArtifact.run_id == run_id)
+            .order_by(WorkflowArtifact.iteration, WorkflowArtifact.created_at)
+        )
+    ).all()
+    return [row(item) for item in items]
+
+
+@router.get("/workflow-runs")
+async def list_workflow_runs(
+    limit: int = 50,
+    workflow_id: str | None = None,
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    statement = select(WorkflowRun)
+    if workflow_id:
+        statement = statement.where(WorkflowRun.workflow_id == workflow_id)
+    if status:
+        statement = statement.where(WorkflowRun.status == status)
+    items = (
+        await db.scalars(
+            statement.order_by(desc(WorkflowRun.created_at)).limit(min(limit, 200))
         )
     ).all()
     return [row(item) for item in items]
@@ -1349,6 +1568,7 @@ async def create_model_endpoint(
 ) -> dict[str, Any]:
     item = ModelEndpoint(
         name=payload.name,
+        modality=payload.modality,
         provider_type=payload.provider_type,
         base_url=payload.base_url.rstrip("/"),
         api_key_ciphertext=secret_store.encrypt(payload.api_key),
@@ -1360,6 +1580,8 @@ async def create_model_endpoint(
     )
     db.add(item)
     await db.flush()
+    if settings.require_online_agents and item.enabled and item.modality == "chat":
+        await migrate_agents_to_online_endpoint(db, item)
     await audit(db, "model_endpoint.created", "model_endpoint", item.id)
     return endpoint_row(item)
 
@@ -1372,6 +1594,25 @@ async def update_model_endpoint(
     if not item:
         raise not_found("模型接口")
     values = payload.model_dump(exclude_unset=True)
+    next_enabled = bool(values.get("enabled", item.enabled))
+    next_modality = str(values.get("modality", item.modality))
+    replacement = None
+    if (
+        settings.require_online_agents
+        and item.modality == "chat"
+        and (not next_enabled or next_modality != "chat")
+    ):
+        replacement = await latest_chat_endpoint(db, exclude_id=item.id)
+        assigned_agents = await db.scalar(
+            select(func.count(AgentDefinition.id)).where(
+                AgentDefinition.model_endpoint_id == item.id
+            )
+        )
+        if assigned_agents and not replacement:
+            raise HTTPException(
+                status_code=409,
+                detail="该接口仍被 Agent 使用，且没有其他启用的在线对话接口可接管，不能停用",
+            )
     if "api_key" in values:
         item.api_key_ciphertext = secret_store.encrypt(values.pop("api_key") or "")
     if "headers" in values:
@@ -1380,6 +1621,14 @@ async def update_model_endpoint(
         item.request_options_json = dumps(values.pop("request_options"))
     for key, value in values.items():
         setattr(item, key, value.rstrip("/") if key == "base_url" else value)
+    if (
+        settings.require_online_agents
+        and item.enabled
+        and item.modality == "chat"
+    ):
+        await migrate_agents_to_online_endpoint(db, item)
+    elif replacement:
+        await migrate_agents_to_online_endpoint(db, replacement)
     await audit(db, "model_endpoint.updated", "model_endpoint", item.id)
     return endpoint_row(item)
 
@@ -1392,20 +1641,35 @@ async def test_model_endpoint(
     if not item:
         raise not_found("模型接口")
     try:
-        provider = OpenAICompatibleProvider(
-            item.base_url,
-            secret_store.decrypt(item.api_key_ciphertext),
-            headers=loads(item.headers_json, {}),
-            request_options=loads(item.request_options_json, {}),
-            timeout_seconds=item.timeout_seconds,
-        )
-        response = await provider.chat(
-            [{"role": "user", "content": "只回复 OK"}],
-            model=item.default_model,
-            temperature=0,
-        )
+        if item.modality == "image":
+            provider = OpenAICompatibleImageProvider(
+                item.base_url,
+                secret_store.decrypt(item.api_key_ciphertext),
+                headers=loads(item.headers_json, {}),
+                request_options=loads(item.request_options_json, {}),
+                timeout_seconds=item.timeout_seconds,
+            )
+            response = await provider.generate(
+                "A minimal blue circle on a clean white background",
+                model=item.default_model,
+            )
+            response_preview = response.image_url[:200]
+        else:
+            provider = OpenAICompatibleProvider(
+                item.base_url,
+                secret_store.decrypt(item.api_key_ciphertext),
+                headers=loads(item.headers_json, {}),
+                request_options=loads(item.request_options_json, {}),
+                timeout_seconds=item.timeout_seconds,
+            )
+            response = await provider.chat(
+                [{"role": "user", "content": "只回复 OK"}],
+                model=item.default_model,
+                temperature=0,
+            )
+            response_preview = response.content[:200]
         item.health = "healthy"
-        result = {"status": "healthy", "response": response.content[:200]}
+        result = {"status": "healthy", "response": response_preview}
     except Exception as exc:
         item.health = "unhealthy"
         result = {"status": "unhealthy", "error": str(exc)}
@@ -1432,11 +1696,15 @@ async def run_tool(payload: ToolRunRequest, db: AsyncSession = Depends(get_db)) 
 
 @router.get("/approvals")
 async def list_approvals(
-    status: str | None = None, db: AsyncSession = Depends(get_db)
+    status: str | None = None,
+    run_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
     statement = select(Approval).order_by(desc(Approval.created_at))
     if status:
         statement = statement.where(Approval.status == status)
+    if run_id:
+        statement = statement.where(Approval.run_id == run_id)
     return [row(item) for item in (await db.scalars(statement.limit(100))).all()]
 
 

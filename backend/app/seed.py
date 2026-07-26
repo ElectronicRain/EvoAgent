@@ -2,19 +2,177 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from .config import settings
 from .db import session_scope
 from .models import (
     AgentDefinition,
     AgentGroup,
+    AgentRun,
     ApprovalPolicy,
     EvaluationCase,
     Extension,
     KnowledgeBase,
     Skill,
     Workflow,
+    WorkflowRun,
 )
 from .services.common import dumps, loads
 from .services.knowledge import knowledge_service
+from .services.model_routing import (
+    latest_chat_endpoint,
+    migrate_agents_to_online_endpoint,
+)
+from .services.workflows import WorkflowEngine
+
+
+async def recover_stale_runs(db) -> None:
+    """A desktop restart means no prior in-memory task can still own these rows."""
+    for run in (
+        await db.scalars(
+            select(AgentRun).where(AgentRun.status.in_(["queued", "running"]))
+        )
+    ).all():
+        run.status = "interrupted"
+        run.error = run.error or "客户端重启，先前的 Agent 任务已结束"
+    for run in (
+        await db.scalars(
+            select(WorkflowRun).where(
+                WorkflowRun.status.in_(["queued", "running", "paused"])
+            )
+        )
+    ).all():
+        run.status = "interrupted"
+        run.current_node_id = None
+        run.error = run.error or "客户端重启，先前的工作流任务已结束"
+
+
+async def ensure_online_agent_bindings(db) -> None:
+    if not settings.require_online_agents:
+        return
+    endpoint = await latest_chat_endpoint(db)
+    if endpoint:
+        await migrate_agents_to_online_endpoint(db, endpoint)
+
+
+async def upgrade_workflow_runtime_contracts(db) -> None:
+    """Upgrade saved graphs without discarding user-authored nodes or positions."""
+    engine = WorkflowEngine()
+    for workflow in (await db.scalars(select(Workflow))).all():
+        definition = loads(workflow.definition_json, {"nodes": [], "edges": []})
+        nodes = list(definition.get("nodes") or [])
+        edges = list(definition.get("edges") or [])
+        changed = False
+        execution = definition.setdefault("execution", {})
+        if execution.get("intent_validation") is not settings.require_online_agents:
+            execution["intent_validation"] = settings.require_online_agents
+            changed = True
+        node_map = {str(node.get("id")): node for node in nodes}
+        for node in nodes:
+            config = node.setdefault("config", {})
+            if node.get("type") == "agent" and "retry_count" not in config:
+                config["retry_count"] = 1
+                changed = True
+
+        for condition in [node for node in nodes if node.get("type") == "condition"]:
+            condition_id = str(condition.get("id"))
+            condition_config = condition.setdefault("config", {})
+            review_incoming = next(
+                (edge for edge in edges if edge.get("target") == condition_id),
+                None,
+            )
+            review_id = str(review_incoming.get("source")) if review_incoming else ""
+            if condition_config.get("condition") and review_id:
+                condition_config.pop("condition", None)
+                condition_config.update(
+                    {
+                        "left": f"{{{{nodes.{review_id}.output}}}}",
+                        "operator": "contains",
+                        "right": "DECISION: PASS",
+                    }
+                )
+                changed = True
+            elif condition_config.get("right") == "通过":
+                condition_config["right"] = "DECISION: PASS"
+                changed = True
+
+            reviewer = node_map.get(review_id)
+            reviewer_agent_id = str(
+                (reviewer or {}).get("config", {}).get("agent_id") or ""
+            )
+            reviewer_agent = (
+                await db.get(AgentDefinition, reviewer_agent_id)
+                if reviewer_agent_id
+                else None
+            )
+            if reviewer_agent and "DECISION: PASS" not in reviewer_agent.system_prompt:
+                reviewer_agent.system_prompt = (
+                    f"{reviewer_agent.system_prompt.rstrip()}\n\n"
+                    "审核输出首行必须只写“DECISION: PASS”或“DECISION: REVISE”；"
+                    "随后再说明依据、问题和修改建议。"
+                )
+                changed = True
+
+            direct_true_edges = [
+                edge
+                for edge in edges
+                if edge.get("source") == condition_id
+                and edge.get("source_slot") == "true"
+                and node_map.get(str(edge.get("target")), {}).get("type") == "merge"
+            ]
+            if not direct_true_edges:
+                continue
+            deliverable_incoming = next(
+                (edge for edge in edges if edge.get("target") == review_id),
+                None,
+            )
+            deliverable_id = (
+                str(deliverable_incoming.get("source"))
+                if deliverable_incoming
+                else review_id
+            )
+            if not deliverable_id or deliverable_id not in node_map:
+                continue
+            base_id = f"{condition_id}_approved_result"
+            approved_id = base_id
+            suffix = 2
+            while approved_id in node_map:
+                approved_id = f"{base_id}_{suffix}"
+                suffix += 1
+            condition_position = condition.get("position") or {}
+            approved = {
+                "id": approved_id,
+                "type": "template",
+                "label": "审核通过稿",
+                "config": {
+                    "template": f"{{{{nodes.{deliverable_id}.output}}}}"
+                },
+                "position": {
+                    "x": float(condition_position.get("x", 900)) + 220,
+                    "y": max(40, float(condition_position.get("y", 240)) - 110),
+                },
+            }
+            nodes.append(approved)
+            node_map[approved_id] = approved
+            for edge in direct_true_edges:
+                merge_id = edge["target"]
+                edge["target"] = approved_id
+                edges.append(
+                    {
+                        "source": approved_id,
+                        "target": merge_id,
+                        "source_slot": "output",
+                    }
+                )
+            changed = True
+        if changed:
+            definition["nodes"] = nodes
+            definition["edges"] = edges
+            try:
+                engine.validate_definition(definition)
+            except ValueError:
+                continue
+            workflow.definition_json = dumps(definition)
+            workflow.version += 1
 
 
 async def ensure_agent_groups(db) -> dict[str, AgentGroup]:
@@ -88,6 +246,19 @@ async def ensure_builtin_extensions(db):
             "将 Agent 结果整理为可验收的研究或教学成果。",
             "输出目标、输入依据、执行步骤、关键结论、引用、风险、待办事项和验收清单。优先使用清晰标题、表格和编号，保留 AI 生成内容标识。",
         ),
+        (
+            "jsxgraph-math-visualization",
+            "数学问题自动输出逐步公式推导，并用受控 JSXGraph JSON 绘制交互图表。",
+            (
+                "遇到代数、函数、解析几何、微积分、向量、三角、概率分布或数值方法问题时，"
+                "先明确已知量、未知量、定义域和假设，再使用 $...$ 与 $$...$$ 给出逐步推导、"
+                "定理依据和代回验证。当图形能帮助解释时，追加 ```jsxgraph JSON 代码块。"
+                "JSON 顶层包含 title、boundingBox、axis、objects；对象只使用 "
+                "functiongraph、curve、point、line、segment、arrow、polygon、circle。"
+                "函数表达式只使用 x、t、pi、e、四则运算、^、括号和常见数学函数。"
+                "禁止输出 JavaScript、HTML、事件处理器或外部 URL；不适合画图时不要强行生成图表。"
+            ),
+        ),
     ]
     skills = {}
     for name, description, instructions in skill_definitions:
@@ -96,6 +267,10 @@ async def ensure_builtin_extensions(db):
             skill = Skill(name=name, description=description, instructions=instructions)
             db.add(skill)
             await db.flush()
+        skill.description = description
+        skill.instructions = instructions
+        if name == "jsxgraph-math-visualization":
+            skill.source_path = "builtin://skills/jsxgraph-math-visualization"
         skills[name] = skill
 
     extension_definitions = [
@@ -303,6 +478,7 @@ async def ensure_builtin_agent_catalog(
 
 async def seed_demo_data() -> None:
     async with session_scope() as db:
+        await recover_stale_runs(db)
         builtin_skills = await ensure_builtin_extensions(db)
         agent_groups = await ensure_agent_groups(db)
         existing_agents = (await db.scalars(select(AgentDefinition))).all()
@@ -317,6 +493,8 @@ async def seed_demo_data() -> None:
                         tools.append("web_research")
                 agent.tools_json = dumps(tools)
             await ensure_builtin_agent_catalog(db, agent_groups, builtin_skills)
+            await ensure_online_agent_bindings(db)
+            await upgrade_workflow_runtime_contracts(db)
             return
 
         steady_policy = ApprovalPolicy(
@@ -560,3 +738,5 @@ async def seed_demo_data() -> None:
                 ),
             ]
         )
+        await ensure_online_agent_bindings(db)
+        await upgrade_workflow_runtime_contracts(db)

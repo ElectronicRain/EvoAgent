@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -17,6 +18,12 @@ class LLMResponse:
     tokens: int = 0
 
 
+@dataclass
+class ImageGenerationResponse:
+    image_url: str
+    revised_prompt: str = ""
+
+
 class LLMProvider:
     async def chat(
         self,
@@ -25,6 +32,8 @@ class LLMProvider:
         model: str,
         temperature: float,
         tools: list[dict[str, Any]] | None = None,
+        top_p: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMResponse:
         raise NotImplementedError
 
@@ -39,6 +48,8 @@ class DemoProvider(LLMProvider):
         model: str,
         temperature: float,
         tools: list[dict[str, Any]] | None = None,
+        top_p: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMResponse:
         user_message = next(
             (str(item.get("content", "")) for item in reversed(messages) if item.get("role") == "user"),
@@ -95,6 +106,32 @@ class DemoProvider(LLMProvider):
                     "本地操作未执行。\n\n"
                     f"原因：{local_result.get('error') or local_result.get('message') or '当前安全策略不允许该操作'}"
                 )
+        elif (
+            "jsxgraph-math-visualization" in system
+            and re.search(
+                r"(函数|方程|导数|积分|极限|解析几何|几何证明|向量|三角函数|概率|[xyz]\s*=)",
+                user_message,
+                re.I,
+            )
+        ):
+            answer = (
+                "## 数学推导\n\n"
+                "以问题中的函数关系为例，先写成标准形式：\n\n"
+                "$$f(x)=x^2$$\n\n"
+                "对幂函数使用求导法则 $\\frac{d}{dx}x^n=nx^{n-1}$：\n\n"
+                "$$f'(x)=2x$$\n\n"
+                "因此在 $x=1$ 处的函数值与斜率分别为：\n\n"
+                "$$f(1)=1,\\qquad f'(1)=2$$\n\n"
+                "切线方程为：\n\n"
+                "$$y-1=2(x-1)\\Longrightarrow y=2x-1$$\n\n"
+                "```jsxgraph\n"
+                '{"title":"函数与切线","boundingBox":[-3,7,3,-3],"axis":true,'
+                '"objects":[{"type":"functiongraph","expression":"x^2","range":[-2.5,2.5],'
+                '"name":"f(x)=x^2","color":"#1769c2"},{"type":"point","coords":[1,1],'
+                '"name":"P(1,1)","color":"#d95f45"},{"type":"line","points":[[0,-1],[2,3]],'
+                '"name":"y=2x-1","color":"#168c83"}]}\n'
+                "```"
+            )
         elif web_sources:
             review_match = re.search(r"请对任务“(.+?)”", user_message)
             research_topic = review_match.group(1) if review_match else user_message
@@ -151,7 +188,19 @@ class OpenAICompatibleProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.headers = headers or {}
-        self.request_options = request_options or {}
+        self.request_options = dict(request_options or {})
+        self.retry_attempts = max(
+            1,
+            min(
+                int(
+                    self.request_options.pop(
+                        "_retry_attempts",
+                        self.request_options.pop("retry_attempts", 3),
+                    )
+                ),
+                5,
+            ),
+        )
         self.timeout_seconds = timeout_seconds
 
     async def chat(
@@ -161,6 +210,8 @@ class OpenAICompatibleProvider(LLMProvider):
         model: str,
         temperature: float,
         tools: list[dict[str, Any]] | None = None,
+        top_p: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": model,
@@ -168,27 +219,61 @@ class OpenAICompatibleProvider(LLMProvider):
             "temperature": temperature,
         }
         payload.update(self.request_options)
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         headers = dict(self.headers)
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
+        response: httpx.Response | None = None
+        last_transport_error: Exception | None = None
+        retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions", json=payload, headers=headers
+            for attempt in range(1, self.retry_attempts + 1):
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                    )
+                    if (
+                        response.status_code in {400, 404}
+                        and not self.base_url.endswith("/v1")
+                    ):
+                        response = await client.post(
+                            f"{self.base_url}/v1/chat/completions",
+                            json=payload,
+                            headers=headers,
+                        )
+                    if (
+                        response.status_code in retryable_statuses
+                        and attempt < self.retry_attempts
+                    ):
+                        await asyncio.sleep(min(0.6 * attempt, 1.8))
+                        continue
+                    break
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    last_transport_error = exc
+                    if attempt >= self.retry_attempts:
+                        break
+                    await asyncio.sleep(min(0.6 * attempt, 1.8))
+        if response is None:
+            detail = str(last_transport_error or "连接失败").strip()
+            raise RuntimeError(f"在线模型接口连接失败（已重试 {self.retry_attempts} 次）：{detail}")
+        if response.is_error:
+            detail = response.text.replace("\n", " ")[:500]
+            raise RuntimeError(
+                f"模型接口返回 HTTP {response.status_code}: {detail or '无错误正文'}"
             )
-            if response.status_code in {400, 404} and not self.base_url.endswith("/v1"):
-                response = await client.post(
-                    f"{self.base_url}/v1/chat/completions", json=payload, headers=headers
-                )
-            if response.is_error:
-                detail = response.text.replace("\n", " ")[:500]
-                raise RuntimeError(
-                    f"模型接口返回 HTTP {response.status_code}: {detail or '无错误正文'}"
-                )
+        try:
             data = response.json()
-        choice = data["choices"][0]["message"]
+            choice = data["choices"][0]["message"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("在线模型接口响应格式无效，缺少 choices[0].message") from exc
         tool_calls = []
         for item in choice.get("tool_calls") or []:
             function = item.get("function", {})
@@ -206,6 +291,72 @@ class OpenAICompatibleProvider(LLMProvider):
         )
 
 
+class OpenAICompatibleImageProvider:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        headers: dict[str, str] | None = None,
+        request_options: dict[str, Any] | None = None,
+        timeout_seconds: int = 90,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.headers = headers or {}
+        self.request_options = request_options or {}
+        self.timeout_seconds = timeout_seconds
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        model: str,
+    ) -> ImageGenerationResponse:
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": "1024x1024",
+        }
+        payload.update(self.request_options)
+        headers = dict(self.headers)
+        if self.api_key:
+            headers.setdefault("Authorization", f"Bearer {self.api_key}")
+        url = (
+            f"{self.base_url}/images/generations"
+            if self.base_url.endswith("/v1")
+            else f"{self.base_url}/images/generations"
+        )
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code in {400, 404} and not self.base_url.endswith("/v1"):
+                response = await client.post(
+                    f"{self.base_url}/v1/images/generations",
+                    json=payload,
+                    headers=headers,
+                )
+            if response.is_error:
+                detail = response.text.replace("\n", " ")[:500]
+                raise RuntimeError(
+                    f"图片模型接口返回 HTTP {response.status_code}: {detail or '无错误正文'}"
+                )
+            data = response.json()
+        items = data.get("data") or data.get("images") or []
+        if not items:
+            raise RuntimeError("图片模型接口没有返回图片")
+        item = items[0] if isinstance(items[0], dict) else {"url": items[0]}
+        image_url = str(item.get("url") or item.get("image_url") or "")
+        if not image_url and item.get("b64_json"):
+            image_url = f"data:image/png;base64,{item['b64_json']}"
+        if not image_url:
+            raise RuntimeError("图片模型响应缺少 url 或 b64_json")
+        return ImageGenerationResponse(
+            image_url=image_url,
+            revised_prompt=str(item.get("revised_prompt") or ""),
+        )
+
+
 def get_provider(name: str) -> LLMProvider:
     if name == "demo" or not settings.llm_api_key:
         return DemoProvider()
@@ -219,6 +370,19 @@ def provider_from_endpoint(endpoint: Any) -> LLMProvider:
     from .secrets import secret_store
 
     return OpenAICompatibleProvider(
+        endpoint.base_url,
+        secret_store.decrypt(endpoint.api_key_ciphertext),
+        headers=loads(endpoint.headers_json, {}),
+        request_options=loads(endpoint.request_options_json, {}),
+        timeout_seconds=endpoint.timeout_seconds,
+    )
+
+
+def image_provider_from_endpoint(endpoint: Any) -> OpenAICompatibleImageProvider:
+    from .common import loads
+    from .secrets import secret_store
+
+    return OpenAICompatibleImageProvider(
         endpoint.base_url,
         secret_store.decrypt(endpoint.api_key_ciphertext),
         headers=loads(endpoint.headers_json, {}),

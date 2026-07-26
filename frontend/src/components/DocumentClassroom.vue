@@ -30,6 +30,9 @@ let lessonToken = 0
 
 const sections = computed(() => String(props.artifact?.content || '').split(/\n{2,}/).filter(Boolean))
 const selectedCount = computed(() => selectedSections.value.length)
+const boardVisible = computed(() =>
+  autoBoard.value && (speaking.value || preparing.value || boardLines.value.length > 0 || Boolean(writingLine.value)),
+)
 
 function renderMarkdown(source: string) {
   const formulas: string[] = []
@@ -357,7 +360,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="classroom" :class="{ enlarged }">
     <header class="classroom-toolbar">
-      <div><Bot :size="15" /><strong>AI 文档讲解课堂</strong><small>{{ agentName }}</small></div>
+      <div><Bot :size="15" /><strong>智能阅读与讲解</strong><small>{{ agentName }} · 数据库文档</small></div>
       <div class="toolbar-actions">
         <button :disabled="preparing" title="AI 自动讲解并板书" @click="startTeaching"><Volume2 :size="14" /></button>
         <button title="暂停/继续" @click="togglePause"><Pause v-if="speaking&&!paused" :size="14" /><Play v-else :size="14" /></button>
@@ -386,16 +389,18 @@ onBeforeUnmount(() => {
       <span>板书颜色</span><button class="pen red" @click="penColor='#e33f4f'" /><button class="pen blue" @click="penColor='#2677d5'" /><button class="pen yellow" @click="penColor='#ffd43b'" />
       <small>Agent 会自动圈重点并板书；你也可以随时接管画笔。</small>
     </div>
-    <div class="lesson-stage">
+    <div class="lesson-stage" :class="{ 'with-board': boardVisible }">
       <div ref="surface" class="document-surface" @click="documentClick">
-        <article v-for="(section,index) in sections" :key="index" :ref="el=>setSectionRef(el,index)" class="markdown-section" :class="{ speaking:activeSection===index, selectable:selectionMode, selected:selectedSections.includes(index), unselected:selectionMode&&!selectedSections.includes(index) }" @click="selectionMode&&toggleSelected(index)">
-          <button v-if="selectionMode" class="section-check" @click.stop="toggleSelected(index)">{{ selectedSections.includes(index)?'✓':'+' }}</button>
-          <div v-html="renderMarkdown(section)" />
-        </article>
+        <div class="document-paper">
+          <article v-for="(section,index) in sections" :key="index" :ref="el=>setSectionRef(el,index)" class="markdown-section" :class="{ speaking:activeSection===index, selectable:selectionMode, selected:selectedSections.includes(index), unselected:selectionMode&&!selectedSections.includes(index) }" @click="selectionMode&&toggleSelected(index)">
+            <button v-if="selectionMode" class="section-check" @click.stop="toggleSelected(index)">{{ selectedSections.includes(index)?'✓':'+' }}</button>
+            <div v-html="renderMarkdown(section)" />
+          </article>
+        </div>
         <canvas ref="autoCanvas" class="auto-ink" />
         <canvas ref="canvas" :class="{ enabled:drawing }" @pointerdown="drawStart" @pointermove="drawMove" @pointerup="drawEnd" @pointercancel="drawEnd" />
       </div>
-      <aside class="auto-board" :class="{ active:speaking&&autoBoard }">
+      <aside v-if="boardVisible" class="auto-board" :class="{ active:speaking&&autoBoard }">
         <header><Bot :size="13" />Agent 实时板书 <small>{{ planMode==='model'?`动态讲解 · ${modelEndpoint}`:'智能降级脚本' }}</small></header>
         <div class="chalk-lines">
           <p v-for="(line,index) in boardLines" :key="index">{{ line }}</p>
@@ -415,22 +420,24 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.classroom { container-type:inline-size; border:1px solid #d5e3ee; border-radius:8px; overflow:hidden; background:#fff; }
+.classroom { container-type:inline-size; border:1px solid #d5e3ee; border-radius:8px; overflow:hidden; color:#243e56; background:#f2f6f8; }
 .classroom.enlarged { position:fixed; inset:18px; z-index:1000; display:grid; grid-template-rows:auto auto auto minmax(0,1fr) auto; box-shadow:0 20px 70px rgba(10,38,65,.3); }
-.classroom-toolbar { min-height:45px; padding:0 10px; display:flex; align-items:center; justify-content:space-between; gap:8px; color:#214d73; background:#edf6fd; border-bottom:1px solid #d5e3ee; }
+.classroom-toolbar { min-height:50px; padding:0 14px; display:flex; align-items:center; justify-content:space-between; gap:8px; color:#214d73; background:linear-gradient(90deg,#f8fbfd,#edf5fa); border-bottom:1px solid #d5e3ee; }
 .classroom-toolbar>div:first-child { display:flex; align-items:center; gap:6px; }
-.classroom-toolbar small { color:#7a91a5; font-size:8px; }
-.toolbar-actions { display:flex; gap:4px; }
-.toolbar-actions button { width:30px; height:29px; border:1px solid #cbdce9; border-radius:5px; display:grid; place-items:center; color:#35688f; background:#fff; }
-.toolbar-actions button.active { color:#fff; background:#2677c8; }
-.teaching-options{min-height:37px;padding:5px 9px;display:flex;align-items:center;gap:6px;color:#4e6d86;background:#f8fbfe;border-bottom:1px solid #dce7ef;font-size:8px}
+.classroom-toolbar small { padding-left:6px;border-left:1px solid #cadbe6;color:#7a91a5; font-size:8px; }
+.toolbar-actions { display:flex; gap:5px; }
+.toolbar-actions button { width:31px; height:30px; border:1px solid #cbdce9; border-radius:7px; display:grid; place-items:center; color:#35688f; background:#fff;cursor:pointer;transition:.15s ease }
+.toolbar-actions button:hover{color:#1769b5;border-color:#88b7d7;background:#f4faff}.toolbar-actions button.active { color:#fff; border-color:#2677c8;background:#2677c8; }
+.teaching-options{min-height:41px;padding:6px 12px;display:flex;align-items:center;gap:6px;color:#4e6d86;background:#fbfdfe;border-bottom:1px solid #dce7ef;font-size:8px}
 .teaching-options>span{display:flex;align-items:center;gap:4px;font-weight:600}.teaching-options button{padding:4px 7px;border:1px solid #cbdce8;border-radius:4px;color:#35688f;background:#fff;font-size:8px}.teaching-options label{margin-left:auto;display:flex;align-items:center;gap:4px}.teaching-options label+label{margin-left:2px}.teaching-options select{max-width:145px;height:24px;border:1px solid #cbdce8;border-radius:4px;color:#345b78;background:#fff;font-size:8px}
 .pen-row { padding:7px 10px; display:flex; align-items:center; gap:7px; color:#526f88; background:#fff9e7; font-size:9px; }
 .pen-row small { margin-left:auto; }
 .pen { width:18px; height:18px; border:2px solid #fff; border-radius:99px; box-shadow:0 0 0 1px #b7c7d5; }.pen.red{background:#e33f4f}.pen.blue{background:#2677d5}.pen.yellow{background:#ffd43b}
-.lesson-stage { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 260px; }
-.document-surface { position:relative; max-height:430px; padding:22px 24px 50px; overflow:auto; color:#243e56; background:#fff; }
+.lesson-stage { min-height:0; display:grid; grid-template-columns:minmax(0,1fr);background:#eef3f6 }
+.lesson-stage.with-board{grid-template-columns:minmax(0,1fr) 280px}
+.document-surface { position:relative; max-height:430px; padding:28px 30px 54px; overflow:auto; color:#243e56; background:linear-gradient(145deg,#eef3f6,#f6f8f9); }
 .enlarged .document-surface { max-height:none; }
+.document-paper{width:min(900px,100%);min-height:100%;box-sizing:border-box;margin:0 auto;padding:44px 54px 58px;border:1px solid #e0e7eb;border-radius:4px;background:#fff;box-shadow:0 12px 36px rgba(28,58,76,.1)}
 .auto-board { min-width:0; max-height:430px; overflow:hidden; color:#e7f4ff; background:linear-gradient(145deg,#123c55,#0b2c41); border-left:1px solid #d5e3ee; box-shadow:inset 0 0 40px rgba(0,0,0,.18); }
 .enlarged .auto-board { max-height:none; }
 .auto-board header { height:42px;padding:0 10px;display:flex;align-items:center;gap:6px;color:#bfe5ff;border-bottom:1px solid rgba(255,255,255,.15);font-size:10px }.auto-board header small{margin-left:auto;color:#7fb0cd;font-size:7px}
@@ -438,15 +445,15 @@ onBeforeUnmount(() => {
 .chalk-lines p { margin:0 0 13px;color:#f1f7e7;font-family:"KaiTi","STKaiti",serif;font-size:15px;line-height:1.55;text-shadow:0 0 2px rgba(255,255,255,.3);white-space:pre-wrap;word-break:break-word }.chalk-lines p:nth-child(3n+2){color:#9bd6ff}.chalk-lines p:nth-child(3n){color:#ffe892}
 .chalk-lines .writing i { display:inline-block;width:2px;height:16px;margin-left:2px;vertical-align:-2px;background:#fff;animation:blink .7s infinite }.board-empty{margin-top:30px;color:#7ea2b7;font-size:10px;line-height:1.8;text-align:center}.board-empty em{display:block;margin-top:8px;color:#f0bf7a;font-style:normal;font-size:8px}
 @keyframes blink{50%{opacity:0}}
-.markdown-section { padding:4px 8px; border-left:3px solid transparent; transition:.2s; }
+.markdown-section { padding:4px 12px; border-left:3px solid transparent; transition:.2s; }
 .markdown-section.speaking { border-left-color:#2382d2; background:#edf7ff; }
 .markdown-section.selectable{position:relative;cursor:pointer}.markdown-section.unselected{opacity:.38;filter:grayscale(.5)}.markdown-section.selected{box-shadow:inset 0 0 0 1px #77afe0;background:#f0f8ff}.section-check{position:absolute;right:5px;top:5px;z-index:7;width:22px;height:22px;border:1px solid #6da7d6;border-radius:99px;color:#fff;background:#2580cc;font-size:10px}
-.markdown-section :deep(h1){font-size:24px;color:#123f68}.markdown-section :deep(h2){margin-top:18px;font-size:18px;color:#17588c}.markdown-section :deep(h3){font-size:15px;color:#28668f}
-.markdown-section :deep(p),.markdown-section :deep(li){font-size:12px;line-height:1.8}.markdown-section :deep(blockquote){margin:10px 0;padding:9px 12px;border-left:4px solid #5a9bd3;background:#f0f7fc;color:#4d6c85}
+.markdown-section :deep(h1){margin:0 0 20px;font-size:26px;line-height:1.35;color:#163b56}.markdown-section :deep(h2){margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid #e3eaee;font-size:18px;color:#17588c}.markdown-section :deep(h3){font-size:15px;color:#28668f}
+.markdown-section :deep(p),.markdown-section :deep(li){font-size:12px;line-height:1.9}.markdown-section :deep(p){margin:8px 0}.markdown-section :deep(blockquote){margin:12px 0;padding:11px 14px;border-left:4px solid #5a9bd3;border-radius:0 6px 6px 0;background:#f0f7fc;color:#4d6c85}
 .markdown-section :deep(table){width:100%;border-collapse:collapse;font-size:11px}.markdown-section :deep(th),.markdown-section :deep(td){padding:7px;border:1px solid #d7e3ec}.markdown-section :deep(th){background:#eaf3fa}
 .markdown-section :deep(code){padding:2px 4px;border-radius:3px;background:#edf2f6}.markdown-section :deep(a){color:#0875ce}.markdown-section :deep(.katex){cursor:pointer;color:#173f65}
 canvas { position:absolute; inset:0; pointer-events:none; z-index:5; } canvas.auto-ink{z-index:4} canvas.enabled{pointer-events:auto;cursor:crosshair}
-.teacher-chat { padding:9px; display:grid; grid-template-columns:auto minmax(180px,1fr) auto; align-items:center; gap:7px; border-top:1px solid #d5e3ee; background:#f6faff; }
-.teacher-chat input { height:34px;padding:0 9px;border:1px solid #cbdbe7;border-radius:6px;outline:none;font-size:10px}.teacher-chat button{height:34px;padding:0 10px;border:0;border-radius:6px;display:flex;align-items:center;gap:5px;color:#fff;background:#1769c2;font-size:9px}.teacher-chat span{grid-column:2/-1;display:flex;align-items:center;gap:5px;color:#16805c;font-size:8px}
-@container(max-width:680px){.classroom-toolbar{align-items:flex-start;padding:8px;flex-direction:column}.toolbar-actions{width:100%;overflow-x:auto;padding-bottom:2px}.teaching-options{flex-wrap:wrap}.teaching-options label{margin-left:0}.lesson-stage{grid-template-columns:1fr}.auto-board{display:none}.teacher-chat{grid-template-columns:auto minmax(0,1fr)}.teacher-chat button{grid-column:2}.teacher-chat span{grid-column:1/-1}}
+.teacher-chat { padding:10px 13px; display:grid; grid-template-columns:auto minmax(180px,1fr) auto; align-items:center; gap:8px; border-top:1px solid #d5e3ee; background:#fbfdfe; }
+.teacher-chat input { height:36px;padding:0 11px;border:1px solid #cbdbe7;border-radius:8px;outline:none;font-size:10px}.teacher-chat input:focus{border-color:#75add4;box-shadow:0 0 0 3px rgba(55,137,193,.1)}.teacher-chat button{height:36px;padding:0 12px;border:0;border-radius:8px;display:flex;align-items:center;gap:5px;color:#fff;background:linear-gradient(135deg,#1769c2,#258daa);font-size:9px;cursor:pointer}.teacher-chat span{grid-column:2/-1;display:flex;align-items:center;gap:5px;color:#16805c;font-size:8px}
+@container(max-width:680px){.classroom-toolbar{align-items:flex-start;padding:8px;flex-direction:column}.toolbar-actions{width:100%;overflow-x:auto;padding-bottom:2px}.teaching-options{flex-wrap:wrap}.teaching-options label{margin-left:0}.lesson-stage,.lesson-stage.with-board{grid-template-columns:1fr}.auto-board{display:none}.document-surface{padding:12px}.document-paper{padding:24px 18px}.teacher-chat{grid-template-columns:auto minmax(0,1fr)}.teacher-chat button{grid-column:2}.teacher-chat span{grid-column:1/-1}}
 </style>

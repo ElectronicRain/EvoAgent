@@ -1,7 +1,7 @@
 {
   "name": "evoagent-desktop",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
     "dompurify": "^3.4.12",
+    "jsxgraph": "^1.13.1",
     "katex": "^0.18.1",
     "lucide-vue-next": "^0.468.0",
     "marked": "^18.0.6",

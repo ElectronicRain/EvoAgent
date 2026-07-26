@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import asyncio
+import inspect
 import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..db import SessionLocal
 from ..models import (
-    Approval,
     AgentArtifact,
     AgentDefinition,
     AgentRun,
@@ -21,11 +19,13 @@ from ..models import (
     ModelEndpoint,
     Skill,
 )
+from ..schemas import AgentGenerationConfig, AgentRAGConfig
 from .common import audit, dumps, loads
 from .extensions import extension_service
 from .intent import TaskIntent, intent_service
 from .knowledge import knowledge_service
-from .llm import get_provider, provider_from_endpoint
+from .llm import get_provider, image_provider_from_endpoint, provider_from_endpoint
+from .model_routing import resolve_agent_chat_endpoint
 from .security import RuntimeSecurityContext, runtime_security_service
 from .tools import tool_runtime
 from .web_research import web_research_service
@@ -38,11 +38,27 @@ class ExecutionContext:
     parent_run_id: str | None = None
     user_id: str | None = None
     reply_style_prompt: str = ""
+    approval_run_id: str | None = None
+    permission_mode: str | None = None
+    approval_policy_id: str | None = None
 
 
 class AgentEngine:
     research_role = re.compile(
         r"search|researcher|scholar|检索|搜索|查找|调查|调研|证据研究|资料搜集",
+        re.I,
+    )
+    math_query_pattern = re.compile(
+        r"(求解|证明|方程|函数|导数|微分|积分|极限|矩阵|向量|"
+        r"解析几何|平面几何|立体几何|几何证明|三角形|三角函数|概率|"
+        r"数列|不等式|解析式|抛物线|双曲线|椭圆|斜率|切线|渐近线|"
+        r"[xyz]\s*[=<>]|\\frac|\\int|\\sum|\d+\s*[\+\-\*/\^]\s*\d+)",
+        re.I,
+    )
+    image_request_pattern = re.compile(
+        r"(生成|创建|画|绘制|设计|做)(一张|一个|幅)?[^，。；\n]{0,40}"
+        r"(图片|图像|插画|示意图|效果图|海报|封面|概念图|场景图|流程图)|"
+        r"(图片|图像|插画|海报|封面).{0,8}(生成|绘制|设计)",
         re.I,
     )
 
@@ -51,6 +67,67 @@ class AgentEngine:
             [agent.slug, agent.name, agent.description or "", agent.system_prompt or ""]
         )
         return bool(self.research_role.search(profile))
+
+    def is_math_query(self, query: str) -> bool:
+        return bool(self.math_query_pattern.search(query))
+
+    @staticmethod
+    def _extract_image_prompt(content: str) -> tuple[str, str]:
+        prompts = re.findall(
+            r"```image-prompt\s*\n(.*?)\n```",
+            content,
+            flags=re.I | re.S,
+        )
+        cleaned = re.sub(
+            r"\n*```image-prompt\s*\n.*?\n```\n*",
+            "\n\n",
+            content,
+            flags=re.I | re.S,
+        ).strip()
+        prompt = "\n".join(item.strip() for item in prompts if item.strip())
+        return cleaned, prompt[:4000]
+
+    async def _image_endpoint(
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+    ) -> ModelEndpoint | None:
+        if agent.image_model_endpoint_id:
+            endpoint = await db.get(ModelEndpoint, agent.image_model_endpoint_id)
+            if endpoint and endpoint.enabled and endpoint.modality == "image":
+                return endpoint
+            return None
+        return await db.scalar(
+            select(ModelEndpoint)
+            .where(
+                ModelEndpoint.enabled.is_(True),
+                ModelEndpoint.modality == "image",
+            )
+            .order_by(desc(ModelEndpoint.updated_at))
+        )
+
+    @staticmethod
+    async def _chat(
+        provider: Any,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        temperature: float,
+        tools: list[dict[str, Any]] | None = None,
+        top_p: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> Any:
+        parameters = inspect.signature(provider.chat).parameters
+        options: dict[str, Any] = {
+            "model": model,
+            "temperature": temperature,
+            "tools": tools,
+        }
+        if "top_p" in parameters:
+            options["top_p"] = top_p
+        if "max_output_tokens" in parameters:
+            options["max_output_tokens"] = max_output_tokens
+        return await provider.chat(messages, **options)
 
     def call_agent_schema(self) -> dict[str, Any]:
         return {
@@ -68,6 +145,251 @@ class AgentEngine:
                 },
             },
         }
+
+    @staticmethod
+    def rag_config(agent: AgentDefinition) -> AgentRAGConfig:
+        return AgentRAGConfig.model_validate(loads(agent.rag_config_json, {}))
+
+    @staticmethod
+    def generation_config(agent: AgentDefinition) -> AgentGenerationConfig:
+        return AgentGenerationConfig.model_validate(
+            loads(agent.generation_config_json, {})
+        )
+
+    async def _standalone_rag_query(
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+        query: str,
+        history: list[dict[str, str]],
+        config: AgentRAGConfig,
+    ) -> str:
+        relevant_history = [
+            item
+            for item in history[-config.max_history_messages :]
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        ]
+        if not config.multi_turn or not relevant_history:
+            return query
+        endpoint = (
+            await db.get(ModelEndpoint, agent.model_endpoint_id)
+            if agent.model_endpoint_id
+            else None
+        )
+        if endpoint and endpoint.enabled:
+            transcript = "\n".join(
+                f"{'用户' if item['role'] == 'user' else '助手'}：{item['content']}"
+                for item in relevant_history
+            )
+            try:
+                response = await provider_from_endpoint(endpoint).chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "把当前追问改写成可独立检索的查询。必须继承对话中的实体、"
+                                "限定条件和数量要求，不回答问题，只输出一行查询。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"对话：\n{transcript}\n\n当前追问：{query}",
+                        },
+                    ],
+                    model=endpoint.default_model,
+                    temperature=0,
+                )
+                standalone = re.sub(r"\s+", " ", response.content).strip()
+                if standalone:
+                    return standalone[:4000]
+            except Exception:
+                pass
+        last_user = next(
+            (
+                str(item["content"]).strip()
+                for item in reversed(relevant_history)
+                if item["role"] == "user"
+            ),
+            "",
+        )
+        is_follow_up = len(query) <= 24 or bool(
+            re.search(r"^(那|它|这个|这些|其中|上面|继续|还有|分别|全部|为什么)", query)
+        )
+        return f"{last_user}；追问：{query}"[:4000] if last_user and is_follow_up else query
+
+    async def _prepare_agent_rag(
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+        query: str,
+        conversation_messages: list[dict[str, str]] | None = None,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        config = self.rag_config(agent)
+        knowledge_base_ids = loads(agent.knowledge_bases_json, [])
+        if not config.enabled or not (
+            knowledge_base_ids or config.knowledge_group_ids
+        ):
+            return {
+                "enabled": False,
+                "query": query,
+                "standalone_query": query,
+                "rewritten_queries": [query],
+                "chunks": [],
+                "citations": [],
+                "context": "",
+                "trace": {"scope": "disabled"},
+            }
+        standalone = await self._standalone_rag_query(
+            db,
+            agent,
+            query,
+            conversation_messages or [],
+            config,
+        )
+        if on_event:
+            await on_event(
+                {
+                    "type": "query_condensed",
+                    "original_query": query,
+                    "standalone_query": standalone,
+                    "changed": standalone != query,
+                    "history_messages": len(conversation_messages or []),
+                }
+            )
+
+        async def publish(event: dict[str, Any]) -> None:
+            if on_event:
+                await on_event(event)
+
+        result = await knowledge_service.query(
+            db,
+            query=standalone,
+            knowledge_base_ids=knowledge_base_ids,
+            knowledge_group_ids=config.knowledge_group_ids,
+            top_k=config.top_k,
+            candidate_k=config.candidate_k,
+            rerank_k=config.rerank_k,
+            similarity_threshold=config.similarity_threshold,
+            dense_weight=config.dense_weight,
+            lexical_weight=config.lexical_weight,
+            context_char_budget=config.context_char_budget,
+            query_rewrite=config.query_rewrite,
+            cross_language=config.cross_language,
+            knowledge_graph=config.knowledge_graph,
+            parent_expansion=config.parent_expansion,
+            complete_list_expansion=config.complete_list_expansion,
+            rerank_model=config.rerank_model,
+            generate_answer=False,
+            on_event=publish,
+        )
+        result.update(
+            {
+                "enabled": True,
+                "original_query": query,
+                "standalone_query": standalone,
+                "settings": config.model_dump(),
+            }
+        )
+        return result
+
+    def _render_rag_prompt(
+        self,
+        agent: AgentDefinition,
+        query: str,
+        rag_result: dict[str, Any],
+        conversation_messages: list[dict[str, str]] | None,
+    ) -> str:
+        generation = self.generation_config(agent)
+        rag = self.rag_config(agent)
+        history_rows = (conversation_messages or [])[-rag.max_history_messages :]
+        history = "\n".join(
+            f"{'用户' if item.get('role') == 'user' else '助手'}：{item.get('content', '')}"
+            for item in history_rows
+            if item.get("role") in {"user", "assistant"}
+        )
+        citations = "\n".join(
+            f"[资料 {item['number']}] {item['title']} · {item['source']}"
+            for item in rag_result.get("citations", [])
+        )
+        variables = {
+            "question": query,
+            "knowledge": rag_result.get("context") or "（未检索到可用证据）",
+            "history": history or "（无历史对话）",
+            "citations": citations or "（无可用引用）",
+            **generation.custom_variables,
+        }
+        prompt = generation.prompt_template
+        for key, value in variables.items():
+            prompt = prompt.replace(f"{{{key}}}", str(value))
+        if generation.grounded_refusal:
+            prompt += "\n\n证据不足时必须回答“当前知识库中未找到足以回答该问题的依据”，并指出缺失信息。"
+        return prompt
+
+    async def preview_rag(
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+        query: str,
+        *,
+        conversation_messages: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        trace: list[dict[str, Any]] = []
+
+        async def capture(event: dict[str, Any]) -> None:
+            trace.append(event)
+
+        result = await self._prepare_agent_rag(
+            db,
+            agent,
+            query,
+            conversation_messages,
+            capture,
+        )
+        result["rendered_prompt"] = self._render_rag_prompt(
+            agent,
+            query,
+            result,
+            conversation_messages,
+        )
+        result["pipeline"] = trace
+        return result
+
+    @staticmethod
+    def _answer_quality_issues(
+        answer: str,
+        rag_result: dict[str, Any],
+        generation: AgentGenerationConfig,
+    ) -> list[str]:
+        if not rag_result.get("enabled") or not rag_result.get("chunks"):
+            return []
+        issues: list[str] = []
+        citation_numbers = {
+            int(value)
+            for value in re.findall(r"\[资料\s*(\d+)\]", answer)
+        }
+        valid_numbers = {
+            int(item["number"]) for item in rag_result.get("citations", [])
+        }
+        if generation.citation_required and not citation_numbers:
+            issues.append("回答没有使用 [资料 N] 引用")
+        invalid = sorted(citation_numbers - valid_numbers)
+        if invalid:
+            issues.append(f"回答引用了不存在的资料编号：{invalid}")
+        list_counts = [
+            int(item.get("item_count") or 0)
+            for item in rag_result.get("trace", {}).get("list_contexts", [])
+        ]
+        expected = max(list_counts, default=0)
+        if expected >= 2 and rag_result.get("trace", {}).get("exhaustive_query"):
+            missing = [
+                number
+                for number in range(1, expected + 1)
+                if not re.search(rf"(^|\n)\s*{number}[.、)]", answer)
+            ]
+            if missing:
+                issues.append(f"完整编号列表缺少第 {', '.join(map(str, missing))} 项")
+        return issues
 
     async def _mcp_catalog(
         self, db: AsyncSession, permissions: dict[str, Any]
@@ -159,6 +481,12 @@ class AgentEngine:
             or "default"
         )
         security_context = await runtime_security_service.resolve(db, security_profile)
+        if execution.permission_mode:
+            security_context.command_mode = (
+                "always_ask"
+                if execution.permission_mode == "ask"
+                else execution.permission_mode
+            )
         run = AgentRun(
             agent_id=agent.id,
             user_id=execution.user_id,
@@ -191,6 +519,9 @@ class AgentEngine:
                     "security": security_context.as_dict(),
                 }
             )
+            endpoint = await resolve_agent_chat_endpoint(db, agent)
+            if endpoint:
+                await db.flush()
             intent = intent_service.classify(input_text)
             local_request = intent.category in {
                 "command_execution",
@@ -202,6 +533,20 @@ class AgentEngine:
             mcp_schemas, mcp_bindings, mcp_services, mcp_errors = await self._mcp_catalog(
                 db, permissions
             )
+            generation_config = self.generation_config(agent)
+            image_endpoint = await self._image_endpoint(db, agent)
+            math_query = self.is_math_query(input_text)
+
+            async def publish_rag_step(event: dict[str, Any]) -> None:
+                await emit({**event, "type": f"rag_{event['type']}"})
+
+            rag_result = await self._prepare_agent_rag(
+                db,
+                agent,
+                input_text,
+                conversation_messages,
+                publish_rag_step,
+            )
             system_prompt = await self._build_system_prompt(
                 db,
                 agent,
@@ -211,17 +556,29 @@ class AgentEngine:
                 mcp_services,
                 intent,
                 execution.reply_style_prompt,
+                rag_result,
+                conversation_messages,
+                image_generation_available=bool(image_endpoint),
+                math_query=math_query,
             )
             await emit({"type": "intent_detected", **intent.as_dict()})
             await emit(
                 {
                     "type": "context_ready",
-                    "knowledge_attached": "【知识库检索结果】" in system_prompt,
+                    "knowledge_attached": bool(rag_result.get("chunks")),
+                    "rag": {
+                        "enabled": rag_result.get("enabled", False),
+                        "standalone_query": rag_result.get("standalone_query", input_text),
+                        "citations": len(rag_result.get("citations", [])),
+                        "context_chars": len(rag_result.get("context", "")),
+                    },
                     "history_messages": len(conversation_messages or []),
                     "capabilities": {
                         "exec": True,
                         "skills": "【已启用 Skills】" in system_prompt,
                         "mcp_services": mcp_services,
+                        "image_generation": bool(image_endpoint),
+                        "math_visualization": math_query,
                     },
                 }
             )
@@ -235,13 +592,6 @@ class AgentEngine:
             schemas.extend(mcp_schemas)
             if mcp_errors:
                 await emit({"type": "mcp_unavailable", "errors": mcp_errors})
-            endpoint = (
-                await db.get(ModelEndpoint, agent.model_endpoint_id)
-                if agent.model_endpoint_id
-                else None
-            )
-            if agent.model_endpoint_id and (not endpoint or not endpoint.enabled):
-                raise RuntimeError("Agent 绑定的模型接口不存在或已停用")
             provider = provider_from_endpoint(endpoint) if endpoint else get_provider(agent.provider)
             model_name = endpoint.default_model if endpoint else agent.model
             total_tokens = 0
@@ -326,11 +676,14 @@ class AgentEngine:
             messages.append({"role": "user", "content": input_text})
 
             for iteration in range(settings.max_tool_iterations):
-                response = await provider.chat(
+                response = await self._chat(
+                    provider,
                     messages,
                     model=model_name,
                     temperature=agent.temperature,
                     tools=schemas or None,
+                    top_p=generation_config.top_p,
+                    max_output_tokens=generation_config.max_output_tokens,
                 )
                 total_tokens += response.tokens
                 await emit(
@@ -396,7 +749,119 @@ class AgentEngine:
                         }
                     )
             else:
-                raise RuntimeError("Agent 工具调用次数超过限制")
+                await emit(
+                    {
+                        "type": "tool_iteration_limit_reached",
+                        "iterations": settings.max_tool_iterations,
+                        "message": "工具调用达到上限，正在基于已取得的真实结果强制收敛并生成最终答案。",
+                    }
+                )
+                recovery = await self._chat(
+                    provider,
+                    messages
+                    + [
+                        {
+                            "role": "user",
+                            "content": (
+                                "工具调用次数已经达到上限。禁止继续调用任何工具。"
+                                "请立即基于以上工具返回的真实结果，直接完成用户最初要求的最终交付；"
+                                "若证据仍不足，明确标注缺口，不得编造。"
+                            ),
+                        }
+                    ],
+                    model=model_name,
+                    temperature=min(agent.temperature, 0.3),
+                    tools=None,
+                    top_p=generation_config.top_p,
+                    max_output_tokens=generation_config.max_output_tokens,
+                )
+                total_tokens += recovery.tokens
+                final_content = recovery.content.strip()
+                await emit(
+                    {
+                        "type": "tool_iteration_recovered",
+                        "completed": bool(final_content),
+                    }
+                )
+                if not final_content:
+                    raise RuntimeError("Agent 已达到工具调用上限，模型仍未返回最终结果")
+
+            if not research_requested and generation_config.verify_answer and final_content:
+                await emit(
+                    {
+                        "type": "generation_verification_started",
+                        "citations": len(rag_result.get("citations", [])),
+                    }
+                )
+                quality_issues = self._answer_quality_issues(
+                    final_content,
+                    rag_result,
+                    generation_config,
+                )
+                if (
+                    quality_issues
+                    and not endpoint
+                    and generation_config.citation_required
+                    and rag_result.get("citations")
+                    and "[资料 " not in final_content
+                ):
+                    final_content = f"{final_content.rstrip()}\n\n[资料 1]"
+                    quality_issues = self._answer_quality_issues(
+                        final_content,
+                        rag_result,
+                        generation_config,
+                    )
+                if quality_issues and endpoint and generation_config.repair_retry:
+                    await emit(
+                        {
+                            "type": "generation_repair_started",
+                            "issues": quality_issues,
+                        }
+                    )
+                    repair = await self._chat(
+                        provider,
+                        messages
+                        + [
+                            {"role": "assistant", "content": final_content},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "请只依据系统消息中的检索资料修复回答。"
+                                    f"必须解决：{'；'.join(quality_issues)}。"
+                                    "输出修复后的完整答案，不解释修复过程。"
+                                ),
+                            },
+                        ],
+                        model=model_name,
+                        temperature=min(agent.temperature, 0.2),
+                        top_p=generation_config.top_p,
+                        max_output_tokens=generation_config.max_output_tokens,
+                    )
+                    total_tokens += repair.tokens
+                    if repair.content.strip():
+                        final_content = repair.content.strip()
+                    quality_issues = self._answer_quality_issues(
+                        final_content,
+                        rag_result,
+                        generation_config,
+                    )
+                    await emit(
+                        {
+                            "type": "generation_repaired",
+                            "passed": not quality_issues,
+                            "issues": quality_issues,
+                        }
+                    )
+                await emit(
+                    {
+                        "type": "generation_verified",
+                        "passed": not quality_issues,
+                        "issues": quality_issues,
+                        "citation_count": len(
+                            re.findall(r"\[资料\s*\d+\]", final_content)
+                        ),
+                    }
+                )
 
             if research_requested and final_content:
                 try:
@@ -433,6 +898,77 @@ class AgentEngine:
                 except Exception as exc:
                     await emit({"type": "quality_review_skipped", "message": str(exc)[:240]})
 
+            final_content, suggested_image_prompt = self._extract_image_prompt(
+                final_content
+            )
+            explicit_image_request = bool(
+                self.image_request_pattern.search(input_text)
+            ) and (
+                not math_query
+                or bool(re.search(r"(图片|插画|海报|封面|位图)", input_text))
+            )
+            should_generate_image = bool(
+                suggested_image_prompt or explicit_image_request
+            )
+            if should_generate_image and image_endpoint:
+                image_prompt = suggested_image_prompt or (
+                    "根据以下用户需求生成一张信息准确、主体清晰、构图专业的图片。"
+                    "图片中不要添加无法确认的文字、数字或品牌标识。\n\n"
+                    f"用户需求：{input_text[:1600]}\n\n"
+                    f"回答要点：{final_content[:1600]}"
+                )
+                try:
+                    await emit(
+                        {
+                            "type": "image_generation_started",
+                            "endpoint": image_endpoint.name,
+                            "model": image_endpoint.default_model,
+                        }
+                    )
+                    image = await image_provider_from_endpoint(
+                        image_endpoint
+                    ).generate(
+                        image_prompt,
+                        model=image_endpoint.default_model,
+                    )
+                    if not re.match(
+                        r"^(?:https?://|data:image/(?:png|jpe?g|webp);base64,)",
+                        image.image_url,
+                        re.I,
+                    ):
+                        raise RuntimeError("图片模型返回了不安全的图片地址")
+                    final_content = (
+                        f"{final_content.rstrip()}\n\n"
+                        "## 生成图片\n\n"
+                        f"![AI 生成图片](<{image.image_url}>)"
+                    )
+                    await emit(
+                        {
+                            "type": "image_generated",
+                            "endpoint": image_endpoint.name,
+                            "model": image_endpoint.default_model,
+                            "image_url": image.image_url,
+                            "revised_prompt": image.revised_prompt,
+                        }
+                    )
+                except Exception as exc:
+                    await emit(
+                        {
+                            "type": "image_generation_failed",
+                            "message": str(exc)[:500],
+                        }
+                    )
+                    if explicit_image_request:
+                        final_content = (
+                            f"{final_content.rstrip()}\n\n"
+                            f"> 图片生成失败：{str(exc)[:240]}"
+                        )
+            elif explicit_image_request and not image_endpoint:
+                final_content = (
+                    f"{final_content.rstrip()}\n\n"
+                    "> 尚未配置启用的图片生成模型接口；请在“扩展与模型”中添加图片模型。"
+                )
+
             if research_requested:
                 title = input_text.strip().replace("\n", " ")[:80] or "Agent 研究成果"
                 references = "\n".join(
@@ -454,27 +990,24 @@ class AgentEngine:
                     "## 检索来源\n\n"
                     f"{references or '本次联网检索未取得可用来源，相关结论均应视为待核验。'}\n"
                 )
-                artifact_dir = settings.workspace_root / "artifacts"
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                relative_path = f"artifacts/{agent.slug}-{run.id[:8]}.md"
-                (settings.workspace_root / relative_path).write_text(markdown, encoding="utf-8")
                 artifact = AgentArtifact(
                     run_id=run.id,
                     conversation_id=(user_context or {}).get("conversation_id"),
                     kind="markdown",
                     title=f"{title}.md",
-                    relative_path=relative_path,
+                    relative_path="database://agent-artifacts/pending",
                     content=markdown,
                 )
                 db.add(artifact)
                 await db.flush()
+                artifact.relative_path = f"database://agent-artifacts/{artifact.id}"
                 final_content = markdown
                 await emit(
                     {
                         "type": "artifact_created",
                         "artifact_id": artifact.id,
                         "title": artifact.title,
-                        "path": artifact.relative_path,
+                        "storage": "business_database",
                     }
                 )
 
@@ -523,6 +1056,10 @@ class AgentEngine:
         mcp_services: list[str],
         intent: TaskIntent,
         reply_style_prompt: str = "",
+        rag_result: dict[str, Any] | None = None,
+        conversation_messages: list[dict[str, str]] | None = None,
+        image_generation_available: bool = False,
+        math_query: bool = False,
     ) -> str:
         parts = [
             agent.system_prompt,
@@ -557,23 +1094,48 @@ class AgentEngine:
         skill_query = select(Skill).where(Skill.enabled.is_(True))
         if skill_ids:
             skill_query = skill_query.where(Skill.id.in_(skill_ids))
-        skills = (await db.scalars(skill_query.order_by(Skill.name))).all()
+        skills = list((await db.scalars(skill_query.order_by(Skill.name))).all())
+        if math_query and not any(
+            skill.name == "jsxgraph-math-visualization" for skill in skills
+        ):
+            math_skill = await db.scalar(
+                select(Skill).where(
+                    Skill.enabled.is_(True),
+                    Skill.name == "jsxgraph-math-visualization",
+                )
+            )
+            if math_skill:
+                skills.append(math_skill)
         if skills:
             parts.append(
                 "【已启用 Skills】\n"
                 + "\n\n".join(f"## {skill.name}\n{skill.instructions}" for skill in skills)
             )
-        knowledge_base_ids = loads(agent.knowledge_bases_json, [])
-        if knowledge_base_ids:
-            results = await knowledge_service.search(db, query, knowledge_base_ids, top_k=5)
-            if results:
-                parts.append(
-                    "【知识库检索结果】\n"
-                    + "\n\n".join(
-                        f"[{index}] {item['content']}\n来源：{item['citation']}"
-                        for index, item in enumerate(results, 1)
-                    )
+        if image_generation_available:
+            parts.append(
+                "【图片生成能力】\n"
+                "系统已配置图片生成模型。只有当位图能显著帮助用户理解或用户明确要求图片时，"
+                "才在回答末尾追加一个 ```image-prompt 代码块，块内仅写一段具体、完整的中文"
+                "绘图提示词；系统会移除该代码块并调用图片 API。普通文字问题不要请求图片。"
+                "数学函数和几何关系优先使用 JSXGraph 交互图，不要用图片替代精确数学图表。"
+            )
+        if rag_result and rag_result.get("enabled"):
+            rendered_rag_prompt = self._render_rag_prompt(
+                agent,
+                query,
+                rag_result,
+                conversation_messages,
+            )
+            if (
+                rag_result.get("context")
+                and "【知识库检索结果】" not in rendered_rag_prompt
+            ):
+                rendered_rag_prompt += (
+                    "\n\n【知识库检索结果】\n" + str(rag_result["context"])
                 )
+            parts.append(
+                rendered_rag_prompt
+            )
         return "\n\n".join(parts)
 
     async def _execute_tool(
@@ -611,6 +1173,9 @@ class AgentEngine:
                     parent_run_id=run.id,
                     user_id=execution.user_id,
                     reply_style_prompt=execution.reply_style_prompt,
+                    approval_run_id=execution.approval_run_id,
+                    permission_mode=execution.permission_mode,
+                    approval_policy_id=execution.approval_policy_id,
                 ),
                 user_context={
                     "security_profile": security_context.profile,
@@ -643,14 +1208,20 @@ class AgentEngine:
             )
             return {"status": "completed", "mcp": extension.name, "result": result}
         permissions = loads(agent.permissions_json, {})
-        mode = str(permissions.get("tool_mode", "ask"))
+        mode = str(execution.permission_mode or permissions.get("tool_mode", "ask"))
         return await tool_runtime.execute(
             db,
             name,
             arguments,
-            run_id=run.id,
+            run_id=execution.approval_run_id or run.id,
             agent_id=agent.id,
-            policy_id=permissions.get("approval_policy_id"),
+            # A run-level permission mode is an explicit user choice and must not
+            # be silently replaced by the Agent's saved approval policy.
+            policy_id=(
+                None
+                if execution.permission_mode
+                else execution.approval_policy_id or permissions.get("approval_policy_id")
+            ),
             permission_mode=mode,
             security_context=security_context,
         )
@@ -683,7 +1254,7 @@ class AgentEngine:
                 "message": result.get("message"),
             }
         )
-        resolved = await self._wait_for_approval(approval_id)
+        resolved = await tool_runtime.wait_for_approval(approval_id)
         await emit(
             {
                 "type": "approval_resolved",
@@ -693,19 +1264,5 @@ class AgentEngine:
             }
         )
         return resolved
-
-    @staticmethod
-    async def _wait_for_approval(approval_id: str) -> dict[str, Any]:
-        for _attempt in range(1200):
-            async with SessionLocal() as session:
-                approval = await session.get(Approval, approval_id)
-                if approval and approval.status != "pending":
-                    if approval.status == "approved":
-                        result = loads(approval.execution_result_json, {})
-                        return result or {"status": "completed", "message": "操作已批准"}
-                    return {"status": "denied", "message": "用户拒绝了该操作"}
-            await asyncio.sleep(0.5)
-        return {"status": "denied", "message": "等待用户审批超时"}
-
 
 agent_engine = AgentEngine()

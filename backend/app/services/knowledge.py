@@ -362,6 +362,17 @@ class KnowledgeService:
         knowledge_group_ids: list[str] | None = None,
         top_k: int | None = None,
         candidate_k: int | None = None,
+        rerank_k: int | None = None,
+        similarity_threshold: float = 0.0,
+        dense_weight: float = 0.65,
+        lexical_weight: float = 0.35,
+        context_char_budget: int | None = None,
+        query_rewrite: bool = True,
+        cross_language: bool = False,
+        knowledge_graph: bool = False,
+        parent_expansion: bool = True,
+        complete_list_expansion: bool = True,
+        rerank_model: str = "",
         generate_answer: bool = True,
         on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
@@ -408,13 +419,27 @@ class KnowledgeService:
         config = await get_knowledge_config(db)
         final_k = max(1, min(top_k or config.top_k, 20))
         pool_k = max(final_k, min(candidate_k or config.candidate_k, 100))
+        rerank_limit = max(final_k, min(rerank_k or pool_k, pool_k, 50))
+        weight_total = max(0.000001, dense_weight + lexical_weight)
+        normalized_dense_weight = dense_weight / weight_total
+        normalized_lexical_weight = lexical_weight / weight_total
+        threshold = max(0.0, min(float(similarity_threshold), 1.0))
+        budget = max(1000, min(context_char_budget or config.context_char_budget, 100_000))
         await emit({"type": "query_rewrite_started", "query": query})
-        rewrites = await self._rewrite_query(db, config, query)
+        rewrites = (
+            await self._rewrite_query(db, config, query)
+            if query_rewrite
+            else [re.sub(r"\s+", " ", query).strip()]
+        )
+        if cross_language:
+            rewrites = await self._cross_language_queries(db, config, rewrites)
         await emit(
             {
                 "type": "query_rewritten",
                 "queries": rewrites,
                 "query_count": len(rewrites),
+                "enabled": query_rewrite,
+                "cross_language": cross_language,
             }
         )
         embedder = EmbeddingClient(config)
@@ -450,9 +475,27 @@ class KnowledgeService:
         )
 
         fused: defaultdict[str, float] = defaultdict(float)
-        for ranking in [*dense_rankings, lexical_ids]:
+        dense_query_weight = normalized_dense_weight / max(1, len(dense_rankings))
+        for ranking in dense_rankings:
             for rank, chunk_id in enumerate(ranking, 1):
-                fused[chunk_id] += 1 / (60 + rank)
+                fused[chunk_id] += dense_query_weight / (60 + rank)
+        for rank, chunk_id in enumerate(lexical_ids, 1):
+            fused[chunk_id] += normalized_lexical_weight / (60 + rank)
+        graph_edges = 0
+        if knowledge_graph and fused:
+            graph_edges = await self._apply_graph_fusion(
+                db,
+                query,
+                fused,
+                scoped_base_ids,
+            )
+            await emit(
+                {
+                    "type": "knowledge_graph_expanded",
+                    "entities": len(self._graph_entities(query)),
+                    "edges": graph_edges,
+                }
+            )
         candidate_ids = [
             chunk_id for chunk_id, _ in sorted(fused.items(), key=lambda item: item[1], reverse=True)[:pool_k]
         ]
@@ -460,7 +503,9 @@ class KnowledgeService:
             {
                 "type": "fusion_completed",
                 "fused_candidates": len(candidate_ids),
-                "method": "RRF",
+                "method": "weighted-RRF+graph" if knowledge_graph else "weighted-RRF",
+                "dense_weight": round(normalized_dense_weight, 4),
+                "lexical_weight": round(normalized_lexical_weight, 4),
             }
         )
         if not candidate_ids:
@@ -487,12 +532,13 @@ class KnowledgeService:
             {
                 "type": "rerank_started",
                 "candidate_count": len(ordered),
-                "model": config.rerank_model,
+                "model": rerank_model or config.rerank_model,
+                "top_n": rerank_limit,
             }
         )
         try:
-            reranked = await RerankClient(config).rerank(
-                query, [item.content for item in ordered], min(pool_k, len(ordered))
+            reranked = await RerankClient(config, model_override=rerank_model).rerank(
+                query, [item.content for item in ordered], min(rerank_limit, len(ordered))
             )
         except RuntimeError as exc:
             rerank_error = str(exc)
@@ -508,9 +554,26 @@ class KnowledgeService:
         per_document_limit = (
             final_k if exhaustive_query or candidate_document_count <= 1 else min(3, final_k)
         )
+        relevance_by_index: dict[int, float] = {}
+        filtered_reranked: list[tuple[int, float]] = []
+        for index, rerank_score in reranked:
+            if index < 0 or index >= len(ordered):
+                continue
+            item = ordered[index]
+            dense_relevance = max(0.0, min(1.0, (dense_scores.get(item.id, -1.0) + 1) / 2))
+            lexical_relevance = max(0.0, min(1.0, lexical_scores.get(item.id, 0.0)))
+            model_relevance = max(0.0, min(1.0, float(rerank_score)))
+            relevance = max(
+                model_relevance,
+                normalized_dense_weight * dense_relevance
+                + normalized_lexical_weight * lexical_relevance,
+            )
+            relevance_by_index[index] = relevance
+            if relevance >= threshold:
+                filtered_reranked.append((index, relevance))
         selected = self._select_diverse(
             ordered,
-            reranked,
+            filtered_reranked,
             final_k,
             per_document_limit=per_document_limit,
         )
@@ -519,18 +582,24 @@ class KnowledgeService:
                 "type": "rerank_completed",
                 "reranked": len(reranked),
                 "selected": len(selected),
+                "filtered_by_threshold": len(reranked) - len(filtered_reranked),
+                "similarity_threshold": threshold,
                 "fallback": bool(rerank_error),
                 "message": rerank_error,
             }
         )
-        parent_ids = {item.parent_chunk_id for item, _score in selected if item.parent_chunk_id}
+        parent_ids = {
+            item.parent_chunk_id
+            for item, _score in selected
+            if parent_expansion and item.parent_chunk_id
+        }
         parents = (
             await db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.id.in_(parent_ids)))
         ).all() if parent_ids else []
         parent_by_id = {item.id: item for item in parents}
         expanded_lists = (
             await self._expanded_numbered_list_contexts(db, query, selected)
-            if exhaustive_query
+            if exhaustive_query and complete_list_expansion
             else {}
         )
 
@@ -539,7 +608,11 @@ class KnowledgeService:
         list_contexts: dict[str, dict[str, Any]] = {}
         seen_expanded_lists: set[str] = set()
         for item, rerank_score in selected:
-            parent = parent_by_id.get(item.parent_chunk_id or "")
+            parent = (
+                parent_by_id.get(item.parent_chunk_id or "")
+                if parent_expansion
+                else None
+            )
             metadata = loads(item.metadata_json, {})
             context_source_id = parent.id if parent else item.id
             expanded = expanded_lists.get(context_source_id) or expanded_lists.get(
@@ -597,7 +670,7 @@ class KnowledgeService:
                     "score": rerank_score,
                 }
             )
-        context = self._assemble_context(chunks, config.context_char_budget)
+        context = self._assemble_context(chunks, budget)
         await emit(
             {
                 "type": "context_assembled",
@@ -623,6 +696,7 @@ class KnowledgeService:
             "rewritten_queries": rewrites,
             "chunks": chunks,
             "citations": citations,
+            "context": context,
             "trace": {
                 "embedding_provider": embedder.provider_name,
                 "embedding_model": embedder.model,
@@ -630,18 +704,107 @@ class KnowledgeService:
                 "lexical_candidates": len(lexical_ids),
                 "fused_candidates": len(candidate_ids),
                 "reranked": len(reranked),
-                "rerank_model": config.rerank_model,
+                "rerank_model": rerank_model or config.rerank_model,
                 "rerank_error": rerank_error,
+                "rerank_k": rerank_limit,
+                "top_k": final_k,
+                "similarity_threshold": threshold,
+                "dense_weight": normalized_dense_weight,
+                "lexical_weight": normalized_lexical_weight,
+                "query_rewrite": query_rewrite,
+                "cross_language": cross_language,
+                "knowledge_graph": knowledge_graph,
+                "graph_edges": graph_edges,
+                "parent_expansion": parent_expansion,
+                "complete_list_expansion": complete_list_expansion,
                 "candidate_documents": candidate_document_count,
                 "per_document_limit": per_document_limit,
                 "exhaustive_query": exhaustive_query,
                 "list_contexts": list(list_contexts.values()),
                 "context_chars": len(context),
+                "context_char_budget": budget,
                 "scope": "selected" if requested_scope else "all",
                 "knowledge_base_ids": scoped_base_ids,
                 "knowledge_group_ids": knowledge_group_ids or [],
             },
         }
+
+    async def _cross_language_queries(
+        self,
+        db: AsyncSession,
+        config: KnowledgeProviderConfig,
+        queries: list[str],
+    ) -> list[str]:
+        """Add a faithful English/Chinese retrieval query when a configured LLM is available."""
+
+        if not queries or not config.llm_endpoint_id:
+            return queries
+        endpoint = await db.get(ModelEndpoint, config.llm_endpoint_id)
+        if not endpoint or not endpoint.enabled:
+            return queries
+        try:
+            response = await provider_from_endpoint(endpoint).chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "把检索查询翻译成另一种语言：中文转英文，其他语言转中文。"
+                            "保留数字、术语和专有名词，只输出一行翻译，不解释。"
+                        ),
+                    },
+                    {"role": "user", "content": queries[0]},
+                ],
+                model=endpoint.default_model,
+                temperature=0,
+            )
+            translated = re.sub(r"\s+", " ", response.content).strip()
+            if translated:
+                return list(dict.fromkeys([*queries, translated]))[:4]
+        except Exception:
+            pass
+        return queries
+
+    @staticmethod
+    def _graph_entities(value: str) -> set[str]:
+        entities = set(re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{2,}", value.lower()))
+        entities.update(
+            item
+            for item in re.findall(r"[\u3400-\u9fff]{2,8}", value)
+            if item not in {"哪些", "什么", "怎么", "如何", "是否", "全部", "完整"}
+        )
+        return entities
+
+    async def _apply_graph_fusion(
+        self,
+        db: AsyncSession,
+        query: str,
+        fused: defaultdict[str, float],
+        knowledge_base_ids: list[str],
+    ) -> int:
+        """Build a lightweight entity↔chunk graph and boost adjacent evidence."""
+
+        candidate_ids = list(fused)
+        rows = (
+            await db.scalars(
+                select(KnowledgeChunk).where(KnowledgeChunk.id.in_(candidate_ids))
+            )
+        ).all()
+        query_entities = self._graph_entities(query)
+        if not query_entities:
+            return 0
+        entity_nodes: defaultdict[str, list[str]] = defaultdict(list)
+        for item in rows:
+            for entity in self._graph_entities(f"{item.title} {item.content}"):
+                entity_nodes[entity].append(item.id)
+        edges = 0
+        for entity, chunk_ids in entity_nodes.items():
+            if entity not in query_entities and len(chunk_ids) < 2:
+                continue
+            boost = 0.18 if entity in query_entities else 0.06
+            for chunk_id in chunk_ids:
+                fused[chunk_id] += boost / 61
+            edges += max(0, len(chunk_ids) - 1)
+        return edges
 
     async def _rewrite_query(
         self, db: AsyncSession, config: KnowledgeProviderConfig, query: str

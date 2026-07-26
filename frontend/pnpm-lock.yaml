@@ -14,6 +14,9 @@ importers:
       dompurify:
         specifier: ^3.4.12
         version: 3.4.12
+      jsxgraph:
+        specifier: ^1.13.1
+        version: 1.13.1
       katex:
         specifier: ^0.18.1
         version: 0.18.1
@@ -559,6 +562,10 @@ packages:
     resolution: {integrity: sha512-F/1DnUGPopORZi0ni+CvrCgHQ5FyEAHRLSApuYWMmrbSwoN2Mn/7k+Gl38gJnR7yyDZk6WLXwiGod1JOWNDKGw==}
     hasBin: true
 
+  jsxgraph@1.13.1:
+    resolution: {integrity: sha512-kY22yaHpHew/HmelkveA1LX+uye5Uc4QF0UCBEpW8HCJ9kr0pSQ33ombYRkWd75YFuCFzRtDNzm5U2Vte01ezQ==}
+    engines: {node: '>=20.19.0'}
+
   katex@0.18.1:
     resolution: {integrity: sha512-Td8GCYSxDAoMhHOlKmCFMJ/hz5qlAAb71n66Dryw9nfCVfumLo7nhuotbvKom/XPADmrYC3O5QR71EPq4DarJQ==}
     hasBin: true
@@ -1077,6 +1084,8 @@ snapshots:
     optional: true
 
   he@1.2.0: {}
+
+  jsxgraph@1.13.1: {}
 
   katex@0.18.1:
     dependencies:
