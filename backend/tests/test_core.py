@@ -56,6 +56,7 @@ def test_workflow_node_retry_only_accepts_transient_failures():
     assert engine._retryable_node_error(RuntimeError("ReadTimeout")) is True
     assert engine._retryable_node_error(RuntimeError("HTTP 503: busy")) is True
     assert engine._retryable_node_error(RuntimeError("HTTP 402: insufficient")) is False
+    assert engine._retryable_node_error(RuntimeError("HTTP 503（已尝试 3 次）")) is False
     assert engine._retryable_node_error(LookupError("Agent 不存在")) is False
 
 
@@ -120,6 +121,32 @@ def test_web_research_honors_requested_academic_source_count():
     assert service.requested_source_count("请检索并纳入 40 篇文献完成综述") == 40
     assert service.requested_source_count("review 120 papers") == 80
     assert service.requested_source_count("普通调研") == 12
+
+
+def test_web_research_context_keeps_all_citations_inside_budget():
+    service = WebResearchService()
+    sources = [
+        {
+            "title": f"Paper {index}",
+            "url": f"https://example.org/paper/{index}",
+            "source": "Crossref",
+            "content": "evidence " * 500,
+        }
+        for index in range(1, 41)
+    ]
+
+    context = service.context(sources, char_limit=16_000)
+
+    assert len(context) <= 16_000
+    assert "[1] Paper 1" in context
+    assert "[40] Paper 40" in context
+
+
+def test_research_intent_wins_over_generic_execute_wording():
+    intent = intent_service.classify("请执行前沿文献检索并分析近十年论文")
+
+    assert intent.category == "web_research"
+    assert "web_research" in intent.required_capabilities
 
 
 def test_workflow_legacy_condition_expression_is_evaluated_without_exec():

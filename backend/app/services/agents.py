@@ -728,6 +728,10 @@ class AgentEngine:
             allowed_tools = set(loads(agent.tools_json, [])) | {"exec"}
             if runtime_tool_policy.allowed_tools is not None:
                 allowed_tools.intersection_update(runtime_tool_policy.allowed_tools)
+            research_requested = "web_research" in allowed_tools and (
+                runtime_tool_policy.preset == "research"
+                or (not local_request and intent.category == "web_research")
+            )
             if runtime_tool_policy.allow_mcp and runtime_tool_policy.max_calls > 0:
                 mcp_schemas, mcp_bindings, mcp_services, mcp_errors = (
                     await self._mcp_catalog(db, permissions)
@@ -821,7 +825,9 @@ class AgentEngine:
                     "context_char_limit": runtime_tool_policy.context_char_limit,
                     "available_tools": [
                         item["function"]["name"] for item in schemas
-                    ],
+                    ]
+                    + (["web_research"] if research_requested else []),
+                    "deterministic_research": research_requested,
                     "mcp_enabled": runtime_tool_policy.allow_mcp,
                 }
             )
@@ -830,20 +836,27 @@ class AgentEngine:
             total_tokens = 0
             model_calls = 0
             final_content = ""
-            research_requested = (
-                not local_request
-                and intent.category == "web_research"
-                and "web_research" in allowed_tools
-            )
             research_sources: list[dict[str, Any]] = []
             if research_requested:
                 research_sources = await web_research_service.collect(input_text, emit)
                 if research_sources:
+                    research_context = web_research_service.context(
+                        research_sources,
+                        char_limit=runtime_tool_policy.context_char_limit,
+                    )
                     system_prompt += (
                         "\n\n系统已经代表你完成了真实联网检索，以下资料来自本轮实时搜索。"
                         "必须基于这些来源回答并给出可点击链接；不得声称自己无法联网、网络访问受限，"
                         "也不得把模型训练记忆冒充本轮检索结果。\n\n"
-                        + web_research_service.context(research_sources)
+                        + research_context
+                    )
+                    await emit(
+                        {
+                            "type": "research_context_ready",
+                            "sources": len(research_sources),
+                            "context_chars": len(research_context),
+                            "context_char_limit": runtime_tool_policy.context_char_limit,
+                        }
                     )
                 else:
                     await emit(

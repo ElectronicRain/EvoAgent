@@ -510,6 +510,8 @@ class WorkflowEngine:
         if isinstance(exc, (LookupError, ValueError, KeyError)):
             return False
         message = str(exc).lower()
+        if re.search(r"已(?:重试|尝试)|避免重复计费", message):
+            return False
         if re.search(r"http\s+(400|401|402|403|404|422)\b", message):
             return False
         return bool(
@@ -1392,7 +1394,9 @@ class WorkflowEngine:
                             }
                         )
 
-                    default_retries = 1 if node_type == "agent" else 0
+                    # The online provider already performs cost-aware transport retries.
+                    # Re-running a whole Agent node can duplicate a billable generation.
+                    default_retries = 0
                     try:
                         retry_count = max(
                             0,

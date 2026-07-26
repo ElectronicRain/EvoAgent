@@ -731,26 +731,45 @@ class WebResearchService:
         except Exception as exc:
             return "", f"failed: {str(exc)[:120]}"
 
-    def context(self, sources: list[dict[str, Any]]) -> str:
-        blocks = []
+    def context(
+        self,
+        sources: list[dict[str, Any]],
+        *,
+        char_limit: int = 32_000,
+    ) -> str:
+        """Build bounded evidence context while retaining every selected citation."""
+
+        char_limit = max(2_000, int(char_limit))
+        metadata_blocks: list[str] = []
+        contents: list[str] = []
         for index, item in enumerate(sources, 1):
-            content = item.get("content") or item.get("description") or "仅取得题录信息"
+            content = str(
+                item.get("content") or item.get("description") or "仅取得题录信息"
+            )
             scholar_line = (
                 f"Google Scholar: {item['scholar_url']}\n"
                 if item.get("scholar_url")
                 else ""
             )
-            content_limit = 2200 if index <= 12 else 700
-            blocks.append(
-                f"[{index}] {item['title']}\nURL: {item['url']}\n"
+            metadata_blocks.append(
+                f"[{index}] {str(item['title'])[:240]}\nURL: {str(item['url'])[:360]}\n"
                 f"{scholar_line}"
                 f"来源: {item.get('source', 'Web')}\n"
                 f"可信度: {(item.get('credibility') or {}).get('level', '待核验')} "
                 f"{(item.get('credibility') or {}).get('score', 0)}/100\n"
-                f"可用层级: {item.get('status', 'metadata-only')}\n"
-                f"内容: {content[:content_limit]}"
+                f"可用层级: {item.get('status', 'metadata-only')}"
             )
-        return "【网络研究资料】\n" + "\n\n".join(blocks)
+            contents.append(content)
+        header = "【网络研究资料】\n"
+        fixed_chars = len(header) + sum(len(item) + len("\n内容: \n\n") for item in metadata_blocks)
+        remaining = max(0, char_limit - fixed_chars)
+        excerpt_limit = max(0, min(900, remaining // max(1, len(metadata_blocks))))
+        blocks = [
+            f"{metadata}\n内容: {content[:excerpt_limit]}"
+            for metadata, content in zip(metadata_blocks, contents, strict=True)
+        ]
+        result = header + "\n\n".join(blocks)
+        return result[:char_limit]
 
 
 web_research_service = WebResearchService()

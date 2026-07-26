@@ -67,7 +67,7 @@ const agent = computed(() => chatWindow.value?.agent || null)
 const agentGeneration = computed(() => parseObject(agent.value?.generation_config_json || '{}'))
 const openingMessage = computed(() => agentGeneration.value.opening_message || `你好，我是 ${agent.value?.name || 'Agent'}。告诉我你的目标，我会基于可用证据完成任务。`)
 const suggestedQuestions = computed<string[]>(() => agentGeneration.value.suggested_questions || [])
-const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','research_sources_selected','web_fetch_started','web_page_fetched','web_research_empty'].includes(item.type)))
+const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','research_sources_selected','web_fetch_started','web_page_fetched','research_context_ready','web_research_empty'].includes(item.type)))
 const activeArtifact = computed(() =>
   artifacts.value.find(item => item.id === selectedArtifactId.value) || artifacts.value[0] || null,
 )
@@ -536,7 +536,7 @@ function stepTitle(step: Entity) {
     request_submitted: '任务已提交', stream_connected: '已连接 Agent 执行引擎',
     context_ready: '会话上下文已装载', research_planning: '生成检索计划',
     research_sources_selected: `选定 ${step.count || 0} 条高相关来源`,
-    web_research_empty: '联网研究未取得来源', research_synthesis_started: '开始多来源综合',
+    web_research_empty: '联网研究未取得来源', research_context_ready: '检索证据已压缩并注入', research_synthesis_started: '开始多来源综合',
     quality_review_started: '第二轮质量审校', quality_review_skipped: '质量审校已降级',
     model_waiting: '正在等待模型响应', run_completed: '运行完成',
     database_persisted: '任务成果已保存到数据库',

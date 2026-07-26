@@ -252,7 +252,7 @@ class WorkflowExpert:
                     if configured_rag in {"auto", "agent", "off"}
                     else "auto"
                 )
-                config.setdefault("retry_count", 1)
+                config.setdefault("retry_count", 0)
                 prompt = str(config.get("prompt") or "")
                 if WorkflowEngine.prompt_looks_corrupted(prompt):
                     config["prompt"] = WorkflowEngine.default_agent_node_prompt(
@@ -403,7 +403,7 @@ class WorkflowExpert:
                                 "input": "{{input.task}}",
                                 "tool_policy": "auto",
                                 "rag_mode": "auto",
-                                "retry_count": 1,
+                                "retry_count": 0,
                             },
                         },
                     )
@@ -520,7 +520,7 @@ class WorkflowExpert:
                         "input": input_template,
                         "tool_policy": "auto",
                         "rag_mode": "auto",
-                        "retry_count": 1,
+                        "retry_count": 0,
                     },
                 }
             )

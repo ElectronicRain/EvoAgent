@@ -1722,12 +1722,11 @@ async def test_model_endpoint(
                 request_options=loads(item.request_options_json, {}),
                 timeout_seconds=item.timeout_seconds,
             )
-            response = await provider.chat(
-                [{"role": "user", "content": "只回复 OK"}],
-                model=item.default_model,
-                temperature=0,
+            health = await provider.health_check(item.default_model)
+            response_preview = (
+                f"连接正常；模型{'可用' if health['model_available'] else '未在列表中'}；"
+                f"共发现 {health['model_count']} 个模型（本次未调用生成接口）"
             )
-            response_preview = response.content[:200]
         item.health = "healthy"
         result = {"status": "healthy", "response": response_preview}
     except Exception as exc:

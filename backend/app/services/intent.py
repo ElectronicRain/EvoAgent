@@ -33,7 +33,7 @@ class IntentService:
     )
     _knowledge = re.compile(r"知识库|资料库|内部资料|文档依据|RAG|向量检索", re.I)
     _research = re.compile(
-        r"联网|网页|网站|最新|近期|新闻|检索论文|搜索资料|调研|综述|文献研究|web|online|search",
+        r"联网|网页|网站|最新|近期|新闻|检索论文|文献检索|前沿文献|搜索资料|调研|综述|文献研究|web|online|search",
         re.I,
     )
     _change = re.compile(
@@ -51,7 +51,13 @@ class IntentService:
         research = bool(self._research.search(normalized))
         change = bool(self._change.search(normalized))
 
-        if command:
+        # A workflow instruction such as “执行前沿文献检索” describes the research
+        # goal, not a shell command. Route it to deterministic web research unless
+        # the user also refers to a local resource/command environment.
+        if research and not local:
+            category = "web_research"
+            capabilities = ["web_research", "mcp"]
+        elif command:
             category = "command_execution"
             capabilities = ["exec", "local_files"]
         elif local and change:
@@ -63,9 +69,6 @@ class IntentService:
         elif knowledge:
             category = "knowledge_retrieval"
             capabilities = ["knowledge", "mcp"]
-        elif research:
-            category = "web_research"
-            capabilities = ["web_research", "mcp"]
         elif change:
             category = "implementation"
             capabilities = ["skills", "exec"]

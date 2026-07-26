@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from docx import Document
 
 
@@ -85,6 +86,105 @@ def test_openai_compatible_provider_retries_transient_http_failure(monkeypatch):
 
     assert response.content == "recovered"
     assert calls == 3
+
+
+def test_siliconflow_provider_uses_v1_stream_and_reassembles_output(monkeypatch):
+    from backend.app.services.llm import OpenAICompatibleProvider
+
+    calls = []
+
+    class StreamResponse:
+        is_error = False
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            for line in [
+                'data: {"choices":[{"delta":{"content":"前沿"}}]}',
+                'data: {"choices":[{"delta":{"content":"资料"}}]}',
+                'data: {"choices":[],"usage":{"total_tokens":12}}',
+                "data: [DONE]",
+            ]:
+                yield line
+
+    class StreamContext:
+        async def __aenter__(self):
+            return StreamResponse()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            return StreamContext()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    response = asyncio.run(
+        OpenAICompatibleProvider(
+            "https://api.siliconflow.cn",
+            "secret",
+            request_options={"enable_thinking": False},
+        ).chat(
+            [{"role": "user", "content": "检索资料"}],
+            model="Pro/zai-org/GLM-5.1",
+            temperature=0.3,
+        )
+    )
+
+    assert response.content == "前沿资料"
+    assert response.tokens == 12
+    assert len(calls) == 1
+    assert calls[0]["url"] == "https://api.siliconflow.cn/v1/chat/completions"
+    assert calls[0]["json"]["stream"] is True
+    assert calls[0]["json"]["enable_thinking"] is False
+
+
+def test_provider_does_not_retry_read_timeout_that_may_be_billable(monkeypatch):
+    from backend.app.services.llm import OpenAICompatibleProvider
+
+    calls = 0
+
+    class TimeoutContext:
+        async def __aenter__(self):
+            raise httpx.ReadTimeout("")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return TimeoutContext()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    provider = OpenAICompatibleProvider(
+        "https://api.siliconflow.cn/v1",
+        "secret",
+        request_options={"_retry_attempts": 3},
+    )
+    with pytest.raises(RuntimeError, match="ReadTimeout.*避免重复计费"):
+        asyncio.run(
+            provider.chat(
+                [{"role": "user", "content": "长文生成"}],
+                model="Pro/zai-org/GLM-5.1",
+                temperature=0.3,
+            )
+        )
+
+    assert calls == 1
 
 
 def test_teaching_plan_uses_structured_model_script():
@@ -617,6 +717,14 @@ def test_custom_model_endpoint_agent_full_chain(client, monkeypatch):
 
         async def __aexit__(self, *_args):
             return None
+
+        async def get(self, url, *, headers):
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                request=request,
+                json={"data": [{"id": "mock-model"}]},
+            )
 
         async def post(self, url, *, json, headers):
             captured.append({"url": url, "json": json, "headers": headers})
@@ -2036,6 +2144,105 @@ def test_workflow_planning_policy_uses_one_model_call_and_no_tools(client, monke
     assert policy["max_calls"] == 0
     assert completed["model_calls"] == 1
     assert completed["tool_calls_executed"] == 0
+
+
+def test_workflow_research_policy_collects_once_then_calls_model_once(client, monkeypatch):
+    from backend.app.services import agents as agents_service
+    from backend.app.services.llm import LLMResponse
+    from backend.app.services.web_research import web_research_service
+
+    model_calls = 0
+    collected_tasks: list[str] = []
+
+    class ResearchBudgetProvider:
+        async def chat(self, messages, *, model, temperature, tools=None, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            assert tools is None
+            assert "https://example.org/paper" in messages[0]["content"]
+            return LLMResponse(content="已基于实时来源形成证据表。", tokens=7)
+
+    async def fake_collect(task, on_event):
+        collected_tasks.append(task)
+        await on_event({"type": "research_planning", "queries": ["mesh quality"]})
+        return [
+            {
+                "title": "Verified paper",
+                "url": "https://example.org/paper",
+                "source": "Crossref",
+                "content": "Verified evidence.",
+            }
+        ]
+
+    monkeypatch.setattr(
+        agents_service,
+        "get_provider",
+        lambda _provider: ResearchBudgetProvider(),
+    )
+    monkeypatch.setattr(web_research_service, "collect", fake_collect)
+    agent = client.post(
+        "/api/agents",
+        json={
+            "name": "单次联网检索 Agent",
+            "slug": "single-pass-research-agent",
+            "system_prompt": "先检索真实资料，再形成结构化证据表。",
+            "provider": "research-budget-test",
+            "model": "test-model",
+            "tools": ["web_research", "exec"],
+        },
+    ).json()
+    definition = {
+        "nodes": [
+            {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+            {
+                "id": "research",
+                "type": "agent",
+                "label": "前沿文献检索",
+                "config": {
+                    "agent_id": agent["id"],
+                    "auto_input": True,
+                    "tool_policy": "auto",
+                    "retry_count": 0,
+                },
+            },
+            {
+                "id": "output",
+                "type": "output",
+                "label": "结果输出",
+                "config": {"value": {"result": "{{nodes.research.output}}"}},
+            },
+        ],
+        "edges": [
+            {"source": "input", "target": "research"},
+            {"source": "research", "target": "output"},
+        ],
+    }
+    workflow = client.post(
+        "/api/workflows",
+        json={"name": "单次联网检索回归", "description": "成本受控", "definition": definition},
+    ).json()
+    response = client.post(
+        f"/api/workflows/{workflow['id']}/run/stream",
+        json={"input": {"task": "请执行前沿文献检索并分析近十年论文"}},
+    )
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    agent_events = [
+        item["step"]["agent_event"]
+        for item in events
+        if item.get("type") == "step"
+        and item.get("step", {}).get("type") == "workflow_agent_event"
+    ]
+
+    policy = next(item for item in agent_events if item["type"] == "tool_policy_applied")
+    assert len(collected_tasks) == 1
+    assert model_calls == 1
+    assert policy["deterministic_research"] is True
+    assert policy["available_tools"] == ["web_research"]
+    assert any(item["type"] == "research_context_ready" for item in agent_events)
 
 
 def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch):

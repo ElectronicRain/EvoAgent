@@ -428,6 +428,7 @@ function agentEventInfo(event: Entity) {
     research_sources_selected: { title: '已选定可信资料来源', stage: '联网检索 · 来源选择', progress: 45 },
     web_fetch_started: { title: '正在读取来源正文', stage: '联网检索 · 正文抓取', progress: 50 },
     web_page_fetched: { title: '已读取一个资料来源', stage: '联网检索 · 正文抓取', progress: 57 },
+    research_context_ready: { title: '检索证据已压缩并注入', stage: '联网检索 · 上下文整理', progress: 60 },
     research_synthesis_started: { title: '开始综合研究资料', stage: '模型生成 · 资料综合', progress: 64 },
     model_response: { title: '模型返回阶段性结果', stage: '模型生成', progress: 74 },
     tool_result: { title: '工具调用返回结果', stage: '工具执行', progress: 62 },
@@ -469,6 +470,7 @@ function agentEventInfo(event: Entity) {
   else if (type === 'web_search_started') detail = String(event.query || '')
   else if (type === 'web_search_results') detail = `取得 ${event.count || 0} 条 · 排除 ${event.discarded || 0} 条`
   else if (type === 'research_sources_selected') detail = `选定 ${event.count || 0} 个可追溯来源`
+  else if (type === 'research_context_ready') detail = `${event.sources || 0} 个来源 · ${event.context_chars || 0}/${event.context_char_limit || 0} 字符`
   else if (type === 'web_page_fetched') detail = `${event.title || event.url || ''} · ${event.status || '已读取'}`
   else if (type === 'model_response') detail = `第 ${event.iteration || 1} 次响应 · ${event.stage || 'answer'}${event.tool_calls?.length ? ` · 调用 ${event.tool_calls.join('、')}` : ''}`
   else if (type === 'tool_result') detail = `${event.tool || '工具'} · ${event.status || 'completed'}${event.error ? ` · ${event.error}` : ''}`
@@ -795,7 +797,7 @@ function normalizeNodes(definition: Entity): CanvasNode[] {
   return raw.map((node: Entity, index: number) => {
     const config = { ...(node.config || {}) }
     if (['agent', 'knowledge'].includes(node.type) && config.auto_input === undefined) config.auto_input = true
-    if (node.type === 'agent' && config.retry_count === undefined) config.retry_count = 1
+    if (node.type === 'agent' && config.retry_count === undefined) config.retry_count = 0
     if (node.type === 'agent' && !config.tool_policy) config.tool_policy = 'auto'
     if (node.type === 'agent' && !config.rag_mode) config.rag_mode = 'auto'
     if (node.type === 'function') config.arguments ||= ['', '']
@@ -924,7 +926,7 @@ function addAgentAt(agent: Entity, point: { x: number; y: number }) {
     id,
     type: 'agent',
     label: agent.name,
-    config: { agent_id: agent.id, input: '{{input.task}}', prompt: '', auto_input: true, retry_count: 1, max_output_tokens: 8192, tool_policy: 'auto', rag_mode: 'auto' },
+    config: { agent_id: agent.id, input: '{{input.task}}', prompt: '', auto_input: true, retry_count: 0, max_output_tokens: 8192, tool_policy: 'auto', rag_mode: 'auto' },
     position: {
       x: Math.max(8, point.x - nodeWidth / 2),
       y: Math.max(8, point.y - nodeHeight / 2),
@@ -1805,7 +1807,7 @@ onBeforeUnmount(() => {
               <div class="field"><label>最多工具请求</label><input v-model.number="selectedNode.config.max_tool_calls" type="number" min="0" max="64" class="input" placeholder="自动"></div>
             </div>
             <div class="field"><label>节点输入预算（字符）</label><input v-model.number="selectedNode.config.input_context_char_limit" type="number" min="8000" max="120000" step="4000" class="input" placeholder="按职责自动"><span class="field-help">只压缩超出预算的长上下文，并保留开头和结尾；不会触发额外模型请求。</span></div>
-            <div class="field"><label>接口失败自动重试</label><input v-model.number="selectedNode.config.retry_count" type="number" min="0" max="3" class="input"><span class="field-help">仅对超时、限流和 5xx 等临时故障重试。</span></div>
+            <div class="field"><label>节点整体重试</label><input v-model.number="selectedNode.config.retry_count" type="number" min="0" max="3" class="input"><span class="field-help">默认 0；模型接口内部已处理安全重试，节点整体重跑可能产生重复费用。</span></div>
             <div class="field"><label>最长输出 Token</label><input v-model.number="selectedNode.config.max_output_tokens" type="number" min="512" max="32768" step="512" class="input"><span class="field-help">长文撰写建议 12000–20000；该值仅覆盖当前节点，不修改 Agent 全局设置。</span></div>
             <div class="field"><label>节点专用任务说明</label><textarea v-model="selectedNode.config.prompt" class="textarea inspector-textarea" placeholder="定义本节点角色、交付结构、证据边界和验收标准" /><span class="field-help">此说明会在运行时真实传给 Agent，并支持引用上游变量。</span></div>
             <div v-if="selectedNode.config.auto_input===false" class="field"><label>输入模板</label><textarea v-model="selectedNode.config.input" class="textarea inspector-textarea" /></div>

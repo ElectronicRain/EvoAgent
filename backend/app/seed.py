@@ -72,7 +72,7 @@ async def upgrade_workflow_runtime_contracts(db) -> None:
             config = node.setdefault("config", {})
             if node.get("type") == "agent":
                 if "retry_count" not in config:
-                    config["retry_count"] = 1
+                    config["retry_count"] = 0
                     changed = True
                 if "tool_policy" not in config:
                     config["tool_policy"] = "auto"

@@ -11,6 +11,18 @@ import httpx
 from ..config import settings
 
 
+def _openai_compatible_urls(base_url: str, resource: str) -> list[str]:
+    """Return preferred endpoint URLs without wasting a request on known /v1 APIs."""
+
+    base = base_url.rstrip("/")
+    suffix = resource.lstrip("/")
+    if base.endswith("/v1"):
+        return [f"{base}/{suffix}"]
+    if "siliconflow.cn" in base.lower():
+        return [f"{base}/v1/{suffix}"]
+    return [f"{base}/{suffix}", f"{base}/v1/{suffix}"]
+
+
 @dataclass
 class LLMResponse:
     content: str
@@ -189,6 +201,12 @@ class OpenAICompatibleProvider(LLMProvider):
         self.api_key = api_key
         self.headers = headers or {}
         self.request_options = dict(request_options or {})
+        self.stream_response = bool(
+            self.request_options.pop(
+                "_stream_response",
+                "siliconflow.cn" in self.base_url.lower(),
+            )
+        )
         self.retry_attempts = max(
             1,
             min(
@@ -202,6 +220,120 @@ class OpenAICompatibleProvider(LLMProvider):
             ),
         )
         self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _response_from_data(data: dict[str, Any]) -> LLMResponse:
+        try:
+            choice = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("在线模型接口响应格式无效，缺少 choices[0].message") from exc
+        tool_calls = []
+        for item in choice.get("tool_calls") or []:
+            function = item.get("function", {})
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(
+                {"id": item.get("id"), "name": function.get("name"), "arguments": arguments}
+            )
+        return LLMResponse(
+            content=choice.get("content") or "",
+            tool_calls=tool_calls,
+            tokens=int((data.get("usage") or {}).get("total_tokens") or 0),
+        )
+
+    @staticmethod
+    async def _stream_response_data(response: httpx.Response) -> LLMResponse:
+        content_parts: list[str] = []
+        tool_parts: dict[int, dict[str, str]] = {}
+        total_tokens = 0
+        async for line in response.aiter_lines():
+            line = line.strip()
+            if not line or line.startswith(":") or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            total_tokens = max(
+                total_tokens,
+                int((data.get("usage") or {}).get("total_tokens") or 0),
+            )
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or choices[0].get("message") or {}
+            if delta.get("content"):
+                content_parts.append(str(delta["content"]))
+            for item in delta.get("tool_calls") or []:
+                index = int(item.get("index") or 0)
+                current = tool_parts.setdefault(
+                    index,
+                    {"id": "", "name": "", "arguments": ""},
+                )
+                if item.get("id"):
+                    current["id"] = str(item["id"])
+                function = item.get("function") or {}
+                if function.get("name"):
+                    current["name"] += str(function["name"])
+                if function.get("arguments"):
+                    current["arguments"] += str(function["arguments"])
+        tool_calls = []
+        for item in tool_parts.values():
+            try:
+                arguments = json.loads(item["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            tool_calls.append(
+                {"id": item["id"] or None, "name": item["name"], "arguments": arguments}
+            )
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            tokens=total_tokens,
+        )
+
+    @staticmethod
+    def _transport_error_detail(exc: Exception | None) -> str:
+        if exc is None:
+            return "未知连接错误"
+        detail = str(exc).strip()
+        return f"{type(exc).__name__}: {detail or '模型服务未返回错误正文'}"
+
+    async def health_check(self, model: str) -> dict[str, Any]:
+        """Check credentials and model availability without creating billable output."""
+
+        headers = dict(self.headers)
+        if self.api_key:
+            headers.setdefault("Authorization", f"Bearer {self.api_key}")
+        response: httpx.Response | None = None
+        async with httpx.AsyncClient(timeout=min(self.timeout_seconds, 30)) as client:
+            for url in _openai_compatible_urls(self.base_url, "models"):
+                response = await client.get(url, headers=headers)
+                if response.status_code not in {400, 404}:
+                    break
+        if response is None:
+            raise RuntimeError("模型接口健康检查没有收到响应")
+        if response.is_error:
+            detail = response.text.replace("\n", " ")[:500]
+            raise RuntimeError(
+                f"模型接口健康检查返回 HTTP {response.status_code}: {detail or '无错误正文'}"
+            )
+        try:
+            items = response.json().get("data") or []
+        except (ValueError, AttributeError) as exc:
+            raise RuntimeError("模型接口健康检查响应不是有效 JSON") from exc
+        model_ids = {
+            str(item.get("id") or "") for item in items if isinstance(item, dict)
+        }
+        return {
+            "model_available": not model_ids or model in model_ids,
+            "model_count": len(model_ids),
+        }
 
     async def chat(
         self,
@@ -226,69 +358,89 @@ class OpenAICompatibleProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if self.stream_response:
+            payload["stream"] = True
         headers = dict(self.headers)
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
         response: httpx.Response | None = None
         last_transport_error: Exception | None = None
+        attempts_made = 0
+        stopped_to_avoid_duplicate_billing = False
+        estimated_prompt_tokens = max(
+            1,
+            len(json.dumps(messages, ensure_ascii=False, default=str)) // 4,
+        )
         retryable_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             for attempt in range(1, self.retry_attempts + 1):
+                attempts_made = attempt
                 try:
-                    response = await client.post(
-                        f"{self.base_url}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                    )
+                    for url in _openai_compatible_urls(self.base_url, "chat/completions"):
+                        if self.stream_response:
+                            async with client.stream(
+                                "POST", url, json=payload, headers=headers
+                            ) as streamed:
+                                if streamed.is_error:
+                                    await streamed.aread()
+                                    response = streamed
+                                else:
+                                    content_type = streamed.headers.get("content-type", "").lower()
+                                    if "text/event-stream" in content_type:
+                                        result = await self._stream_response_data(streamed)
+                                        if result.tokens <= 0:
+                                            result.tokens = estimated_prompt_tokens + max(
+                                                1, len(result.content) // 4
+                                            )
+                                        return result
+                                    await streamed.aread()
+                                    return self._response_from_data(streamed.json())
+                        else:
+                            response = await client.post(url, json=payload, headers=headers)
+                        if response.status_code not in {400, 404}:
+                            break
                     if (
-                        response.status_code in {400, 404}
-                        and not self.base_url.endswith("/v1")
-                    ):
-                        response = await client.post(
-                            f"{self.base_url}/v1/chat/completions",
-                            json=payload,
-                            headers=headers,
-                        )
-                    if (
+                        response is not None
+                        and
                         response.status_code in retryable_statuses
                         and attempt < self.retry_attempts
                     ):
                         await asyncio.sleep(min(0.6 * attempt, 1.8))
                         continue
                     break
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                except httpx.TransportError as exc:
                     last_transport_error = exc
+                    retry_is_safe = isinstance(
+                        exc,
+                        (httpx.ConnectError, httpx.ConnectTimeout),
+                    )
+                    if not retry_is_safe:
+                        stopped_to_avoid_duplicate_billing = True
+                        break
                     if attempt >= self.retry_attempts:
                         break
                     await asyncio.sleep(min(0.6 * attempt, 1.8))
         if response is None:
-            detail = str(last_transport_error or "连接失败").strip()
-            raise RuntimeError(f"在线模型接口连接失败（已重试 {self.retry_attempts} 次）：{detail}")
+            detail = self._transport_error_detail(last_transport_error)
+            suffix = (
+                "；请求可能已被模型服务接收，为避免重复计费未自动重试"
+                if stopped_to_avoid_duplicate_billing
+                else ""
+            )
+            raise RuntimeError(
+                f"在线模型接口连接失败（已发起 {attempts_made} 次请求）：{detail}{suffix}"
+            )
         if response.is_error:
             detail = response.text.replace("\n", " ")[:500]
             raise RuntimeError(
-                f"模型接口返回 HTTP {response.status_code}: {detail or '无错误正文'}"
+                f"模型接口返回 HTTP {response.status_code}（已尝试 {attempts_made} 次）: "
+                f"{detail or '无错误正文'}"
             )
         try:
             data = response.json()
-            choice = data["choices"][0]["message"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("在线模型接口响应格式无效，缺少 choices[0].message") from exc
-        tool_calls = []
-        for item in choice.get("tool_calls") or []:
-            function = item.get("function", {})
-            try:
-                arguments = json.loads(function.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
-            tool_calls.append(
-                {"id": item.get("id"), "name": function.get("name"), "arguments": arguments}
-            )
-        return LLMResponse(
-            content=choice.get("content") or "",
-            tool_calls=tool_calls,
-            tokens=int((data.get("usage") or {}).get("total_tokens") or 0),
-        )
+        except ValueError as exc:
+            raise RuntimeError("在线模型接口响应不是有效 JSON") from exc
+        return self._response_from_data(data)
 
 
 class OpenAICompatibleImageProvider:
@@ -323,19 +475,14 @@ class OpenAICompatibleImageProvider:
         headers = dict(self.headers)
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
-        url = (
-            f"{self.base_url}/images/generations"
-            if self.base_url.endswith("/v1")
-            else f"{self.base_url}/images/generations"
-        )
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            if response.status_code in {400, 404} and not self.base_url.endswith("/v1"):
-                response = await client.post(
-                    f"{self.base_url}/v1/images/generations",
-                    json=payload,
-                    headers=headers,
-                )
+            response = None
+            for url in _openai_compatible_urls(self.base_url, "images/generations"):
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code not in {400, 404}:
+                    break
+            if response is None:
+                raise RuntimeError("图片模型接口没有收到响应")
             if response.is_error:
                 detail = response.text.replace("\n", " ")[:500]
                 raise RuntimeError(
