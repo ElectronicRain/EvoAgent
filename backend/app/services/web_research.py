@@ -184,6 +184,60 @@ class WebResearchService:
         )
         return " ".join(first_line.split())[:400]
 
+    @staticmethod
+    def normalized_research_subject(subject: str) -> str:
+        """Remove workflow/delivery scaffolding while preserving the research topic."""
+
+        value = " ".join(str(subject or "").split()).strip(" ：:，,。；;、")
+        value = re.sub(
+            r"^(?:(?:请|麻烦|帮我|请帮我|我想|我需要|需要|想要)\s*)?"
+            r"(?:(?:新建|创建|构建|设计|生成|制作|编排|启动)\s*"
+            r"(?:一个|一份|一套|新的?)?\s*(?:智能|自动)?\s*工作流\s*"
+            r"(?:来|用于|用来|以便)?\s*[,，:：、-]?\s*)+",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"^(?:(?:请|麻烦|帮我|请帮我|我想|我需要|需要|想要)\s*)?"
+            r"(?:查找|检索|搜索|查询|调查|调研|了解|整理|汇总)\s*",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"^(?:关于|围绕|针对|有关|就)\s*", "", value, flags=re.I)
+        # Delivery instructions describe what to do with evidence, not what to
+        # search for. Cutting them before query construction keeps scholarly
+        # indexes from receiving the whole workflow command.
+        value = re.split(
+            r"(?:[,，;；。、]\s*|\s+)(?:并|然后|再|最后)?\s*"
+            r"(?:写|撰写|生成|输出|整理|制作|形成|改写|翻译|投稿|交付)\s*"
+            r"(?:为|成)?\s*(?:一篇|一份|一版)?\s*"
+            r"(?:中文|英文|中英文|SCI|学术|期刊|会议)?",
+            value,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+        value = re.sub(
+            r"(?:相关|有关|方向)?\s*(?:的)?\s*"
+            r"(?:SCI\s*)?(?:论文|文献|文章|期刊|资料|研究进展|文献综述|系统综述|综述)"
+            r"(?:\s*(?:检索|搜索|调研|调查|写作|撰写|生成|整理|汇总))?.*$",
+            "",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(
+            r"(?:近|最近|过去)\s*\d{1,2}\s*年|"
+            r"\b(?:19\d{2}|20\d{2})\s*(?:[-–—~至到]|to)\s*(?:19\d{2}|20\d{2})\b|"
+            r"(?:至少|不少于|约|大约|检索|搜寻|纳入|包含|覆盖)?\s*"
+            r"\d{1,3}\s*(?:篇|条)\s*(?:文献|论文|资料)?",
+            " ",
+            value,
+            flags=re.I,
+        )
+        value = re.sub(r"\b(?:write|create|generate)\s+(?:an?\s+)?(?:sci|review)\b.*$", "", value, flags=re.I)
+        return " ".join(value.split()).strip(" ：:，,。；;、-–—")[:180]
+
     def institution_name(self, task: str) -> str | None:
         match = re.search(r"([\u4e00-\u9fff]{2,24}(?:大学|学院))", task)
         if not match:
@@ -198,6 +252,7 @@ class WebResearchService:
     def query_variants(self, task: str) -> list[str]:
         mode = self.research_mode(task)
         subject = self.research_subject(task)
+        normalized_subject = self.normalized_research_subject(subject)
         mesh_domain = self.mesh_domain(task)
         institution = self.institution_name(task)
         if institution and mode == "web":
@@ -211,7 +266,7 @@ class WebResearchService:
         cleaned = re.sub(
             r"帮我|请|关于|完成|总结|综述|调查|调研|查询|查找",
             " ",
-            subject,
+            normalized_subject or subject,
             flags=re.I,
         )
         cleaned = re.sub(
@@ -222,7 +277,13 @@ class WebResearchService:
         cleaned = cleaned.replace("的", " ")
         cleaned = " ".join(cleaned.split()).strip(" ：:，,。")
         translations = {
+            "二维人体姿态估计": "2D human pose estimation",
+            "三维人体姿态估计": "3D human pose estimation",
+            "单人体姿态估计": "single-person human pose estimation",
+            "多人体姿态估计": "multi-person human pose estimation",
+            "人体姿态估计": "human pose estimation",
             "二维": "2D",
+            "三维": "3D",
             "结构化网格": "structured grid mesh",
             "网格质量": "mesh quality",
             "质量评估": "quality assessment",
@@ -253,7 +314,21 @@ class WebResearchService:
             # reduces precision and can consume one of the four provider slots.
             if academic_base == base_query:
                 values.append(base_query)
-            if re.search(
+            if re.search(r"human\s+pose\s+estimation|\bhpe\b", academic_base, re.I):
+                canonical = "human pose estimation"
+                modifiers = " ".join(
+                    item
+                    for item in ("2D", "3D", "multi-person", "single-person", "monocular")
+                    if item.lower() in academic_base.lower()
+                )
+                primary = f'{modifiers} "{canonical}"'.strip()
+                values = [
+                    primary,
+                    f'"{canonical}" survey',
+                    f'"{canonical}" deep learning transformer 2D 3D',
+                    f'"{canonical}" benchmark dataset evaluation',
+                ]
+            elif re.search(
                 r"(?:mesh|grid).*(?:quality|assessment)|(?:quality|assessment).*(?:mesh|grid)",
                 academic_base,
                 re.I,
@@ -680,16 +755,18 @@ class WebResearchService:
         }
 
     def _rank_results(self, task: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        task_lower = task.lower()
+        subject = self.normalized_research_subject(self.research_subject(task))
+        task_lower = (subject or task).lower()
+        scope_lower = task.lower()
         mesh_domain = self.mesh_domain(task)
         year_range = self.requested_year_range(task)
         groups: list[tuple[str, list[str], int, bool]] = []
         institution = self.institution_name(task)
         if institution:
             groups.append(("institution", [institution.lower()], 8, True))
-        if re.search(r"(?<![a-z0-9])2d(?![a-z0-9])|二维", task_lower):
+        if re.search(r"(?<![a-z0-9])2d(?![a-z0-9])|二维", scope_lower):
             groups.append(("dimension", ["2d", "two-dimensional", "二维"], 4, True))
-        if re.search(r"结构化网格|structured\s+(grid|mesh)", task_lower):
+        if re.search(r"结构化网格|structured\s+(grid|mesh)", scope_lower):
             groups.append(
                 (
                     "structured_mesh",
@@ -698,9 +775,9 @@ class WebResearchService:
                     True,
                 )
             )
-        if re.search(r"网格|\bmesh\b|\bgrid\b", task_lower):
+        if re.search(r"网格|\bmesh\b|\bgrid\b", scope_lower):
             groups.append(("mesh", ["mesh", "grid", "网格"], 4, True))
-        if re.search(r"质量|评估|quality|assessment|evaluation", task_lower):
+        if re.search(r"质量|评估|quality|assessment|evaluation", scope_lower):
             groups.append(
                 (
                     "quality",
@@ -719,6 +796,37 @@ class WebResearchService:
                     3,
                     mesh_domain is not None,
                 )
+            )
+        if re.search(r"人体姿态估计|human\s+pose\s+estimation|\bhpe\b", scope_lower, re.I):
+            groups.extend(
+                [
+                    (
+                        "pose_estimation",
+                        [
+                            "pose estimation",
+                            "pose-estimation",
+                            "2d pose",
+                            "3d pose",
+                            "keypoint detection",
+                            "人体姿态估计",
+                        ],
+                        6,
+                        True,
+                    ),
+                    (
+                        "human_body",
+                        [
+                            "human",
+                            "person",
+                            "body",
+                            "skeleton",
+                            "multi-person",
+                            "人体",
+                        ],
+                        5,
+                        True,
+                    ),
+                ]
             )
 
         ranked: dict[str, dict[str, Any]] = {}
@@ -1167,7 +1275,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.3.22 "
+                        "EvoAgent/0.3.23 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

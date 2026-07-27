@@ -150,7 +150,7 @@ class WorkflowExpert:
         knowledge_ids = {item.id for item in knowledge_bases}
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for index, raw in enumerate(raw_drafts[:8], 1):
+        for index, raw in enumerate(raw_drafts[:24], 1):
             if not isinstance(raw, dict):
                 continue
             name = str(raw.get("name") or f"智能编排 Agent {index}").strip()[:100]
@@ -1151,6 +1151,80 @@ class WorkflowExpert:
             suffix += 1
         return candidate
 
+    @staticmethod
+    def _normalized_agent_name(value: str) -> str:
+        return re.sub(r"[\s·_\-]+", "", value, flags=re.I).lower()
+
+    def _replacement_agent(
+        self,
+        node: dict[str, Any],
+        unavailable: AgentDefinition | None,
+        eligible_agents: list[AgentDefinition],
+    ) -> AgentDefinition | None:
+        """Find an unambiguous online replacement without calling a model."""
+        if unavailable:
+            lineage_matches = [
+                item
+                for item in eligible_agents
+                if item.lineage_id == unavailable.lineage_id
+            ]
+            if lineage_matches:
+                return max(lineage_matches, key=lambda item: item.version)
+
+        label = str(node.get("label") or "")
+        normalized_label = self._normalized_agent_name(label)
+        exact = [
+            item
+            for item in eligible_agents
+            if self._normalized_agent_name(item.name) == normalized_label
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        return None
+
+    def _binding_repair_draft(
+        self,
+        node: dict[str, Any],
+        *,
+        key: str,
+        endpoint: ModelEndpoint | None,
+    ) -> dict[str, Any]:
+        """Create a deterministic full Agent blueprint for a broken canvas node."""
+        config = node.get("config") or {}
+        label = str(node.get("label") or "工作流执行 Agent").strip()[:100]
+        if not re.search(r"agent|智能体", label, re.I):
+            label = f"{label} Agent"[:100]
+        node_prompt = str(config.get("prompt") or "").strip()
+        system_prompt = (
+            f"你是工作流中的{label}。严格围绕用户原始目标和上游节点材料完成本节点职责；"
+            "先核对输入约束，再输出结构化、可验证、可供下游节点直接使用的结果。"
+            "需要外部事实时使用真实联网检索，禁止编造来源；信息不足时明确列出缺口。"
+        )
+        if node_prompt:
+            system_prompt += f"\n\n节点专用要求：\n{node_prompt}"
+        return {
+            "key": key,
+            "name": label,
+            "description": f"自动修复“{node.get('label') or node.get('id')}”节点时创建的在线 Agent。",
+            "system_prompt": system_prompt,
+            "provider": endpoint.provider_type if endpoint else "demo",
+            "model_endpoint_id": endpoint.id if endpoint else None,
+            "model": endpoint.default_model if endpoint else "demo-model",
+            "temperature": 0.2,
+            "tools": ["web_research", "exec"],
+            "skills": [],
+            "knowledge_bases": [],
+            "rag_config": AgentRAGConfig().model_dump(),
+            "generation_config": AgentGenerationConfig().model_dump(),
+            "permissions": {
+                "exec": True,
+                "mcp": True,
+                "skills": True,
+                "security_profile": "workspace-write",
+                "approval_policy": "never",
+            },
+        }
+
     async def materialize(
         self,
         db: AsyncSession,
@@ -1173,12 +1247,94 @@ class WorkflowExpert:
         knowledge_bases = (
             await db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.name))
         ).all()
+        all_agents = (await db.scalars(select(AgentDefinition))).all()
+        enabled_endpoint_ids = set(
+            await db.scalars(
+                select(ModelEndpoint.id).where(
+                    ModelEndpoint.enabled.is_(True),
+                    ModelEndpoint.modality == "chat",
+                )
+            )
+        )
+        eligible_agents = [
+            item
+            for item in all_agents
+            if item.status in {"active", "candidate"}
+            and (
+                not settings.require_online_agents
+                or item.model_endpoint_id in enabled_endpoint_ids
+            )
+        ]
+        eligible_agent_ids = {item.id for item in eligible_agents}
+        agents_by_id = {item.id: item for item in all_agents}
+        raw_drafts = [
+            item
+            for item in proposal.get("agent_drafts", [])
+            if isinstance(item, dict)
+        ]
+        known_draft_keys = {
+            self._safe_key(
+                str(item.get("key") or item.get("draft_key") or ""),
+                f"draft_agent_{index}",
+            )
+            for index, item in enumerate(raw_drafts, 1)
+        }
+        binding_repairs: list[dict[str, Any]] = []
+        pending_repair_keys: dict[str, dict[str, Any]] = {}
+        for index, node in enumerate(definition.get("nodes", []), 1):
+            if node.get("type") != "agent":
+                continue
+            config = dict(node.get("config") or {})
+            agent_id = str(config.get("agent_id") or "")
+            unavailable = agents_by_id.get(agent_id)
+            if agent_id in eligible_agent_ids:
+                continue
+            replacement = self._replacement_agent(node, unavailable, eligible_agents)
+            if replacement:
+                config["agent_id"] = replacement.id
+                config.pop("agent_draft_key", None)
+                node["config"] = config
+                binding_repairs.append(
+                    {
+                        "node_id": str(node.get("id") or ""),
+                        "node_label": str(node.get("label") or "Agent"),
+                        "action": "rebound",
+                        "previous_agent_id": agent_id or None,
+                        "agent_id": replacement.id,
+                        "agent_name": replacement.name,
+                    }
+                )
+                continue
+
+            requested_key = str(config.get("agent_draft_key") or "")
+            draft_key = self._safe_key(
+                requested_key or f"repair_{node.get('id') or index}",
+                f"repair_agent_{index}",
+            )
+            suffix = 2
+            base_key = draft_key
+            while draft_key in pending_repair_keys:
+                draft_key = f"{base_key}_{suffix}"
+                suffix += 1
+            config.pop("agent_id", None)
+            config["agent_draft_key"] = draft_key
+            node["config"] = config
+            pending_repair_keys[draft_key] = {
+                "node_id": str(node.get("id") or ""),
+                "node_label": str(node.get("label") or "Agent"),
+                "previous_agent_id": agent_id or None,
+            }
+            if draft_key not in known_draft_keys:
+                raw_drafts.append(
+                    self._binding_repair_draft(
+                        node,
+                        key=draft_key,
+                        endpoint=endpoint,
+                    )
+                )
+                known_draft_keys.add(draft_key)
         drafts = self._sanitize_agent_drafts(
-            [
-                item
-                for item in proposal.get("agent_drafts", [])
-                if isinstance(item, dict)
-            ],
+            raw_drafts,
             endpoint=endpoint,
             knowledge_bases=list(knowledge_bases),
             full_capabilities=full_capabilities,
@@ -1232,6 +1388,17 @@ class WorkflowExpert:
                     config["auto_input"] = False
                 node["config"] = config
 
+                repair = pending_repair_keys.get(str(draft_key))
+                if repair:
+                    binding_repairs.append(
+                        {
+                            **repair,
+                            "action": "created",
+                            "agent_id": created_by_key[str(draft_key)].id,
+                            "agent_name": created_by_key[str(draft_key)].name,
+                        }
+                    )
+
         agents = (await db.scalars(select(AgentDefinition))).all()
         sanitized = self._sanitize(
             definition,
@@ -1263,6 +1430,7 @@ class WorkflowExpert:
             }
             for item in created
         ]
+        result["binding_repairs"] = binding_repairs
         result["validation"] = validation
         return result
 

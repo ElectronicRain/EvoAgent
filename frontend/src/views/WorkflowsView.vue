@@ -7,7 +7,7 @@ import {
   Pause, RotateCw, Send, Sparkles, Square,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Play, Plus, Save, Search, Settings2, ShieldCheck, Trash2, Workflow, X, ZoomIn,
-  CircleHelp, Languages, ListChecks,
+  CircleAlert, CircleHelp, Languages, ListChecks,
 } from 'lucide-vue-next'
 import FloatingPanel from '../components/FloatingPanel.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -94,7 +94,7 @@ type ClarificationResult = {
 }
 
 const store = useAppStore()
-const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), knowledgeBases = ref<Entity[]>([]), tools = ref<Entity[]>([]), runs = ref<Entity[]>([]), approvalPolicies = ref<Entity[]>([])
+const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), modelEndpoints = ref<Entity[]>([]), knowledgeBases = ref<Entity[]>([]), tools = ref<Entity[]>([]), runs = ref<Entity[]>([]), approvalPolicies = ref<Entity[]>([])
 const currentWorkflow = ref<Entity | null>(null), nodes = ref<CanvasNode[]>([]), edges = ref<CanvasEdge[]>([])
 const selectedNodeId = ref(''), selectedEdgeIndex = ref<number | null>(null), connectingFrom = ref(''), connectingSlot = ref('output'), pointer = reactive({ x: 0, y: 0 })
 const studio = ref<HTMLElement | null>(null), canvas = ref<HTMLElement | null>(null), search = ref(''), task = ref(''), output = ref('')
@@ -120,6 +120,7 @@ const RUN_STATE_KEY = 'evoagent-workflow-run-state-v2'
 const resourceTab = ref<'agents' | 'knowledge' | 'components'>('agents')
 const paletteCollapsed = ref(false), inspectorCollapsed = ref(false), runCollapsed = ref(true), fullScreen = ref(false)
 const expertOpen = ref(false)
+const repairingBindings = ref(false)
 const EXPERT_SESSION_MAP_KEY = 'evoagent-workflow-expert-session-map-v1'
 const createDraftSessionKey = () => `draft:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
 const expertSessionKey = ref(createDraftSessionKey())
@@ -225,7 +226,24 @@ const runSecurityProfiles = [
   { value: 'custom', label: '仅指定项目路径', description: 'Agent 只能访问安全设置中配置的项目目录' },
   { value: 'unrestricted', label: '完全访问本地', description: '允许访问本机全部路径，请谨慎选择' },
 ]
-const executableAgent = (agent: Entity) => ['active', 'candidate'].includes(agent.status)
+function onlineEndpointForAgent(agent: Entity) {
+  return modelEndpoints.value.find(endpoint =>
+    endpoint.id === agent.model_endpoint_id
+    && endpoint.enabled
+    && (endpoint.modality || 'chat') === 'chat')
+}
+function executableAgent(agent: Entity) {
+  return ['active', 'candidate'].includes(agent.status) && Boolean(onlineEndpointForAgent(agent))
+}
+function nodeAgentBindingIssue(node: CanvasNode) {
+  if (node.type !== 'agent') return ''
+  const agent = agents.value.find(item => item.id === node.config.agent_id)
+  if (!agent) return '绑定的 Agent 不存在，可能来自旧草案或已被删除'
+  if (!['active', 'candidate'].includes(agent.status)) return `绑定的“${agent.name}”当前为${statusLabel(agent.status)}状态`
+  if (!onlineEndpointForAgent(agent)) return `绑定的“${agent.name}”没有启用的在线对话模型接口`
+  return ''
+}
+const invalidAgentNodes = computed(() => nodes.value.filter(node => Boolean(nodeAgentBindingIssue(node))))
 const statusLabel = (status: string) => ({ active: '启用', candidate: '候选', archived: '归档', rejected: '拒绝' } as Record<string, string>)[status] || status
 const toolPolicyDescription = (value: string) => agentToolPolicies.find(item => item.value === (value || 'auto'))?.description || agentToolPolicies[0].description
 const ragModeDescription = (value: string) => agentRagModes.find(item => item.value === (value || 'auto'))?.description || agentRagModes[0].description
@@ -952,9 +970,10 @@ function normalizeNodes(definition: Entity): CanvasNode[] {
 async function load() {
   store.loading(true)
   try {
-    [workflows.value, agents.value, knowledgeBases.value, tools.value, runs.value, approvalPolicies.value] = await Promise.all([
+    [workflows.value, agents.value, modelEndpoints.value, knowledgeBases.value, tools.value, runs.value, approvalPolicies.value] = await Promise.all([
       api.get('/workflows'),
       api.get('/agents'),
+      api.get('/model-endpoints'),
       api.get('/knowledge-bases'),
       api.get('/tools'),
       api.get('/workflow-runs'),
@@ -1474,7 +1493,7 @@ function buildDefinition() {
   }
 }
 
-function validateWorkflow() {
+function validateWorkflow(ignoreAgentBindings = false) {
   if (!workflowForm.name.trim()) return '请填写工作流名称'
   if (!edges.value.some(edge => edge.source === 'input')) return '任务输入节点尚未连接'
   if (!edges.value.some(edge => edge.target === 'output')) return '结果输出节点尚未连接'
@@ -1486,12 +1505,8 @@ function validateWorkflow() {
     return !slots.has('true') || !slots.has('false')
   })
   if (badCondition) return `条件节点“${badCondition.label}”必须同时连接 TRUE 和 FALSE 分支`
-  const invalidAgent = nodes.value.find(node => {
-    if (node.type !== 'agent') return false
-    const agent = agents.value.find(item => item.id === node.config.agent_id)
-    return !agent || !executableAgent(agent) || !agent.model_endpoint_id
-  })
-  if (invalidAgent) return `Agent 节点“${invalidAgent.label}”未绑定可用的在线 Agent`
+  const invalidAgent = ignoreAgentBindings ? null : invalidAgentNodes.value[0]
+  if (invalidAgent) return `Agent 节点“${invalidAgent.label}”：${nodeAgentBindingIssue(invalidAgent)}`
   const invalidKnowledge = nodes.value.find(node => node.type === 'knowledge' && !knowledgeBases.value.some(item => item.id === node.config.knowledge_base_id))
   if (invalidKnowledge) return `知识库节点“${invalidKnowledge.label}”绑定的知识库不存在`
   const outgoing = new Map<string, string[]>()
@@ -1533,39 +1548,88 @@ function addAssignment(node: CanvasNode) {
   node.config.assignments.push({ name: '', operation: 'set', value: '' })
 }
 
+function applyDefinitionToCanvas(definition: Entity) {
+  nodes.value = normalizeNodes(definition)
+  edges.value = (definition.edges || []).map((edge: Entity) => ({
+    source: edge.source,
+    target: edge.target,
+    source_slot: edge.source_slot || 'output',
+    target_slot: edge.target_slot || 'input',
+  }))
+  variables.value = (definition.variables || []).map((item: Entity) => ({
+    name: item.name || '',
+    type: item.type || 'string',
+    default: item.default ?? '',
+    description: item.description || '',
+    required: Boolean(item.required),
+  }))
+  Object.assign(execution, {
+    loop_enabled: false,
+    loop_count: 1,
+    artifact_enabled: true,
+    stop_condition: '',
+    intent_validation: true,
+    ...(definition.execution || {}),
+  })
+  selectedNodeId.value = ''
+  selectedEdgeIndex.value = null
+}
+
+async function repairAgentBindings(showNotice = true) {
+  if (!invalidAgentNodes.value.length) return true
+  if (repairingBindings.value) return false
+  repairingBindings.value = true
+  try {
+    const result = await api.post<Entity>('/workflow-expert/materialize', {
+      proposal: {
+        name: workflowForm.name,
+        description: workflowForm.description,
+        definition: buildDefinition(),
+        agent_drafts: [],
+      },
+    })
+    ;[agents.value, modelEndpoints.value] = await Promise.all([
+      api.get('/agents'),
+      api.get('/model-endpoints'),
+    ])
+    applyDefinitionToCanvas(result.definition || {})
+    await nextTick()
+    await fitCanvas()
+    const repaired = result.binding_repairs?.length || result.created_agents?.length || 0
+    if (showNotice) {
+      store.notify(repaired
+        ? `已自动修复 ${repaired} 个 Agent 绑定，全部使用现有在线接口`
+        : 'Agent 在线绑定已重新校验')
+    }
+    return invalidAgentNodes.value.length === 0
+  } catch (error: any) {
+    store.notify(error.message || 'Agent 在线绑定自动修复失败', 'error')
+    return false
+  } finally {
+    repairingBindings.value = false
+  }
+}
+
+async function repairBindingsAndSave() {
+  store.loading(true)
+  try {
+    if (await repairAgentBindings(true)) await persistWorkflow(false)
+  } finally {
+    store.loading(false)
+  }
+}
+
 async function applyExpertProposal(proposal: Entity) {
   try {
     const definition = proposal.definition || {}
-    if (proposal.created_agents?.length) {
-      agents.value = await api.get<Entity[]>('/agents')
-    }
+    ;[agents.value, modelEndpoints.value] = await Promise.all([
+      api.get('/agents'),
+      api.get('/model-endpoints'),
+    ])
     workflowForm.name = proposal.name || workflowForm.name
     workflowForm.description = proposal.description || workflowForm.description
     if (proposal.objective) task.value = proposal.objective
-    nodes.value = normalizeNodes(definition)
-    edges.value = (definition.edges || []).map((edge: Entity) => ({
-      source: edge.source,
-      target: edge.target,
-      source_slot: edge.source_slot || 'output',
-      target_slot: edge.target_slot || 'input',
-    }))
-    variables.value = (definition.variables || []).map((item: Entity) => ({
-      name: item.name || '',
-      type: item.type || 'string',
-      default: item.default ?? '',
-      description: item.description || '',
-      required: Boolean(item.required),
-    }))
-    Object.assign(execution, {
-      loop_enabled: false,
-      loop_count: 1,
-      artifact_enabled: true,
-      stop_condition: '',
-      intent_validation: true,
-      ...(definition.execution || {}),
-    })
-    selectedNodeId.value = ''
-    selectedEdgeIndex.value = null
+    applyDefinitionToCanvas(definition)
     await nextTick()
     await fitCanvas()
     const saved = await persistWorkflow(false)
@@ -1581,6 +1645,9 @@ async function applyExpertProposal(proposal: Entity) {
 }
 
 async function persistWorkflow(showNotice = true) {
+  const structuralError = validateWorkflow(true)
+  if (structuralError) { store.notify(structuralError, 'error'); return null }
+  if (invalidAgentNodes.value.length && !(await repairAgentBindings(false))) return null
   const error = validateWorkflow()
   if (error) { store.notify(error, 'error'); return null }
   const payload = { name: workflowForm.name, description: workflowForm.description, definition: buildDefinition() }
@@ -1883,7 +1950,12 @@ onBeforeUnmount(() => {
     <div class="workflow-canvas-shell">
       <div class="canvas-toolbar">
         <div class="canvas-title"><strong>{{ workflowForm.name }}</strong><span>{{ nodes.length }} 节点 · {{ edges.length }} 连线 · {{ nodes.filter(item=>item.type==='agent').length }} Agent · {{ nodes.filter(item=>item.type==='knowledge').length }} 知识库</span></div>
-        <div class="workflow-validity" :class="{valid:!validationMessage}" :title="validationMessage || '工作流链路完整，可直接运行'"><i />{{ validationMessage || '链路完整' }}</div>
+        <div class="workflow-validity-group">
+          <div class="workflow-validity" :class="{valid:!validationMessage}" :title="validationMessage || '工作流链路完整，可直接运行'"><i />{{ validationMessage || '链路完整' }}</div>
+          <button v-if="invalidAgentNodes.length" class="workflow-binding-repair" :disabled="repairingBindings" @click="repairBindingsAndSave">
+            <RotateCw :size="12" :class="{spin:repairingBindings}" />{{ repairingBindings ? '修复中' : `修复 ${invalidAgentNodes.length} 个绑定` }}
+          </button>
+        </div>
         <div class="canvas-hint"><MousePointer2 :size="13" /><span>按住左键拖动画布</span></div>
         <div class="canvas-tools">
           <button title="自动整理节点（L）" @click="autoLayout"><Workflow :size="13" /></button>
@@ -1904,7 +1976,7 @@ onBeforeUnmount(() => {
               <path v-for="(edge,index) in edges" :key="`${edge.source}-${edge.target}`" :d="edgePath(edge)" class="workflow-wire" :class="[{selected:selectedEdgeIndex===index},`run-${edgeRuntimeStatus(edge)}`]" marker-end="url(#workflow-arrow)" @click.stop="selectEdge(index)" @dblclick.stop="removeEdge(index)" />
               <path v-if="connectingFrom" :d="previewPath()" class="workflow-wire preview" />
             </svg>
-            <article v-for="node in nodes" :key="node.id" class="workflow-node" :class="[node.type,{selected:selectedNodeId===node.id,moving:movingNodeId===node.id},`run-${nodeRuntime(node.id).status}`]" :style="{left:`${node.position.x}px`,top:`${node.position.y}px`}" :title="`${node.label} · ${runStatusLabel(nodeRuntime(node.id).status)} · ${nodeRuntime(node.id).stage}`" @pointerdown.stop="startMove(node,$event)" @click.stop="selectNode(node.id)">
+            <article v-for="node in nodes" :key="node.id" class="workflow-node" :class="[node.type,{selected:selectedNodeId===node.id,moving:movingNodeId===node.id,'binding-invalid':Boolean(nodeAgentBindingIssue(node))},`run-${nodeRuntime(node.id).status}`]" :style="{left:`${node.position.x}px`,top:`${node.position.y}px`}" :title="nodeAgentBindingIssue(node) || `${node.label} · ${runStatusLabel(nodeRuntime(node.id).status)} · ${nodeRuntime(node.id).stage}`" @pointerdown.stop="startMove(node,$event)" @click.stop="selectNode(node.id)">
               <button v-if="node.type!=='input'" class="node-port input-port" title="输入端口" @pointerup.stop="finishConnection(node.id)" />
               <div class="node-icon"><Bot v-if="node.type==='agent'" :size="17" /><Database v-else-if="node.type==='knowledge'" :size="17" /><Braces v-else-if="node.type==='variable'" :size="17" /><Code2 v-else-if="node.type==='template'" :size="17" /><GitMerge v-else-if="node.type==='merge'" :size="17" /><FileText v-else-if="node.type==='artifact'" :size="17" /><GitBranch v-else-if="['input','condition'].includes(node.type)" :size="17" /><CircleStop v-else :size="17" /></div>
               <div class="node-copy"><small>{{ node.type.toUpperCase() }}</small><strong>{{ node.label }}</strong></div>
@@ -1912,6 +1984,7 @@ onBeforeUnmount(() => {
               <span v-if="nodeRuntime(node.id).status!=='idle'" class="node-run-indicator" :class="nodeRuntime(node.id).status"><i />{{ runStatusLabel(nodeRuntime(node.id).status) }}</span>
               <span v-if="nodeRuntime(node.id).status==='running'" class="node-run-stage">{{ nodeRuntime(node.id).stage }}</span>
               <span v-if="nodeRuntime(node.id).status==='running'" class="node-run-progress"><i :style="{width:`${nodeRuntime(node.id).progress}%`}" /></span>
+              <span v-if="nodeAgentBindingIssue(node)" class="node-binding-warning"><CircleAlert :size="10" />待修复</span>
               <template v-if="node.type==='condition'">
                 <button class="node-port output-port branch-true" title="TRUE 分支" @pointerdown.stop="startConnection(node.id,$event,'true')" /><span class="slot-label true">TRUE</span>
                 <button class="node-port output-port branch-false" title="FALSE 分支" @pointerdown.stop="startConnection(node.id,$event,'false')" /><span class="slot-label false">FALSE</span>
@@ -1966,7 +2039,12 @@ onBeforeUnmount(() => {
           <div class="field"><label>节点名称</label><input v-model="selectedNode.label" class="input"></div>
           <div class="field"><label>节点类型</label><input :value="selectedNode.type" class="input" disabled></div>
           <template v-if="selectedNode.type==='agent'">
-            <div class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option v-for="agent in agents" :key="agent.id" :value="agent.id" :disabled="!executableAgent(agent)">{{ agent.name }} · v{{ agent.version }} · {{ statusLabel(agent.status) }}</option></select></div>
+            <div class="field"><label>绑定 Agent</label><select v-model="selectedNode.config.agent_id" class="select"><option value="" disabled>请选择在线 Agent</option><option v-for="agent in agents" :key="agent.id" :value="agent.id" :disabled="!executableAgent(agent)">{{ agent.name }} · v{{ agent.version }} · {{ executableAgent(agent) ? '在线可用' : `${statusLabel(agent.status)} / 接口不可用` }}</option></select></div>
+            <section v-if="nodeAgentBindingIssue(selectedNode)" class="agent-binding-repair-card">
+              <CircleAlert :size="16" />
+              <div><strong>此节点暂时无法运行</strong><span>{{ nodeAgentBindingIssue(selectedNode) }}</span></div>
+              <button :disabled="repairingBindings" @click="repairBindingsAndSave"><RotateCw :size="12" :class="{spin:repairingBindings}" />{{ repairingBindings ? '正在修复' : '自动创建并绑定在线 Agent' }}</button>
+            </section>
             <label class="switch-line"><input v-model="selectedNode.config.auto_input" type="checkbox"><span>根据入线自动聚合输入</span></label>
             <div class="field"><label>节点工具策略</label><select v-model="selectedNode.config.tool_policy" class="select"><option v-for="policy in agentToolPolicies" :key="policy.value" :value="policy.value">{{ policy.label }}</option></select><span class="field-help">{{ toolPolicyDescription(selectedNode.config.tool_policy) }}</span></div>
             <div class="field"><label>节点 RAG 策略</label><select v-model="selectedNode.config.rag_mode" class="select"><option v-for="mode in agentRagModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select><span class="field-help">{{ ragModeDescription(selectedNode.config.rag_mode) }}</span></div>

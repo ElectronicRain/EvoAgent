@@ -144,6 +144,49 @@ def test_web_research_extracts_short_subject_and_constraints_from_workflow_promp
     assert all("【" not in query and len(query) < 100 for query in queries)
 
 
+def test_academic_research_extracts_human_pose_topic_from_workflow_instruction():
+    service = WebResearchService()
+    task = "新建一个工作流，人体姿态估计相关论文，并写为SCI"
+
+    assert service.normalized_research_subject(service.research_subject(task)) == "人体姿态估计"
+    queries = service.query_variants(task)
+    assert queries == [
+        '"human pose estimation"',
+        '"human pose estimation" survey',
+        '"human pose estimation" deep learning transformer 2D 3D',
+        '"human pose estimation" benchmark dataset evaluation',
+    ]
+    assert all("工作流" not in query and "SCI" not in query and "论文" not in query for query in queries)
+
+    ranked = service._rank_results(
+        task,
+        [
+            {
+                "title": "Human Pose Estimation with Spatial Transformers",
+                "description": "A benchmark study for 2D and 3D pose estimation.",
+                "url": "https://doi.org/10.1000/hpe",
+                "source": "Crossref",
+            },
+            {
+                "title": "Scientific workflow scheduling for cloud systems",
+                "description": "Workflow orchestration and scheduling.",
+                "url": "https://doi.org/10.1000/workflow",
+                "source": "Crossref",
+            },
+            {
+                "title": "Camera Pose Estimation for Autonomous Navigation",
+                "description": "Six-degree-of-freedom visual localization.",
+                "url": "https://doi.org/10.1000/camera-pose",
+                "source": "Crossref",
+            },
+        ],
+    )
+    assert [item["title"] for item in ranked] == [
+        "Human Pose Estimation with Spatial Transformers"
+    ]
+    assert ranked[0]["matched_concepts"] == ["pose_estimation", "human_body"]
+
+
 def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
     service = WebResearchService()
     task = "数值计算网格质量评估近 5 年文献综述"

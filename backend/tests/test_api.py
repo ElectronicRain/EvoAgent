@@ -1843,6 +1843,109 @@ def test_workflow_expert_generalizes_new_canvas_with_task_specific_agents(client
     assert materialized.json()["validation"]["executable"] is True
 
 
+def test_workflow_expert_repairs_missing_agent_binding_without_model_call(client):
+    from backend.app.config import settings
+
+    previous = settings.require_online_agents
+    endpoint_id = ""
+    try:
+        endpoint = client.post(
+            "/api/model-endpoints",
+            json={
+                "name": f"工作流绑定修复-{time.time_ns()}",
+                "modality": "chat",
+                "provider_type": "openai-compatible",
+                "base_url": "https://binding-repair.example/v1",
+                "api_key": "binding-repair-secret",
+                "default_model": "binding-repair-model",
+                "enabled": True,
+            },
+        )
+        assert endpoint.status_code == 201
+        endpoint_id = endpoint.json()["id"]
+        settings.require_online_agents = True
+
+        proposal = {
+            "name": "网格文献研究工作流",
+            "description": "验证旧草案中的失效 Agent 可以零模型调用自动修复",
+            "definition": {
+                "nodes": [
+                    {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+                    {
+                        "id": "grid_research",
+                        "type": "agent",
+                        "label": "网格文献检索 Agent",
+                        "config": {
+                            "agent_id": "missing-agent-from-old-canvas",
+                            "input": "{{input.task}}",
+                            "prompt": "联网检索近五年论文并输出可追溯来源。",
+                            "tool_policy": "research",
+                        },
+                    },
+                    {
+                        "id": "output",
+                        "type": "output",
+                        "label": "结果输出",
+                        "config": {"value": {"result": "{{nodes.grid_research.output}}"}},
+                    },
+                ],
+                "edges": [
+                    {"source": "input", "target": "grid_research"},
+                    {"source": "grid_research", "target": "output"},
+                ],
+                "variables": [],
+                "execution": {"artifact_enabled": True},
+            },
+            "agent_drafts": [],
+        }
+
+        repaired = client.post(
+            "/api/workflow-expert/materialize",
+            json={"proposal": proposal},
+        )
+        assert repaired.status_code == 200, repaired.text
+        result = repaired.json()
+        assert result["validation"]["executable"] is True
+        assert len(result["created_agents"]) == 1
+        created = result["created_agents"][0]
+        assert created["name"] == "网格文献检索 Agent"
+        assert created["model_endpoint_id"] == endpoint.json()["id"]
+        assert {"exec", "web_research", "call_agent"}.issubset(
+            set(json.loads(created["tools_json"]))
+        )
+        assert json.loads(created["permissions_json"])["mcp"] is True
+        assert result["binding_repairs"] == [
+            {
+                "node_id": "grid_research",
+                "node_label": "网格文献检索 Agent",
+                "previous_agent_id": "missing-agent-from-old-canvas",
+                "action": "created",
+                "agent_id": created["id"],
+                "agent_name": "网格文献检索 Agent",
+            }
+        ]
+        repaired_node = next(
+            item for item in result["definition"]["nodes"] if item["id"] == "grid_research"
+        )
+        assert repaired_node["config"]["agent_id"] == created["id"]
+        assert "agent_draft_key" not in repaired_node["config"]
+
+        repeated = client.post(
+            "/api/workflow-expert/materialize",
+            json={"proposal": result},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["created_agents"] == []
+        assert repeated.json()["validation"]["executable"] is True
+    finally:
+        if endpoint_id:
+            client.patch(
+                f"/api/model-endpoints/{endpoint_id}",
+                json={"enabled": False},
+            )
+        settings.require_online_agents = previous
+
+
 def test_workflow_save_rejects_missing_runtime_agent_before_run(client):
     response = client.post(
         "/api/workflows",
