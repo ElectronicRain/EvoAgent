@@ -342,12 +342,12 @@ class WebResearchService:
                     for item in ("2D", "3D", "multi-person", "single-person", "monocular")
                     if item.lower() in academic_base.lower()
                 )
-                primary = f'{modifiers} "{canonical}"'.strip()
+                primary = f'"{" ".join(part for part in (modifiers, canonical) if part)}"'
                 values = [
                     primary,
-                    f'"{canonical}" survey',
-                    f'"{canonical}" deep learning transformer 2D 3D',
-                    f'"{canonical}" benchmark dataset evaluation',
+                    f'"{canonical} survey"',
+                    f'"{canonical} deep learning transformer"',
+                    f'"{canonical} benchmark dataset evaluation"',
                 ]
             elif re.search(
                 r"(?:mesh|grid).*(?:quality|assessment)|(?:quality|assessment).*(?:mesh|grid)",
@@ -359,17 +359,17 @@ class WebResearchService:
                     # dominated by perceptual quality papers about textured 3D media.
                     if "structured" in academic_base.lower():
                         values = [
-                            f"{academic_base} CFD finite element numerical simulation",
-                            '"structured mesh quality metrics" Jacobian skewness orthogonality',
-                            '"structured grid quality" finite volume solver evaluation',
-                            '"structured mesh quality indicators" discretization error',
+                            f'"{academic_base}"',
+                            '"structured mesh quality metrics"',
+                            '"structured grid quality"',
+                            '"structured mesh quality indicators"',
                         ]
                     else:
                         values = [
-                            '"mesh quality assessment" CFD finite element numerical simulation',
-                            '"mesh quality metrics" Jacobian skewness orthogonality solver',
-                            '"unstructured mesh quality" finite volume finite element evaluation',
-                            '"mesh quality indicators" discretization error mesh optimization',
+                            '"mesh quality assessment"',
+                            '"mesh quality metrics"',
+                            '"unstructured mesh quality"',
+                            '"mesh quality indicators"',
                         ]
                 elif mesh_domain == "visual":
                     values = [
@@ -380,18 +380,18 @@ class WebResearchService:
                     ]
                 elif mesh_domain == "comparative":
                     values = [
-                        '"mesh quality indicators" numerical simulation finite element',
-                        '"mesh quality metrics" Jacobian discretization error',
-                        '"3D mesh visual quality assessment" perceptual metric',
-                        '"textured mesh quality assessment" deep learning',
+                        '"mesh quality indicators"',
+                        '"mesh quality metrics"',
+                        '"3D mesh visual quality assessment"',
+                        '"textured mesh quality assessment"',
                     ]
                 else:
                     values.extend(
                         [
-                            '"mesh quality assessment" review metrics',
-                            '"mesh quality metrics" Jacobian skewness orthogonality',
-                            '"mesh quality evaluation" finite element CFD',
-                            '"mesh quality" machine learning prediction',
+                            '"mesh quality assessment"',
+                            '"mesh quality metrics"',
+                            '"mesh quality evaluation"',
+                            '"mesh quality machine learning"',
                         ]
                     )
             else:
@@ -412,6 +412,16 @@ class WebResearchService:
                     f"{base_query} 背景 现状",
                 ]
             )
+        # A quoted academic phrase is already the complete retrieval concept.
+        # Never leave discovery modifiers after its closing quote: every provider
+        # and the visible browser panel must execute exactly the same phrase.
+        if mode == "academic":
+            values = [
+                f'"{self.crossref_query(value)}"'
+                if re.search(r'["“][^"”]+["”]', value)
+                else value
+                for value in values
+            ]
         return list(dict.fromkeys(values))[:4]
 
     @staticmethod
@@ -974,11 +984,34 @@ class WebResearchService:
             )
             computational_hit = any(term in text for term in computational_terms)
             visual_hit = any(term in text for term in visual_terms)
+            has_mesh_term = bool(re.search(r"\b(?:mesh|grid|element)s?\b", text, re.I))
+            mesh_quality_context_hit = bool(
+                re.search(
+                    r"\b(?:mesh|grid|element)[ -](?:quality|metric|indicator|assessment|evaluation)s?\b"
+                    r"|\bquality(?: assessment| evaluation)?(?: of| for)? (?:a |the )?"
+                    r"(?:structured |unstructured )?(?:mesh|grid|element)s?\b",
+                    text,
+                    re.I,
+                )
+                or (
+                    has_mesh_term
+                    and re.search(
+                        r"\b(?:jacobian|skewness|orthogonality|aspect ratio|"
+                        r"mesh distortion|discretization error)\b",
+                        text,
+                        re.I,
+                    )
+                )
+            )
             if mesh_domain in {"computational", "comparative"} and any(
                 term in text for term in medical_terms
             ):
                 continue
             if mesh_domain == "computational" and not computational_hit:
+                continue
+            if mesh_domain == "computational" and not mesh_quality_context_hit:
+                # A paper that merely uses a structured grid (for example an
+                # urban-flood solver) is not evidence about grid quality itself.
                 continue
             if mesh_domain == "computational" and any(
                 term in text for term in computational_mesh_noise
@@ -1349,7 +1382,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.4.0 "
+                        "EvoAgent/0.4.1 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

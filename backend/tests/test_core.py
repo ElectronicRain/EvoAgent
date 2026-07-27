@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date
 
 import pytest
@@ -139,7 +140,7 @@ def test_web_research_extracts_short_subject_and_constraints_from_workflow_promp
     assert service.explicit_source_count(task) == 40
     assert service.requested_year_range(task) == (date.today().year - 10, date.today().year)
     queries = service.query_variants(task)
-    assert queries[0] == '"mesh quality assessment" CFD finite element numerical simulation'
+    assert queries[0] == '"mesh quality assessment"'
     assert len(queries) == 4
     assert all("【" not in query and len(query) < 100 for query in queries)
 
@@ -220,9 +221,9 @@ def test_academic_research_extracts_human_pose_topic_from_workflow_instruction()
     queries = service.query_variants(task)
     assert queries == [
         '"human pose estimation"',
-        '"human pose estimation" survey',
-        '"human pose estimation" deep learning transformer 2D 3D',
-        '"human pose estimation" benchmark dataset evaluation',
+        '"human pose estimation survey"',
+        '"human pose estimation deep learning transformer"',
+        '"human pose estimation benchmark dataset evaluation"',
     ]
     assert all("工作流" not in query and "SCI" not in query and "论文" not in query for query in queries)
 
@@ -267,6 +268,20 @@ def test_crossref_query_uses_only_explicit_quoted_concepts():
     assert service.crossref_query("mesh quality CFD") == "mesh quality CFD"
 
 
+def test_all_structured_mesh_queries_end_at_the_closing_quote():
+    service = WebResearchService()
+
+    queries = service.query_variants("二维结构化网格质量评估文献综述")
+
+    assert queries == [
+        '"2D structured grid mesh quality assessment"',
+        '"structured mesh quality metrics"',
+        '"structured grid quality"',
+        '"structured mesh quality indicators"',
+    ]
+    assert all(re.fullmatch(r'"[^\"]+"', query) for query in queries)
+
+
 def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
     service = WebResearchService()
     task = "数值计算网格质量评估近 5 年文献综述"
@@ -293,6 +308,17 @@ def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
             "doi": "10.1000/medical",
             "source": "Crossref",
             "description": "hernia and pelvic surgery",
+            "published_year": date.today().year,
+        },
+        {
+            "title": (
+                "Accelerating urban flood modelling using a GPU-parallel "
+                "non-uniform structured grid and sub-grid approach"
+            ),
+            "url": "https://doi.org/10.1000/flood",
+            "doi": "10.1000/flood",
+            "source": "Crossref",
+            "description": "A high-quality evaluation of rapid city-scale flood simulation.",
             "published_year": date.today().year,
         },
     ]
