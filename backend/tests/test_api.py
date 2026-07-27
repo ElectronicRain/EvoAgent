@@ -271,9 +271,10 @@ def test_web_research_relevance_rejects_structural_engineering_noise():
         "structured_mesh",
         "mesh",
         "quality",
+        "computational_mesh",
     ]
     assert web_research_service.query_variants(task)[0] == (
-        "2D structured grid mesh quality assessment"
+        "2D structured grid mesh quality assessment CFD finite element numerical simulation"
     )
 
 
@@ -321,6 +322,32 @@ def test_general_search_expands_to_comprehensive_queries():
         "量子计算产业 最新 数据 报告",
         "量子计算产业 背景 现状",
     ]
+
+
+def test_research_browser_verification_can_be_skipped_without_persisting_cookies(client):
+    from backend.app.services.web_research import web_research_service
+
+    verification_id = web_research_service._begin_verification(
+        provider="Google Scholar",
+        url="https://scholar.google.com/scholar?q=mesh",
+        query="mesh quality",
+    )
+
+    active = client.get("/api/research-browser/verifications")
+    assert active.status_code == 200
+    assert any(item["verification_id"] == verification_id for item in active.json())
+
+    completed = client.post(
+        "/api/research-browser/verifications/complete",
+        json={
+            "verification_id": verification_id,
+            "approved": False,
+            "url": "https://scholar.google.com/scholar?q=mesh",
+            "cookies": [],
+        },
+    )
+    assert completed.status_code == 200
+    assert completed.json()["approved"] is False
 
 
 def test_360_search_parser_prefers_direct_result_url():

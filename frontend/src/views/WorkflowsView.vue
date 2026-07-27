@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'v
 import {
   Activity, Bot, Box, Braces, ChevronDown, ChevronRight, CircleStop, Code2, Database, Download,
   Check, FileText, GitBranch, GitMerge,
-  GripVertical, Library, Maximize2, Minimize2, Minus, MousePointer2,
+  Globe2, GripVertical, Library, Maximize2, Minimize2, Minus, MousePointer2,
   Pause, RotateCw, Send, Sparkles, Square,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Play, Plus, Save, Search, Settings2, ShieldCheck, Trash2, Workflow, X, ZoomIn,
@@ -11,6 +11,7 @@ import {
 } from 'lucide-vue-next'
 import FloatingPanel from '../components/FloatingPanel.vue'
 import PageHeader from '../components/PageHeader.vue'
+import ResearchBrowserCenter from '../components/ResearchBrowserCenter.vue'
 import RichAgentMessage from '../components/RichAgentMessage.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import WorkflowExpertWindow from '../components/WorkflowExpertWindow.vue'
@@ -55,6 +56,18 @@ type RunTimelineItem = {
   tone: 'info' | 'success' | 'warning' | 'error'
   elapsed: number
 }
+type ResearchVisit = {
+  id: string
+  url: string
+  title: string
+  provider: string
+  status: string
+  nodeId: string
+  nodeLabel: string
+  verificationId?: string
+  doi?: string
+  publishedYear?: number
+}
 type ClarificationOption = { value: string; label: string; description?: string }
 type ClarificationQuestion = {
   id: string
@@ -97,7 +110,7 @@ const pendingApprovals = ref<Entity[]>([]), decidingApprovalId = ref('')
 const runSecurityProfile = ref('default'), runPermissionMode = ref('inherit'), runApprovalPolicyId = ref('')
 const nodeRunStates = ref<Record<string, NodeRunState>>({})
 const runTimeline = ref<RunTimelineItem[]>([])
-const runPanelTab = ref<'timeline' | 'result'>('timeline')
+const runPanelTab = ref<'timeline' | 'web' | 'result'>('timeline')
 const activeRunNodeId = ref(''), runStartedAt = ref(0), runElapsedSeconds = ref(0)
 const lastRunEventId = ref(0)
 let timelineSequence = 0
@@ -111,6 +124,9 @@ const clarificationOpen = ref(false), clarificationChecking = ref(false), clarif
 const clarificationResult = ref<ClarificationResult | null>(null)
 const clarificationAnswers = ref<Record<string, any>>({})
 const clarificationOriginalTask = ref('')
+const researchBrowserOpen = ref(false)
+const researchVisits = ref<ResearchVisit[]>([])
+const pendingResearchVerifications = computed(() => researchVisits.value.filter(item => item.status === 'verification_required').length)
 const movingNodeId = ref('')
 const canvasPan = reactive({ active: false, pointerId: -1, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 })
 const paletteDrag = reactive({ item: null as Entity | null, kind: 'agent' as 'agent' | 'knowledge' | 'component', active: false, startX: 0, startY: 0, x: 0, y: 0 })
@@ -268,6 +284,7 @@ function persistRunState() {
     task: task.value,
     output: output.value,
     runPanelTab: runPanelTab.value,
+    researchVisits: researchVisits.value,
     nodeRunStates: nodeRunStates.value,
     runTimeline: runTimeline.value,
     runSecurityProfile: runSecurityProfile.value,
@@ -289,7 +306,8 @@ function applyStoredRunState(state: Entity) {
   lastRunEventId.value = Number(state.lastRunEventId || 0)
   task.value = state.task || task.value
   output.value = state.output || ''
-  runPanelTab.value = state.runPanelTab === 'result' ? 'result' : 'timeline'
+  runPanelTab.value = ['timeline', 'web', 'result'].includes(state.runPanelTab) ? state.runPanelTab : 'timeline'
+  researchVisits.value = state.researchVisits || []
   nodeRunStates.value = state.nodeRunStates || {}
   runTimeline.value = state.runTimeline || []
   timelineSequence = Math.max(0, ...runTimeline.value.map(item => Number(item.id) || 0))
@@ -404,6 +422,93 @@ function appendRunTimeline(
   ].slice(-160)
 }
 
+function researchVisitId(url: string) {
+  let hash = 2166136261
+  for (let index = 0; index < url.length; index += 1) {
+    hash ^= url.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `site-${(hash >>> 0).toString(36)}`
+}
+
+function upsertResearchVisit(
+  value: Entity,
+  nodeId: string,
+  status: string,
+  overrides: Entity = {},
+) {
+  const url = String(value.url || value.verification_url || value.provider_url || value.search_url || '')
+  if (!url.startsWith('http://') && !url.startsWith('https://')) return
+  const id = researchVisitId(url)
+  const existing = researchVisits.value.find(item => item.id === id)
+  const next: ResearchVisit = {
+    id,
+    url,
+    title: String(value.title || value.query || value.search_label || existing?.title || url),
+    provider: String(value.source || value.provider || value.search_label || existing?.provider || '网络来源'),
+    status,
+    nodeId,
+    nodeLabel: nodes.value.find(node => node.id === nodeId)?.label || existing?.nodeLabel || nodeId || '工作流',
+    verificationId: String(value.verification_id || existing?.verificationId || '') || undefined,
+    doi: String(value.doi || existing?.doi || '') || undefined,
+    publishedYear: Number(value.published_year || existing?.publishedYear || 0) || undefined,
+    ...overrides,
+  }
+  if (existing) Object.assign(existing, next)
+  else researchVisits.value = [...researchVisits.value, next].slice(-160)
+}
+
+function recordResearchEvent(event: Entity, nodeId: string) {
+  const type = String(event.type || '')
+  if (type === 'web_search_started') {
+    const targets = event.provider_urls || [{ ...event, url: event.search_url }]
+    for (const target of targets) {
+      upsertResearchVisit(
+        { ...event, ...target, title: `${target.provider || event.search_label}：${event.query}` },
+        nodeId,
+        'searching',
+      )
+    }
+  } else if (type === 'web_search_results' || type === 'research_sources_selected') {
+    if (type === 'web_search_results') {
+      for (const visit of researchVisits.value) {
+        if (visit.status === 'searching' && visit.title.endsWith(String(event.query || ''))) visit.status = 'searched'
+      }
+    }
+    for (const result of event.results || []) upsertResearchVisit(result, nodeId, 'discovered')
+  } else if (type === 'web_fetch_started') {
+    upsertResearchVisit(event, nodeId, 'visiting')
+  } else if (type === 'web_page_fetched') {
+    upsertResearchVisit(event, nodeId, String(event.status || 'fetched'))
+  } else if (type === 'web_search_provider_error') {
+    upsertResearchVisit(
+      { ...event, url: event.verification_url || event.provider_url || event.search_url },
+      nodeId,
+      event.verification_required ? 'verification_required' : 'failed',
+    )
+  } else if (type === 'human_verification_required') {
+    upsertResearchVisit(event, nodeId, 'verification_required')
+    researchBrowserOpen.value = true
+    runPanelTab.value = 'web'
+    runCollapsed.value = false
+  } else if (type === 'human_verification_completed') {
+    const visit = researchVisits.value.find(item => item.verificationId === event.verification_id)
+    if (visit) visit.status = 'verified'
+  } else if (['human_verification_skipped', 'human_verification_timed_out'].includes(type)) {
+    const visit = researchVisits.value.find(item => item.verificationId === event.verification_id)
+    if (visit) visit.status = 'skipped'
+  } else if (type === 'human_verification_retry_failed') {
+    const visit = researchVisits.value.find(item => item.verificationId === event.verification_id)
+    if (visit) visit.status = 'failed'
+  }
+}
+
+function markResearchVerification(payload: { verificationId: string; approved: boolean }) {
+  const visit = researchVisits.value.find(item => item.verificationId === payload.verificationId)
+  if (visit) visit.status = payload.approved ? 'verified' : 'skipped'
+  persistRunState()
+}
+
 function agentEventInfo(event: Entity) {
   const type = String(event.type || 'agent_progress')
   const rows: Record<string, { title: string; stage: string; progress: number }> = {
@@ -426,6 +531,12 @@ function agentEventInfo(event: Entity) {
     web_search_started: { title: '正在检索外部资料', stage: '联网检索 · 搜索', progress: 30 },
     web_search_results: { title: '取得一批检索结果', stage: '联网检索 · 筛选', progress: 38 },
     web_search_provider_error: { title: '一个检索源暂时不可用', stage: '联网检索 · 数据源', progress: 38 },
+    human_verification_required: { title: '检索站点等待机器人验证', stage: '联网检索 · 人工验证', progress: 39 },
+    human_verification_retrying: { title: '已同步验证会话，正在重试', stage: '联网检索 · 重试', progress: 40 },
+    human_verification_completed: { title: '人工验证后检索完成', stage: '联网检索 · 已恢复', progress: 42 },
+    human_verification_retry_failed: { title: '验证后仍无法访问，已切换备用源', stage: '联网检索 · 备用源', progress: 42 },
+    human_verification_skipped: { title: '已跳过人工验证', stage: '联网检索 · 备用源', progress: 42 },
+    human_verification_timed_out: { title: '人工验证等待超时', stage: '联网检索 · 备用源', progress: 42 },
     research_sources_selected: { title: '已选定可信资料来源', stage: '联网检索 · 来源选择', progress: 45 },
     research_requirements_unmet: { title: '真实来源数量不足，已停止生成', stage: '联网检索 · 前置校验', progress: 48 },
     web_fetch_started: { title: '正在读取来源正文', stage: '联网检索 · 正文抓取', progress: 50 },
@@ -472,7 +583,10 @@ function agentEventInfo(event: Entity) {
   else if (type === 'web_search_started') detail = String(event.query || '')
   else if (type === 'web_search_results') detail = `取得 ${event.count || 0} 条 · 排除 ${event.discarded || 0} 条`
   else if (type === 'web_search_provider_error') detail = `${event.provider || '检索源'} · ${event.error_type || ''} · ${event.error || '暂时不可用'}`
-  else if (type === 'research_sources_selected') detail = `选定 ${event.count || 0} 个可追溯来源`
+  else if (type === 'human_verification_required') detail = `${event.provider || '检索站点'} · 等待 ${event.wait_seconds || 90} 秒 · 可在“访问网站”中处理`
+  else if (type === 'human_verification_completed') detail = `重试取得 ${event.count || 0} 条结果`
+  else if (type.startsWith('human_verification_')) detail = String(event.error || event.message || event.provider || '')
+  else if (type === 'research_sources_selected') detail = `选定 ${event.count || 0} 个可追溯来源 · 近 3 年 ${event.recent_3_year_count || 0} 篇 · 近 5 年 ${event.recent_5_year_count || 0} 篇${event.research_scope ? ` · ${event.research_scope}` : ''}`
   else if (type === 'research_requirements_unmet') detail = `要求 ${event.required_sources || 0} 条 · 实际 ${event.actual_sources || 0} 条 · 未调用模型综合`
   else if (type === 'research_context_ready') detail = `${event.sources || 0} 个来源 · ${event.context_chars || 0}/${event.context_char_limit || 0} 字符`
   else if (type === 'web_page_fetched') detail = `${event.title || event.url || ''} · ${event.status || '已读取'}`
@@ -487,7 +601,7 @@ function agentEventInfo(event: Entity) {
     ...info,
     type,
     detail,
-    tone: (type === 'error' ? 'error' : type.includes('failed') || type.includes('skipped') ? 'warning' : type === 'run_completed' ? 'success' : 'info') as RunTimelineItem['tone'],
+    tone: (type === 'error' ? 'error' : type.includes('failed') || type.includes('skipped') || type.includes('verification_required') || type.includes('timed_out') ? 'warning' : type === 'run_completed' || type.includes('verification_completed') ? 'success' : 'info') as RunTimelineItem['tone'],
   }
 }
 
@@ -530,6 +644,7 @@ function handleWorkflowStep(step: Entity) {
     output.value = `第 ${step.iteration || 1} 轮 · 正在执行：${step.label || step.node_id}…`
   } else if (step.type === 'workflow_agent_event') {
     const event = step.agent_event || {}
+    recordResearchEvent(event, step.node_id || '')
     const info = agentEventInfo(event)
     const previous = nodeRuntime(step.node_id)
     updateNodeRuntime(step.node_id, {
@@ -874,6 +989,7 @@ function openWorkflow(workflow: Entity) {
   pendingApprovals.value = []
   nodeRunStates.value = {}
   runTimeline.value = []
+  researchVisits.value = []
   activeRunNodeId.value = ''
   currentRunId.value = ''
   workflowRunning.value = false
@@ -911,6 +1027,7 @@ function newWorkflow() {
   pendingApprovals.value = []
   nodeRunStates.value = {}
   runTimeline.value = []
+  researchVisits.value = []
   activeRunNodeId.value = ''
   currentRunId.value = ''
   workflowRunning.value = false
@@ -1509,6 +1626,7 @@ async function runWorkflow(skipClarification = false) {
   runArtifacts.value = []
   pendingApprovals.value = []
   runTimeline.value = []
+  researchVisits.value = []
   runPanelTab.value = 'timeline'
   activeRunNodeId.value = ''
   runStartedAt.value = Date.now()
@@ -1905,6 +2023,7 @@ onBeforeUnmount(() => {
             <div class="run-result-actions">
               <nav>
                 <button :class="{active:runPanelTab==='timeline'}" @click="runPanelTab='timeline'">执行过程 <b>{{ runTimeline.length }}</b></button>
+                <button :class="{active:runPanelTab==='web'}" @click="runPanelTab='web'">访问网站 <b>{{ researchVisits.length }}</b><i v-if="pendingResearchVerifications">{{ pendingResearchVerifications }}</i></button>
                 <button :class="{active:runPanelTab==='result'}" @click="runPanelTab='result'">最终成果</button>
               </nav>
               <button v-if="currentRunId && !workflowRunning" class="word-download-link" :disabled="!!exportingDocumentId" @click="downloadWorkflowWord"><Download :size="11" />{{ exportingDocumentId==='run' ? '生成中…' : '下载 Word' }}</button>
@@ -1926,6 +2045,15 @@ onBeforeUnmount(() => {
               <i /><div><header><strong>{{ item.title }}</strong><time>+{{ item.elapsed }}s</time></header><span>{{ item.nodeLabel }}</span><p v-if="item.detail">{{ item.detail }}</p></div>
             </article>
             <div v-if="!runTimeline.length" class="run-activity-empty">运行后将在这里实时展示 Agent 内部步骤。</div>
+          </div>
+          <div v-else-if="runPanelTab==='web'" class="run-research-overview">
+            <div v-if="researchVisits.length" class="run-research-sites">
+              <article v-for="visit in researchVisits.slice(-8).reverse()" :key="visit.id" :class="visit.status">
+                <Globe2 :size="12" /><span><strong>{{ visit.title }}</strong><small>{{ visit.provider }} · {{ visit.status==='verification_required' ? '等待机器人验证' : visit.status }}</small></span>
+              </article>
+            </div>
+            <div v-else class="run-activity-empty">当前尚无联网访问记录。</div>
+            <button class="research-center-launch" @click="researchBrowserOpen=true"><Globe2 :size="13" />打开联网访问中心<span v-if="pendingResearchVerifications">待验证 {{ pendingResearchVerifications }}</span></button>
           </div>
           <div v-else class="result-box workflow-markdown-result" :class="{running:workflowRunning,empty:!output}">
             <RichAgentMessage v-if="output" :content="workflowOutputMarkdown(output)" />
@@ -2015,6 +2143,11 @@ onBeforeUnmount(() => {
       </button>
     </template>
   </FloatingPanel>
+  <ResearchBrowserCenter
+    v-model="researchBrowserOpen"
+    :visits="researchVisits"
+    @verification-completed="markResearchVerification"
+  />
   <WorkflowExpertWindow :open="expertOpen" :definition="buildDefinition()" :workflow-name="workflowForm.name" :workflow-description="workflowForm.description" @close="expertOpen=false" @apply="applyExpertProposal" />
 </template>
 

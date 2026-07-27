@@ -849,7 +849,9 @@ class AgentEngine:
                 system_prompt += (
                     "\n\n系统已经代表你完成了真实联网检索，以下资料来自本轮实时搜索。"
                     "必须基于这些来源回答并给出可点击链接；不得声称自己无法联网、网络访问受限，"
-                    "也不得把模型训练记忆冒充本轮检索结果。\n\n" + research_context
+                    "也不得把模型训练记忆冒充本轮检索结果。"
+                    "严禁添加 Gap Filler、Representative Work、To be verified 或任何占位文献；"
+                    "文献表中的每一项必须与下方真实来源一一对应。\n\n" + research_context
                 )
                 await emit(
                     {

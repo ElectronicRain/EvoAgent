@@ -32,6 +32,27 @@ def test_explicit_review_does_not_repeat_answers_already_in_task():
     assert result["questions"] == []
 
 
+def test_ambiguous_mesh_review_asks_for_the_research_domain():
+    result = workflow_clarification_service.analyze("生成一篇网格质量评估领域综述")
+
+    assert "mesh_research_domain" in question_ids(result)
+    question = next(item for item in result["questions"] if item["id"] == "mesh_research_domain")
+    assert question["default"] == "computational"
+    assert {item["value"] for item in question["options"]} == {
+        "computational",
+        "visual",
+        "comparative",
+    }
+
+
+def test_explicit_computational_mesh_review_does_not_ask_domain_again():
+    result = workflow_clarification_service.analyze(
+        "用中文撰写一篇数值计算网格的系统综述，检索近5年不少于30篇文献，重点比较 CFD 与有限元质量指标。"
+    )
+
+    assert "mesh_research_domain" not in question_ids(result)
+
+
 def test_data_analysis_and_implementation_use_different_requirements():
     analysis = workflow_clarification_service.analyze("分析一下销售数据")
     implementation = workflow_clarification_service.analyze("帮我开发一个库存管理功能")

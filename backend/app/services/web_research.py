@@ -8,12 +8,22 @@ from datetime import date
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, quote_plus, urlparse
+from uuid import uuid4
 from xml.etree import ElementTree
 
 import httpx
 
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class HumanVerificationRequired(RuntimeError):
+    def __init__(self, provider: str, url: str, status_code: int | None = None) -> None:
+        self.provider = provider
+        self.url = url
+        self.status_code = status_code
+        detail = f"HTTP {status_code}" if status_code else "检测到机器人验证页"
+        super().__init__(f"{provider} 需要用户完成机器人验证（{detail}）")
 
 
 class TextExtractor(HTMLParser):
@@ -41,6 +51,12 @@ class TextExtractor(HTMLParser):
 
 
 class WebResearchService:
+    verification_wait_seconds = 90
+    safe_scholar_cookie_names = {
+        "GSP",
+        "GOOGLE_ABUSE_EXEMPTION",
+        "_GRECAPTCHA",
+    }
     trigger = re.compile(
         r"综述|文献|资料|检索|搜索|查找|调查|调研|查询|了解|联网|网络|网页|"
         r"review|survey|search|research",
@@ -51,6 +67,42 @@ class WebResearchService:
         r"研究现状|研究进展|systematic review|literature review|paper|citation",
         re.I,
     )
+
+    def __init__(self) -> None:
+        self._verification_sessions: dict[str, dict[str, Any]] = {}
+        self._scholar_cookie_header = ""
+
+    @staticmethod
+    def mesh_domain(task: str) -> str | None:
+        text = task.lower()
+        if not re.search(r"网格质量|mesh\s+quality|grid\s+quality", text, re.I):
+            return None
+        comparative = re.search(
+            r"两者|对比|跨领域|computational.{0,20}visual|visual.{0,20}computational",
+            text,
+            re.I,
+        )
+        if comparative:
+            return "comparative"
+        visual = re.search(
+            r"视觉|感知|纹理|着色|压缩|3d\s*(?:graphics?|model)|"
+            r"visual|perceptual|textured|colored\s+mesh|multimedia",
+            text,
+            re.I,
+        )
+        numerical = re.search(
+            r"数值计算|数值模拟|工程仿真|有限元|有限体积|偏微分|"
+            r"cfd|fea|cae|finite\s+(?:element|volume)|numerical|solver|discretization|"
+            r"jacobian|skewness|orthogonality|virtual\s+element",
+            text,
+            re.I,
+        )
+        if visual and not numerical:
+            return "visual"
+        # A bare "mesh quality" request is ambiguous. The workflow clarification
+        # gate asks the user; direct Agent requests default to numerical simulation,
+        # which is the engineering meaning used by EvoAgent's mesh knowledge bases.
+        return "computational"
 
     def should_research(self, task: str) -> bool:
         local_path = re.search(
@@ -101,9 +153,13 @@ class WebResearchService:
         if explicit:
             start, end = sorted((int(explicit.group(1)), int(explicit.group(2))))
             return max(1900, start), min(current_year + 1, end)
-        recent = re.search(r"(?:近|最近|过去)\s*(\d{1,2})\s*年", task)
+        recent = re.search(
+            r"(?:(?:近|最近|过去)\s*(\d{1,2})\s*年|(?:recent|past)\s+(\d{1,2})\s+years?)",
+            task,
+            re.I,
+        )
         if recent:
-            years = max(1, min(int(recent.group(1)), 50))
+            years = max(1, min(int(recent.group(1) or recent.group(2)), 50))
             return current_year - years, current_year
         since = re.search(r"(?:自|从)\s*(19\d{2}|20\d{2})\s*年?(?:以来|起)", task)
         if since:
@@ -142,6 +198,7 @@ class WebResearchService:
     def query_variants(self, task: str) -> list[str]:
         mode = self.research_mode(task)
         subject = self.research_subject(task)
+        mesh_domain = self.mesh_domain(task)
         institution = self.institution_name(task)
         if institution and mode == "web":
             return [
@@ -201,14 +258,46 @@ class WebResearchService:
                 academic_base,
                 re.I,
             ):
-                values.extend(
-                    [
-                        '"mesh quality assessment" review metrics',
-                        '"mesh quality metrics" Jacobian skewness orthogonality',
-                        '"mesh quality evaluation" finite element CFD',
-                        '"mesh quality" machine learning prediction',
+                if mesh_domain == "computational":
+                    # Never use a bare "mesh quality assessment" query here: it is
+                    # dominated by perceptual quality papers about textured 3D media.
+                    if "structured" in academic_base.lower():
+                        values = [
+                            f"{academic_base} CFD finite element numerical simulation",
+                            '"structured mesh quality metrics" Jacobian skewness orthogonality',
+                            '"structured grid quality" finite volume solver evaluation',
+                            '"structured mesh quality indicators" discretization error',
+                        ]
+                    else:
+                        values = [
+                            '"mesh quality assessment" CFD finite element numerical simulation',
+                            '"mesh quality metrics" Jacobian skewness orthogonality solver',
+                            '"unstructured mesh quality" finite volume finite element evaluation',
+                            '"mesh quality indicators" discretization error mesh optimization',
+                        ]
+                elif mesh_domain == "visual":
+                    values = [
+                        '"3D mesh visual quality assessment"',
+                        '"textured mesh quality assessment" perceptual metric',
+                        '"no-reference mesh quality" deep learning',
+                        '"colored mesh quality" visual perception',
                     ]
-                )
+                elif mesh_domain == "comparative":
+                    values = [
+                        '"mesh quality indicators" numerical simulation finite element',
+                        '"mesh quality metrics" Jacobian discretization error',
+                        '"3D mesh visual quality assessment" perceptual metric',
+                        '"textured mesh quality assessment" deep learning',
+                    ]
+                else:
+                    values.extend(
+                        [
+                            '"mesh quality assessment" review metrics',
+                            '"mesh quality metrics" Jacobian skewness orthogonality',
+                            '"mesh quality evaluation" finite element CFD',
+                            '"mesh quality" machine learning prediction',
+                        ]
+                    )
             else:
                 values.extend(
                     [
@@ -234,6 +323,7 @@ class WebResearchService:
         queries = self.query_variants(task)
         target_sources = self.requested_source_count(task) if mode == "academic" else 12
         year_range = self.requested_year_range(task) if mode == "academic" else None
+        mesh_domain = self.mesh_domain(task)
         await on_event(
             {
                 "type": "research_planning",
@@ -242,9 +332,11 @@ class WebResearchService:
                 "mode": mode,
                 "target_sources": target_sources,
                 "year_range": list(year_range) if year_range else None,
+                "research_scope": mesh_domain,
             }
         )
         candidates: list[dict[str, Any]] = []
+        verification_offered = False
         async with httpx.AsyncClient(
             timeout=15,
             follow_redirects=True,
@@ -252,7 +344,33 @@ class WebResearchService:
         ) as client:
             for query in queries:
                 search_url = (
-                    self.scholar_url(query) if mode == "academic" else self.web_search_url(query)
+                    self.scholar_search_url(query)
+                    if mode == "academic"
+                    else self.web_search_url(query)
+                )
+                provider_urls = (
+                    [
+                        {"provider": "Google Scholar", "url": search_url},
+                        {
+                            "provider": "Crossref",
+                            "url": (
+                                "https://api.crossref.org/works?query.bibliographic="
+                                f"{quote_plus(query)}"
+                            ),
+                        },
+                    ]
+                    if mode == "academic"
+                    else [
+                        {"provider": "360 Web Search", "url": self.web_search_url(query)},
+                        {
+                            "provider": "DuckDuckGo",
+                            "url": f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+                        },
+                        {
+                            "provider": "Bing",
+                            "url": f"https://www.bing.com/search?q={quote_plus(query)}",
+                        },
+                    ]
                 )
                 await on_event(
                     {
@@ -264,6 +382,7 @@ class WebResearchService:
                             "Google Scholar 学术检索" if mode == "academic" else "普通网页检索"
                         ),
                         "scholar_url": search_url if mode == "academic" else None,
+                        "provider_urls": provider_urls,
                     }
                 )
                 results, provider_errors = await self._search(
@@ -274,6 +393,24 @@ class WebResearchService:
                     year_range=year_range,
                 )
                 for provider_error in provider_errors:
+                    provider_target = next(
+                        (
+                            item["url"]
+                            for item in provider_urls
+                            if item["provider"] == provider_error.get("provider")
+                        ),
+                        search_url,
+                    )
+                    provider_error["provider_url"] = provider_target
+                    if provider_error.get("verification_required") and not verification_offered:
+                        verification_offered = True
+                        verification_id = self._begin_verification(
+                            provider=str(provider_error.get("provider") or "Google Scholar"),
+                            url=str(provider_error.get("verification_url") or provider_target),
+                            query=query,
+                        )
+                        provider_error["verification_id"] = verification_id
+                        provider_error["verification_wait_seconds"] = self.verification_wait_seconds
                     await on_event(
                         {
                             "type": "web_search_provider_error",
@@ -281,6 +418,63 @@ class WebResearchService:
                             **provider_error,
                         }
                     )
+                    verification_id = str(provider_error.get("verification_id") or "")
+                    if verification_id:
+                        await on_event(
+                            {
+                                "type": "human_verification_required",
+                                "verification_id": verification_id,
+                                "provider": provider_error.get("provider"),
+                                "query": query,
+                                "url": provider_error.get("verification_url") or search_url,
+                                "wait_seconds": self.verification_wait_seconds,
+                                "message": "检索站点要求机器人验证，工作流已等待用户处理。",
+                            }
+                        )
+                        decision = await self._wait_for_verification(verification_id)
+                        if decision.get("approved"):
+                            await on_event(
+                                {
+                                    "type": "human_verification_retrying",
+                                    "verification_id": verification_id,
+                                    "provider": provider_error.get("provider"),
+                                    "query": query,
+                                }
+                            )
+                            try:
+                                retry_results = await self._search_google_scholar(client, query)
+                                results.extend(retry_results)
+                                await on_event(
+                                    {
+                                        "type": "human_verification_completed",
+                                        "verification_id": verification_id,
+                                        "provider": provider_error.get("provider"),
+                                        "query": query,
+                                        "count": len(retry_results),
+                                    }
+                                )
+                            except Exception as exc:
+                                await on_event(
+                                    {
+                                        "type": "human_verification_retry_failed",
+                                        "verification_id": verification_id,
+                                        "provider": provider_error.get("provider"),
+                                        "query": query,
+                                        "error": str(exc)[:240],
+                                    }
+                                )
+                        else:
+                            await on_event(
+                                {
+                                    "type": "human_verification_skipped"
+                                    if decision.get("skipped")
+                                    else "human_verification_timed_out",
+                                    "verification_id": verification_id,
+                                    "provider": provider_error.get("provider"),
+                                    "query": query,
+                                    "message": "已改用其他检索源继续，不会伪造缺失资料。",
+                                }
+                            )
                 relevant = self._rank_results(task, results)
                 await on_event(
                     {
@@ -294,6 +488,11 @@ class WebResearchService:
                                 "title": item["title"],
                                 "url": item["url"],
                                 "scholar_url": item.get("scholar_url"),
+                                "source": item.get("source", "Web"),
+                                "doi": item.get("doi"),
+                                "published_year": item.get("published_year"),
+                                "authors": item.get("authors", []),
+                                "venue": item.get("venue"),
                                 "relevance": item.get("relevance", 0),
                                 "credibility": item.get("credibility"),
                             }
@@ -304,10 +503,27 @@ class WebResearchService:
                 candidates.extend(relevant)
 
             sources = self._rank_results(task, candidates)[:target_sources]
+            current_year = date.today().year
             await on_event(
                 {
                     "type": "research_sources_selected",
                     "count": len(sources),
+                    "research_scope": mesh_domain,
+                    "recent_3_year_count": sum(
+                        1
+                        for item in sources
+                        if item.get("published_year")
+                        and int(item["published_year"]) >= current_year - 2
+                    ),
+                    "recent_5_year_count": sum(
+                        1
+                        for item in sources
+                        if item.get("published_year")
+                        and int(item["published_year"]) >= current_year - 4
+                    ),
+                    "providers": sorted(
+                        {str(item.get("source") or "Web") for item in sources}
+                    ),
                     "results": [
                         {
                             "title": item["title"],
@@ -315,6 +531,10 @@ class WebResearchService:
                             "source": item.get("source", "Web"),
                             "mode": mode,
                             "scholar_url": item.get("scholar_url"),
+                            "doi": item.get("doi"),
+                            "published_year": item.get("published_year"),
+                            "authors": item.get("authors", []),
+                            "venue": item.get("venue"),
                             "relevance": item.get("relevance", 0),
                             "credibility": item.get("credibility"),
                         }
@@ -340,6 +560,9 @@ class WebResearchService:
                         "index": index,
                         "url": source["url"],
                         "title": source["title"],
+                        "source": source.get("source", "Web"),
+                        "doi": source.get("doi"),
+                        "published_year": source.get("published_year"),
                         "scholar_url": source.get("scholar_url"),
                         "credibility": source.get("credibility"),
                     }
@@ -356,6 +579,9 @@ class WebResearchService:
                         "index": index,
                         "url": item["url"],
                         "title": item["title"],
+                        "source": item.get("source", "Web"),
+                        "doi": item.get("doi"),
+                        "published_year": item.get("published_year"),
                         "scholar_url": item.get("scholar_url"),
                         "credibility": item.get("credibility"),
                         "status": item["status"],
@@ -376,8 +602,87 @@ class WebResearchService:
                 )
         return enriched
 
+    def _begin_verification(self, *, provider: str, url: str, query: str) -> str:
+        verification_id = str(uuid4())
+        self._verification_sessions[verification_id] = {
+            "id": verification_id,
+            "provider": provider,
+            "url": url,
+            "query": query,
+            "event": asyncio.Event(),
+            "approved": False,
+            "skipped": False,
+        }
+        return verification_id
+
+    async def _wait_for_verification(self, verification_id: str) -> dict[str, Any]:
+        session = self._verification_sessions.get(verification_id)
+        if not session:
+            return {"approved": False, "skipped": True}
+        try:
+            await asyncio.wait_for(
+                session["event"].wait(),
+                timeout=self.verification_wait_seconds,
+            )
+            return {
+                "approved": bool(session.get("approved")),
+                "skipped": bool(session.get("skipped")),
+            }
+        except TimeoutError:
+            return {"approved": False, "skipped": False}
+        finally:
+            self._verification_sessions.pop(verification_id, None)
+
+    def active_verifications(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "verification_id": key,
+                "provider": value["provider"],
+                "url": value["url"],
+                "query": value["query"],
+            }
+            for key, value in self._verification_sessions.items()
+        ]
+
+    def complete_verification(
+        self,
+        verification_id: str,
+        *,
+        approved: bool,
+        url: str,
+        cookies: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        session = self._verification_sessions.get(verification_id)
+        if not session:
+            raise LookupError("该人工验证已经过期或已经处理")
+        expected_host = (urlparse(str(session["url"])).hostname or "").lower()
+        submitted_host = (urlparse(url).hostname or "").lower()
+        if approved and expected_host != submitted_host:
+            raise ValueError("验证网页与待处理检索站点不匹配")
+
+        accepted_cookies: list[str] = []
+        if approved and submitted_host.endswith("google.com"):
+            for item in cookies[:80]:
+                name = str(item.get("name") or "")
+                value = str(item.get("value") or "")
+                if name in self.safe_scholar_cookie_names and value:
+                    accepted_cookies.append(f"{name}={value}")
+            if accepted_cookies:
+                # Session-only: never written to the database, trace or logs.
+                self._scholar_cookie_header = "; ".join(accepted_cookies)
+        session["approved"] = approved
+        session["skipped"] = not approved
+        session["event"].set()
+        return {
+            "accepted": True,
+            "approved": approved,
+            "cookie_names": [item.split("=", 1)[0] for item in accepted_cookies],
+        }
+
     def _rank_results(self, task: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         task_lower = task.lower()
+        mesh_domain = self.mesh_domain(task)
+        year_range = self.requested_year_range(task)
         groups: list[tuple[str, list[str], int, bool]] = []
         institution = self.institution_name(task)
         if institution:
@@ -399,15 +704,123 @@ class WebResearchService:
             groups.append(
                 (
                     "quality",
-                    ["quality", "assessment", "evaluation", "metric", "质量", "评估"],
+                    [
+                        "quality",
+                        "assessment",
+                        "evaluation",
+                        "metric",
+                        "indicator",
+                        "improvement",
+                        "distortion",
+                        "validity",
+                        "质量",
+                        "评估",
+                    ],
                     3,
-                    False,
+                    mesh_domain is not None,
                 )
             )
 
         ranked: dict[str, dict[str, Any]] = {}
         for item in results:
             text = html.unescape(f"{item.get('title', '')} {item.get('description', '')}").lower()
+            text = re.sub(r"[‐‑‒–—−]", "-", text)
+            computational_terms = (
+                "finite element",
+                "finite volume",
+                "virtual element",
+                "computational fluid",
+                "numerical simulation",
+                "numerical analysis",
+                "discretization",
+                "jacobian",
+                "skewness",
+                "orthogonality",
+                "aspect ratio",
+                "element quality",
+                "mesh generation",
+                "mesh optimization",
+                "mesh quality improvement",
+                "mesh smoothing",
+                "mesh untangling",
+                "unstructured mesh",
+                "structured mesh",
+                "structured grid",
+                "adaptive mesh",
+                "anisotropic mesh",
+                "solver",
+                " cfd",
+                " fea",
+                " cae",
+                "有限元",
+                "有限体积",
+                "数值模拟",
+                "网格生成",
+            )
+            visual_terms = (
+                "visual quality",
+                "perceptual quality",
+                "textured mesh",
+                "colored mesh",
+                "blind mesh",
+                "no-reference",
+                "full-reference",
+                "subjective quality",
+                "visual saliency",
+                "compression",
+                "multimedia",
+                "视觉质量",
+                "感知质量",
+                "纹理网格",
+            )
+            medical_terms = (
+                "surgical mesh",
+                "hernia",
+                "urethral",
+                "pelvic",
+                "prosthetic mesh",
+                "mesh complication",
+            )
+            computational_mesh_noise = (
+                "rebar mesh",
+                "wire mesh",
+                "mesh dome",
+                "mesh-free",
+                "meshfree",
+                "screen mesh",
+                "filter mesh",
+                "stent mesh",
+                "eeg head model",
+                "electroencephalography",
+            )
+            computational_hit = any(term in text for term in computational_terms)
+            visual_hit = any(term in text for term in visual_terms)
+            if mesh_domain in {"computational", "comparative"} and any(
+                term in text for term in medical_terms
+            ):
+                continue
+            if mesh_domain == "computational" and not computational_hit:
+                continue
+            if mesh_domain == "computational" and any(
+                term in text for term in computational_mesh_noise
+            ):
+                continue
+            if mesh_domain == "visual" and not visual_hit:
+                continue
+            if mesh_domain == "computational" and visual_hit and not computational_hit:
+                continue
+            published_year = item.get("published_year")
+            if year_range and not published_year:
+                # An undated record cannot prove compliance with an explicit
+                # publication window and must not consume the requested quota.
+                continue
+            if year_range and published_year:
+                try:
+                    year = int(published_year)
+                except (TypeError, ValueError):
+                    year = None
+                if year is not None and not year_range[0] <= year <= year_range[1]:
+                    continue
             matched: list[str] = []
             score = 2 if item.get("source") == "Crossref" else 0
             required_ok = True
@@ -420,6 +833,16 @@ class WebResearchService:
                     required_ok = False
             if groups and not required_ok:
                 continue
+            if computational_hit:
+                matched.append("computational_mesh")
+                score += 7
+            if visual_hit:
+                matched.append("visual_mesh")
+                score += 5
+            if year_range and published_year:
+                year = int(published_year)
+                span = max(1, year_range[1] - year_range[0])
+                score += max(0, min(5, round((year - year_range[0]) / span * 5)))
             if any(name == "quality" for name, *_rest in groups) and "quality" not in matched:
                 # Background work on structured mesh generation is useful, but ranks
                 # below papers that explicitly discuss metrics/evaluation.
@@ -437,8 +860,9 @@ class WebResearchService:
                 if not overlap:
                     continue
                 score += overlap
+            title_key = re.sub(r"[^a-z0-9一-鿿]+", "", str(item.get("title") or "").lower())
             enriched = {**item, "relevance": score, "matched_concepts": matched}
-            key = str(item.get("doi") or item.get("url", "")).lower()
+            key = title_key or str(item.get("doi") or item.get("url", "")).lower()
             current = ranked.get(key)
             if current is None or score > current.get("relevance", 0):
                 ranked[key] = enriched
@@ -452,7 +876,7 @@ class WebResearchService:
         target_sources: int = 12,
         *,
         year_range: tuple[int, int] | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if mode == "academic":
             providers = [
                 ("Google Scholar", self._search_google_scholar(client, query)),
@@ -478,17 +902,24 @@ class WebResearchService:
             return_exceptions=True,
         )
         results: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, Any]] = []
         seen: set[str] = set()
         for (provider_name, _task), batch in zip(providers, batches, strict=True):
             if isinstance(batch, BaseException):
-                errors.append(
-                    {
-                        "provider": provider_name,
-                        "error_type": type(batch).__name__,
-                        "error": str(batch).strip()[:240] or "接口未返回错误正文",
-                    }
-                )
+                error = {
+                    "provider": provider_name,
+                    "error_type": type(batch).__name__,
+                    "error": str(batch).strip()[:240] or "接口未返回错误正文",
+                }
+                if isinstance(batch, HumanVerificationRequired):
+                    error.update(
+                        {
+                            "verification_required": True,
+                            "verification_url": batch.url,
+                            "status_code": batch.status_code,
+                        }
+                    )
+                errors.append(error)
                 continue
             for item in batch:
                 key = item["url"].lower()
@@ -500,17 +931,38 @@ class WebResearchService:
     async def _search_google_scholar(
         self, client: httpx.AsyncClient, query: str
     ) -> list[dict[str, Any]]:
+        search_url = self.scholar_search_url(query)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+            ),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if self._scholar_cookie_header:
+            headers["Cookie"] = self._scholar_cookie_header
         response = await client.get(
             "https://scholar.google.com/scholar",
             params={"hl": "zh-CN", "q": query},
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-                ),
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            },
+            headers=headers,
         )
+        body_lower = response.text.lower()
+        if response.status_code in {403, 429, 503} or any(
+            marker in body_lower
+            for marker in (
+                "unusual traffic",
+                "not a robot",
+                "recaptcha",
+                "/sorry/",
+                "机器人验证",
+                "异常流量",
+            )
+        ):
+            raise HumanVerificationRequired(
+                "Google Scholar",
+                str(response.url) if response.url else search_url,
+                response.status_code,
+            )
         response.raise_for_status()
         items = []
         for block in re.findall(
@@ -534,6 +986,12 @@ class WebResearchService:
             if snippet_match:
                 description = html.unescape(re.sub(r"<[^>]+>", " ", snippet_match.group(1)))
                 description = " ".join(description.split())
+            author_line = ""
+            author_match = re.search(r'<div class="gs_a">([\s\S]*?)</div>', block, flags=re.I)
+            if author_match:
+                author_line = html.unescape(re.sub(r"<[^>]+>", " ", author_match.group(1)))
+                author_line = " ".join(author_line.split())
+            year_match = re.search(r"\b(19\d{2}|20\d{2})\b", author_line)
             if not url.startswith(("http://", "https://")):
                 continue
             items.append(
@@ -542,6 +1000,7 @@ class WebResearchService:
                     "url": url,
                     "scholar_url": self.scholar_url(title),
                     "description": description,
+                    "published_year": int(year_match.group(1)) if year_match else None,
                     "source": "Google Scholar",
                     "credibility": self._credibility(
                         source="Google Scholar",
@@ -708,7 +1167,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.3.20 "
+                        "EvoAgent/0.3.21 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },
@@ -776,6 +1235,10 @@ class WebResearchService:
         value = " ".join(str(title_or_query).split())
         quoted = f'"{value}"'
         return f"https://scholar.google.com/scholar?hl=zh-CN&q={quote_plus(quoted)}"
+
+    def scholar_search_url(self, query: str) -> str:
+        value = " ".join(str(query).split())
+        return f"https://scholar.google.com/scholar?hl=zh-CN&q={quote_plus(value)}"
 
     def web_search_url(self, query: str) -> str:
         return f"https://www.so.com/s?q={quote_plus(query)}"

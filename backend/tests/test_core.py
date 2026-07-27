@@ -139,9 +139,67 @@ def test_web_research_extracts_short_subject_and_constraints_from_workflow_promp
     assert service.explicit_source_count(task) == 40
     assert service.requested_year_range(task) == (date.today().year - 10, date.today().year)
     queries = service.query_variants(task)
-    assert queries[0] == "mesh quality assessment"
+    assert queries[0] == '"mesh quality assessment" CFD finite element numerical simulation'
     assert len(queries) == 4
     assert all("【" not in query and len(query) < 100 for query in queries)
+
+
+def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
+    service = WebResearchService()
+    task = "数值计算网格质量评估近 5 年文献综述"
+    results = [
+        {
+            "title": "Mesh quality indicators for finite element numerical simulation",
+            "url": "https://doi.org/10.1000/numerical",
+            "doi": "10.1000/numerical",
+            "source": "Crossref",
+            "description": "Jacobian, skewness and discretization error",
+            "published_year": date.today().year - 1,
+        },
+        {
+            "title": "No-reference textured mesh visual quality assessment",
+            "url": "https://doi.org/10.1000/visual",
+            "doi": "10.1000/visual",
+            "source": "Crossref",
+            "description": "perceptual multimedia compression",
+            "published_year": date.today().year,
+        },
+        {
+            "title": "Quality assessment for surgical mesh complications",
+            "url": "https://doi.org/10.1000/medical",
+            "doi": "10.1000/medical",
+            "source": "Crossref",
+            "description": "hernia and pelvic surgery",
+            "published_year": date.today().year,
+        },
+    ]
+
+    ranked = service._rank_results(task, results)
+
+    assert [item["doi"] for item in ranked] == ["10.1000/numerical"]
+    assert "computational_mesh" in ranked[0]["matched_concepts"]
+
+
+def test_human_verification_only_accepts_non_login_scholar_cookies():
+    service = WebResearchService()
+    verification_id = service._begin_verification(
+        provider="Google Scholar",
+        url="https://scholar.google.com/scholar?q=mesh",
+        query="mesh quality",
+    )
+
+    result = service.complete_verification(
+        verification_id,
+        approved=True,
+        url="https://scholar.google.com/scholar?q=mesh",
+        cookies=[
+            {"name": "GSP", "value": "captcha-session"},
+            {"name": "SID", "value": "must-not-leave-browser"},
+        ],
+    )
+
+    assert result["cookie_names"] == ["GSP"]
+    assert service._scholar_cookie_header == "GSP=captcha-session"
 
 
 def test_academic_quality_gate_accepts_numbered_and_bold_markdown_sections():

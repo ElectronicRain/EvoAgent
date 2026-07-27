@@ -79,6 +79,7 @@ from .schemas import (
     APIKnowledgeSourceCreate,
     ModelEndpointCreate,
     ModelEndpointUpdate,
+    ResearchVerificationComplete,
     ResearchSourceReviewCreate,
     RuntimeSecurityConfigUpdate,
     TeachingPlanRequest,
@@ -104,6 +105,7 @@ from .services.knowledge import knowledge_service
 from .services.knowledge_processing import extract_sections
 from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
+from .services.web_research import web_research_service
 from .services.workflow_clarification import workflow_clarification_service
 from .services.llm import (
     OpenAICompatibleImageProvider,
@@ -1062,6 +1064,28 @@ async def review_research_source(
         {"url": payload.url, "decision": payload.decision},
     )
     return row(item)
+
+
+@router.get("/research-browser/verifications")
+async def list_research_verifications() -> list[dict[str, Any]]:
+    return web_research_service.active_verifications()
+
+
+@router.post("/research-browser/verifications/complete")
+async def complete_research_verification(
+    payload: ResearchVerificationComplete,
+) -> dict[str, Any]:
+    try:
+        return web_research_service.complete_verification(
+            payload.verification_id,
+            approved=payload.approved,
+            url=payload.url,
+            cookies=payload.cookies,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/conversations/{conversation_id}/messages/stream")

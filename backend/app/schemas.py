@@ -243,6 +243,13 @@ class ResearchSourceReviewCreate(BaseModel):
     credibility: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchVerificationComplete(BaseModel):
+    verification_id: str = Field(min_length=8, max_length=100)
+    approved: bool = True
+    url: str = Field(min_length=8, max_length=4000)
+    cookies: list[dict[str, Any]] = Field(default_factory=list, max_length=80)
+
+
 class TeachingPlanRequest(BaseModel):
     artifact_id: str = Field(min_length=1, max_length=100)
     section_indices: list[int] = Field(default_factory=list, max_length=200)

@@ -7,11 +7,22 @@ import {
   Sparkles, UserRound, X,
 } from 'lucide-vue-next'
 import DocumentClassroom from './DocumentClassroom.vue'
+import ResearchBrowserCenter from './ResearchBrowserCenter.vue'
 import RichAgentMessage from './RichAgentMessage.vue'
 import StatusBadge from './StatusBadge.vue'
 import { api, type Entity } from '../services/api'
 import { useAgentChatStore } from '../stores/agentChat'
 import { useAppStore } from '../stores/app'
+
+type ChatResearchVisit = Entity & {
+  id: string
+  url: string
+  title: string
+  provider: string
+  status: string
+  nodeLabel?: string
+  verificationId?: string
+}
 
 const chat = useAgentChatStore()
 const app = useAppStore()
@@ -23,6 +34,7 @@ const steps = ref<Entity[]>([])
 const artifacts = ref<Entity[]>([])
 const sourceReviews = ref<Entity[]>([])
 const selectedWebSource = ref<Entity | null>(null)
+const researchBrowserOpen = ref(false)
 const chatInput = ref('')
 const chatRunning = ref(false)
 const currentRunId = ref('')
@@ -67,7 +79,44 @@ const agent = computed(() => chatWindow.value?.agent || null)
 const agentGeneration = computed(() => parseObject(agent.value?.generation_config_json || '{}'))
 const openingMessage = computed(() => agentGeneration.value.opening_message || `你好，我是 ${agent.value?.name || 'Agent'}。告诉我你的目标，我会基于可用证据完成任务。`)
 const suggestedQuestions = computed<string[]>(() => agentGeneration.value.suggested_questions || [])
-const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','web_search_provider_error','research_sources_selected','research_requirements_unmet','web_fetch_started','web_page_fetched','research_context_ready','web_research_empty'].includes(item.type)))
+const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','web_search_provider_error','research_sources_selected','research_requirements_unmet','web_fetch_started','web_page_fetched','research_context_ready','web_research_empty','human_verification_required','human_verification_retrying','human_verification_completed','human_verification_retry_failed','human_verification_skipped','human_verification_timed_out'].includes(item.type)))
+const chatResearchVisits = computed<ChatResearchVisit[]>(() => {
+  const visits = new Map<string, Entity>()
+  const put = (value: Entity, status: string) => {
+    const url = String(value.url || value.verification_url || value.provider_url || value.search_url || '')
+    if (!url.startsWith('http://') && !url.startsWith('https://')) return
+    const previous = visits.get(url) || {}
+    visits.set(url, {
+      ...previous,
+      id: url,
+      url,
+      title: value.title || value.query || value.search_label || previous.title || url,
+      provider: value.source || value.provider || previous.provider || '网络来源',
+      status,
+      nodeLabel: agent.value?.name || 'Agent',
+      verificationId: value.verification_id || previous.verificationId,
+      doi: value.doi || previous.doi,
+      publishedYear: value.published_year || previous.publishedYear,
+    })
+  }
+  for (const event of steps.value) {
+    if (event.type === 'web_search_started') {
+      for (const target of event.provider_urls || [{ ...event, url: event.search_url }]) {
+        put({ ...event, ...target, title: `${target.provider || event.search_label}：${event.query}` }, 'searched')
+      }
+    } else if (['web_search_results', 'research_sources_selected'].includes(event.type)) {
+      for (const result of event.results || []) put(result, 'discovered')
+    } else if (event.type === 'web_fetch_started') put(event, 'visiting')
+    else if (event.type === 'web_page_fetched') put(event, event.status || 'fetched')
+    else if (event.type === 'web_search_provider_error') put(event, event.verification_required ? 'verification_required' : 'failed')
+    else if (event.type === 'human_verification_required') put(event, 'verification_required')
+    else if (event.type.startsWith('human_verification_')) {
+      const current = [...visits.values()].find(item => item.verificationId === event.verification_id)
+      if (current) current.status = event.type === 'human_verification_completed' ? 'verified' : event.type.includes('failed') ? 'failed' : 'skipped'
+    }
+  }
+  return [...visits.values()] as ChatResearchVisit[]
+})
 const activeArtifact = computed(() =>
   artifacts.value.find(item => item.id === selectedArtifactId.value) || artifacts.value[0] || null,
 )
@@ -148,6 +197,7 @@ function resetConversationState() {
   documentFocus.value = false
   sourceReviews.value = []
   selectedWebSource.value = null
+  researchBrowserOpen.value = false
   chatInput.value = ''
   chatRunning.value = false
   currentRunId.value = ''
@@ -419,7 +469,8 @@ async function sendMessage() {
             if (waiting) Object.assign(waiting, event.step)
             else steps.value.push(event.step)
           } else steps.value.push(event.step)
-          if (['web_search_started','web_search_results','web_fetch_started','web_page_fetched'].includes(event.step.type)) panelTab.value = 'web'
+          if (['web_search_started','web_search_results','web_fetch_started','web_page_fetched','human_verification_required'].includes(event.step.type)) panelTab.value = 'web'
+          if (event.step.type === 'human_verification_required') researchBrowserOpen.value = true
           if (event.step.type === 'approval_required') panelTab.value = 'steps'
           if (event.step.type === 'artifact_created') {
             panelTab.value = 'docs'
@@ -537,6 +588,12 @@ function stepTitle(step: Entity) {
     context_ready: '会话上下文已装载', research_planning: '生成检索计划',
     research_sources_selected: `选定 ${step.count || 0} 条高相关来源`,
     web_research_empty: '联网研究未取得来源', web_search_provider_error: '一个检索源暂时不可用', research_requirements_unmet: '真实来源数量不足，已停止生成', research_context_ready: '检索证据已压缩并注入', research_synthesis_started: '开始多来源综合',
+    human_verification_required: '检索站点等待机器人验证',
+    human_verification_retrying: '已同步验证会话，正在重试',
+    human_verification_completed: '人工验证后检索完成',
+    human_verification_retry_failed: '验证后仍无法访问，已切换备用源',
+    human_verification_skipped: '已跳过人工验证',
+    human_verification_timed_out: '人工验证等待超时',
     quality_review_started: '第二轮质量审校', quality_review_skipped: '质量审校已降级',
     model_waiting: '正在等待模型响应', run_completed: '运行完成',
     database_persisted: '任务成果已保存到数据库',
@@ -594,7 +651,10 @@ function stepMeta(step: Entity) {
   if (step.type === 'generation_repair_started') return step.issues?.join('；') || '正在修复引用与完整性'
   if (step.type === 'model_response') return `第 ${step.iteration} 轮模型响应`
   if (step.type === 'web_search_results') return `${step.results?.slice(0,2).map((item:Entity)=>item.title).join('；') || '没有通过过滤的结果'}`
+  if (step.type === 'research_sources_selected') return `${step.count || 0} 条真实来源 · 近 3 年 ${step.recent_3_year_count || 0} 篇 · 近 5 年 ${step.recent_5_year_count || 0} 篇`
   if (step.type === 'web_page_fetched') return `${step.status} · ${step.title || step.url}`
+  if (step.type === 'human_verification_required') return `${step.provider || '检索站点'} · 最多等待 ${step.wait_seconds || 90} 秒`
+  if (step.type.startsWith('human_verification_')) return step.error || step.message || step.provider || '已处理'
   if (step.type === 'model_waiting') return `已等待 ${step.elapsed_seconds || 0} 秒`
   if (step.type === 'run_completed') return `${step.duration_ms} ms · ${step.token_usage} tokens`
   if (step.type === 'database_persisted') {
@@ -707,6 +767,7 @@ onBeforeUnmount(() => {
                 <div v-if="!steps.length" class="empty compact">发送消息后，这里会实时显示模型、工具、MCP、Agent 联动和审批事件。</div>
               </div>
               <div v-else-if="panelTab==='web'" class="research-list">
+                <button class="chat-research-browser-launch" @click="researchBrowserOpen=true"><Globe2 :size="13" /><span><strong>联网访问中心</strong><small>在统一窗口查看 {{ chatResearchVisits.length }} 个站点并处理机器人验证</small></span><ExternalLink :size="12" /></button>
                 <section v-if="selectedWebSource" class="web-preview"><header><strong>{{ selectedWebSource.title || '来源网页' }}</strong><button @click="selectedWebSource=null"><X :size="13" /></button></header><div class="preview-actions"><a :href="selectedWebSource.url" target="_blank" rel="noreferrer"><ExternalLink :size="11" />浏览器打开原文</a><button class="confirm" @click="reviewSource(selectedWebSource,'confirmed')"><Check :size="11" />确认采用</button><button class="exclude" @click="reviewSource(selectedWebSource,'excluded')"><X :size="11" />排除</button></div><iframe :src="selectedWebSource.url" :title="selectedWebSource.title" sandbox="allow-scripts allow-same-origin allow-popups" /></section>
                 <article v-for="(event,index) in webEvents" :key="index" class="research-card"><div><Globe2 :size="13" /><strong>{{ stepTitle(event) }}</strong></div><button v-if="event.url" class="source-link" @click="selectedWebSource=event"><ExternalLink :size="11" />{{ event.title || event.url }}</button><div v-if="event.url" class="source-review-actions"><button @click="reviewSource(event,'confirmed')"><Check :size="10" />确认</button><button @click="reviewSource(event,'excluded')"><X :size="10" />排除</button><span v-if="sourceDecision[event.url]">{{ sourceDecision[event.url]==='confirmed' ? '已采用' : '已排除' }}</span></div></article>
                 <div v-if="!webEvents.length" class="empty compact">研究类任务开始后，这里会显示检索、抓取和来源审查。</div>
@@ -826,10 +887,12 @@ onBeforeUnmount(() => {
       </div>
     </Transition>
   </Teleport>
+  <ResearchBrowserCenter v-model="researchBrowserOpen" :visits="chatResearchVisits" />
 </template>
 
 <style scoped>
 .agent-dialog-layer{position:fixed;inset:0;z-index:900;display:flex;align-items:center;justify-content:center;padding:32px}.agent-dialog-backdrop{position:absolute;inset:0;border:0;background:rgba(8,28,48,.46);backdrop-filter:blur(5px);cursor:default}.agent-dialog{position:relative;width:min(1440px,calc(100vw - 64px));height:min(820px,calc(100vh - 64px));overflow:hidden;border:1px solid #bdd4e5;border-radius:16px;background:#fff;box-shadow:0 30px 90px rgba(8,31,52,.32)}.agent-dialog-header{height:68px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dde8f0;background:linear-gradient(120deg,#f8fbfe,#eef7fd)}.agent-dialog-identity{display:flex;align-items:center;gap:11px}.agent-dialog-avatar{display:grid;width:39px;height:39px;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1266bb,#22a0c4)}.agent-dialog-identity>div{display:grid;grid-template-columns:auto auto;align-items:end;gap:2px 8px}.agent-dialog-identity small{grid-column:1/-1;font-size:8px;letter-spacing:1.4px;color:#6e879b}.agent-dialog-identity strong{font-size:15px;color:#153b62}.agent-dialog-identity span{font-size:9px;color:#7890a5}.agent-dialog-actions{display:flex;align-items:center;gap:7px}.agent-dialog-actions>button{position:relative;display:grid;width:31px;height:31px;place-items:center;border:1px solid #cbdce9;border-radius:8px;color:#587289;background:#fff;cursor:pointer}.agent-dialog-actions>button:hover,.agent-dialog-actions>button.active{color:#1269bd;border-color:#8fbee0;background:#f1f8fd}.document-shortcut b{position:absolute;right:-5px;top:-6px;min-width:16px;height:16px;padding:0 4px;display:grid;place-items:center;border:2px solid #f4f9fd;border-radius:99px;color:#fff;background:#1769c2;font-size:8px}.overlay-layout{height:calc(100% - 68px);min-height:0;grid-template-columns:190px minmax(360px,1fr) 370px}.overlay-layout :deep(.message-pane){max-height:none}.chat-composer{position:relative;padding-top:29px!important}.composer-security{position:absolute;top:7px;left:12px;right:12px;display:flex;align-items:center;gap:6px;color:#617f97;font-size:8px}.composer-security button{margin-left:auto;border:0;color:#1769c2;background:transparent;font-size:8px;cursor:pointer}.security-menu{position:absolute;z-index:40;width:300px;padding:7px;border:1px solid #cbddea;border-radius:10px;background:#fff;box-shadow:0 14px 36px #143d5c2e}.composer-menu{right:12px;bottom:100%}.security-menu>button{display:grid;width:100%;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;padding:9px;border:0;border-radius:7px;text-align:left;color:#6a8296;background:transparent;cursor:pointer}.security-menu>button:hover,.security-menu>button.active{color:#1769c2;background:#edf6fd}.security-menu span{display:flex;flex-direction:column;gap:2px}.security-menu strong{font-size:10px;color:#315875}.security-menu small{font-size:8px}.security-menu>p{margin:6px 5px 2px;padding-top:7px;border-top:1px solid #e3ebf2;color:#7890a3;font-size:8px}.inline-approval{display:flex;gap:5px;margin-top:7px}.inline-approval button{display:inline-flex;align-items:center;gap:3px;padding:4px 7px;border:1px solid #8ac4ac;border-radius:5px;color:#137653;background:#edfaf4;font-size:8px;cursor:pointer}.inline-approval button.reject{border-color:#e3adad;color:#a73c3c;background:#fff5f5}.approval-state{display:inline-block;margin-top:5px;color:#187855;font-size:8px;font-weight:700}.agent-chat-float{position:fixed;z-index:880;width:260px;height:72px;padding:9px 10px 9px 6px;display:flex;align-items:center;gap:9px;border:1px solid #87b8da;border-radius:14px;color:#244c6f;background:rgba(255,255,255,.96);box-shadow:0 14px 38px rgba(17,64,99,.25);backdrop-filter:blur(10px);cursor:grab;touch-action:none;user-select:none}.agent-chat-float.dragging{cursor:grabbing;box-shadow:0 18px 45px rgba(17,64,99,.34)}.float-grip{flex:none;color:#9ab0c1}.float-avatar{position:relative;display:grid;width:39px;height:39px;flex:none;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1769c2,#25a5bc)}.float-avatar i{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border:2px solid #fff;border-radius:50%;background:#20b774}.float-copy{display:flex;min-width:0;flex:1;flex-direction:column;text-align:left}.float-copy small{font-size:8px;color:#7991a6}.float-copy strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.float-open{font-size:8px;font-weight:700;color:#1769c2}.float-close{display:grid;width:22px;height:22px;place-items:center;border-radius:6px;color:#8096a8}.float-close:hover{color:#b44444;background:#fff1f1}.agent-dialog-enter-active,.agent-dialog-leave-active,.agent-float-enter-active,.agent-float-leave-active{transition:opacity .18s ease,transform .18s ease}.agent-dialog-enter-from,.agent-dialog-leave-to{opacity:0}.agent-dialog-enter-from .agent-dialog,.agent-dialog-leave-to .agent-dialog{transform:translateY(12px) scale(.985)}.agent-float-enter-from,.agent-float-leave-to{opacity:0;transform:translateY(8px) scale(.96)}
+.chat-research-browser-launch{width:100%;padding:9px;border:1px solid #93c8e6;border-radius:9px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;color:#1675aa;background:linear-gradient(135deg,#f1f9ff,#eef8fc);text-align:left;cursor:pointer}.chat-research-browser-launch span{min-width:0;display:grid;gap:3px}.chat-research-browser-launch strong{font-size:9px}.chat-research-browser-launch small{overflow:hidden;color:#71899a;font-size:7px;text-overflow:ellipsis;white-space:nowrap}.chat-research-browser-launch:hover{border-color:#4c9ac8;box-shadow:0 5px 15px rgba(26,111,163,.1)}
 .execution-panel.document-focused{position:absolute;inset:68px 0 0;z-index:30;border-left:0;background:#f3f7fa;animation:document-in .18s ease}
 .document-focus-toggle{margin-left:auto;padding:6px 9px;border:1px solid #b9d4e8;border-radius:7px;display:flex;align-items:center;gap:5px;color:#1769c2;background:#fff;font-size:9px;font-weight:700;cursor:pointer}
 .document-workspace{min-height:0;flex:1;display:grid;grid-template-columns:1fr;overflow:hidden;background:#f3f7fa}

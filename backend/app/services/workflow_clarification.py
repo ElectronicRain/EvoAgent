@@ -97,6 +97,15 @@ class WorkflowClarificationService:
         r"narrative\s+review|systematic\s+review|scoping\s+review|meta[-\s]?analysis",
         re.I,
     )
+    _mesh_topic = re.compile(r"网格质量|mesh\s+quality|grid\s+quality", re.I)
+    _mesh_scope = re.compile(
+        r"数值计算网格|数值模拟|工程仿真|有限元|有限体积|CFD|FEA|CAE|"
+        r"视觉网格|视觉质量|感知质量|纹理网格|三维图形|"
+        r"computational\s+mesh|numerical\s+(?:simulation|mesh)|finite\s+(?:element|volume)|"
+        r"visual\s+mesh|perceptual\s+quality|textured\s+mesh|colored\s+mesh|"
+        r"两者对比|跨领域对比",
+        re.I,
+    )
     _focus = re.compile(
         r"重点|聚焦|围绕.{2,24}(?:问题|方向|机制|方法|应用|趋势|方面)|核心问题|研究问题|"
         r"focus(?:ed)?\s+on|research\s+question",
@@ -237,6 +246,32 @@ class WorkflowClarificationService:
         questions: list[Question] = []
 
         if task_type == "literature_review":
+            if self._mesh_topic.search(combined) and not self._mesh_scope.search(combined):
+                questions.append(
+                    self._choice(
+                        "mesh_research_domain",
+                        "研究对象",
+                        "“网格质量”在两个领域中含义不同，本次综述指哪一种？",
+                        [
+                            (
+                                "computational",
+                                "数值计算网格",
+                                "CFD / FEA / 有限体积与有限元的网格质量指标",
+                            ),
+                            (
+                                "visual",
+                                "3D 视觉网格",
+                                "纹理、压缩、着色模型的人眼感知质量评估",
+                            ),
+                            (
+                                "comparative",
+                                "两者对比",
+                                "明确分开数值计算与视觉感知两条文献链",
+                            ),
+                        ],
+                        "computational",
+                    )
+                )
             if not self._language.search(combined):
                 questions.append(
                     self._choice(
