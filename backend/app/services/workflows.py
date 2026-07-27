@@ -12,7 +12,14 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..models import KnowledgeBase, ModelEndpoint, Workflow, WorkflowArtifact, WorkflowRun
+from ..models import (
+    AgentDefinition,
+    KnowledgeBase,
+    ModelEndpoint,
+    Workflow,
+    WorkflowArtifact,
+    WorkflowRun,
+)
 from .agents import ExecutionContext, agent_engine
 from .common import audit, dumps, loads
 from .document_exports import output_to_markdown
@@ -499,6 +506,128 @@ class WorkflowEngine:
                     f"条件节点“{node.get('label') or node_id}”必须同时连接 TRUE 和 FALSE 分支"
                 )
         self._order_nodes(definition)
+
+    async def validate_runtime_definition(
+        self,
+        db: AsyncSession,
+        definition: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate that every referenced runtime resource can actually execute.
+
+        Structural validation alone allowed an expert proposal to look correct on
+        the canvas while still referring to a deleted Agent, disabled model
+        endpoint, missing knowledge base, or unknown tool.  This gate is shared by
+        save, expert materialization, and run so all three paths make the same
+        promise to the UI.
+        """
+        self.validate_definition(definition)
+        nodes = list(definition.get("nodes") or [])
+        issues: list[str] = []
+
+        agent_nodes = [item for item in nodes if item.get("type") == "agent"]
+        agent_ids = {
+            str((item.get("config") or {}).get("agent_id") or "")
+            for item in agent_nodes
+        }
+        agent_ids.discard("")
+        agents = {
+            item.id: item
+            for item in (
+                await db.scalars(select(AgentDefinition).where(AgentDefinition.id.in_(agent_ids)))
+                if agent_ids
+                else []
+            )
+        }
+        endpoint_ids = {
+            str(item.model_endpoint_id)
+            for item in agents.values()
+            if item.model_endpoint_id
+        }
+        endpoints = {
+            item.id: item
+            for item in (
+                await db.scalars(select(ModelEndpoint).where(ModelEndpoint.id.in_(endpoint_ids)))
+                if endpoint_ids
+                else []
+            )
+        }
+        for node in agent_nodes:
+            label = str(node.get("label") or node.get("id") or "Agent")
+            agent_id = str((node.get("config") or {}).get("agent_id") or "")
+            agent = agents.get(agent_id)
+            if not agent:
+                issues.append(f"Agent 节点“{label}”未绑定存在的 Agent")
+                continue
+            if agent.status not in {"active", "candidate"}:
+                issues.append(f"Agent 节点“{label}”绑定的 Agent 当前为 {agent.status} 状态")
+            if settings.require_online_agents:
+                endpoint = endpoints.get(str(agent.model_endpoint_id or ""))
+                if not endpoint or not endpoint.enabled or endpoint.modality != "chat":
+                    issues.append(f"Agent 节点“{label}”未绑定启用的在线对话模型接口")
+
+        knowledge_nodes = [item for item in nodes if item.get("type") == "knowledge"]
+        knowledge_ids = {
+            str((item.get("config") or {}).get("knowledge_base_id") or "")
+            for item in knowledge_nodes
+        }
+        knowledge_ids.discard("")
+        existing_knowledge = set(
+            await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(knowledge_ids)))
+        ) if knowledge_ids else set()
+        for node in knowledge_nodes:
+            label = str(node.get("label") or node.get("id") or "知识库")
+            knowledge_id = str((node.get("config") or {}).get("knowledge_base_id") or "")
+            if knowledge_id not in existing_knowledge:
+                issues.append(f"知识库节点“{label}”绑定的知识库不存在")
+
+        registered_tools = {
+            str(item.get("function", {}).get("name") or "") for item in tool_runtime.schemas()
+        }
+        for node in nodes:
+            if node.get("type") != "tool":
+                continue
+            label = str(node.get("label") or node.get("id") or "工具")
+            tool_name = str((node.get("config") or {}).get("tool") or "")
+            if not tool_name or tool_name not in registered_tools:
+                issues.append(f"工具节点“{label}”未选择已注册的可用工具")
+
+        node_ids = {str(item.get("id") or "") for item in nodes}
+        variable_names = {
+            str(item.get("name") or "") for item in definition.get("variables", [])
+        }
+
+        def inspect_tokens(value: Any, label: str) -> None:
+            if isinstance(value, dict):
+                for item in value.values():
+                    inspect_tokens(item, label)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    inspect_tokens(item, label)
+                return
+            if not isinstance(value, str):
+                return
+            for match in TOKEN_PATTERN.finditer(value):
+                path = match.group(1).strip()
+                parts = path.split(".")
+                if len(parts) >= 2 and parts[0] == "nodes" and parts[1] not in node_ids:
+                    issues.append(f"节点“{label}”引用了不存在的节点变量：{path}")
+                if len(parts) >= 2 and parts[0] == "variables" and parts[1] not in variable_names:
+                    issues.append(f"节点“{label}”引用了未定义的工作流变量：{path}")
+
+        for node in nodes:
+            inspect_tokens(node.get("config") or {}, str(node.get("label") or node.get("id")))
+        if issues:
+            raise ValueError("工作流尚不可执行：" + "；".join(dict.fromkeys(issues)))
+        return {
+            "executable": True,
+            "node_count": len(nodes),
+            "edge_count": len(definition.get("edges") or []),
+            "agent_count": len(agent_nodes),
+            "knowledge_count": len(knowledge_nodes),
+            "tool_count": sum(1 for item in nodes if item.get("type") == "tool"),
+            "online_required": settings.require_online_agents,
+        }
 
     @staticmethod
     def _retryable_node_error(exc: Exception) -> bool:
@@ -1266,6 +1395,8 @@ class WorkflowEngine:
         workflow = await db.get(Workflow, workflow_id)
         if not workflow or not workflow.enabled:
             raise LookupError("工作流不存在或未启用")
+        definition = loads(workflow.definition_json, {"nodes": [], "edges": []})
+        await self.validate_runtime_definition(db, definition)
         run = WorkflowRun(
             workflow_id=workflow.id,
             status="running",
@@ -1281,7 +1412,6 @@ class WorkflowEngine:
         trace: list[dict[str, Any]] = []
         context: dict[str, Any] = {}
         try:
-            definition = loads(workflow.definition_json, {"nodes": [], "edges": []})
             execution = dict(definition.get("execution") or {})
             execution.update(
                 {key: value for key, value in (run_options or {}).items() if value is not None}

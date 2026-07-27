@@ -41,7 +41,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   let response: Response | undefined
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      response = await fetch(`${API_BASE}${path}`, { ...options, headers })
+      response = await fetch(`${API_BASE}${path}`, {
+        cache: 'no-store',
+        ...options,
+        headers,
+      })
       break
     } catch {
       if (attempt === 2) {

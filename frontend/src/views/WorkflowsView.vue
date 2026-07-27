@@ -97,7 +97,7 @@ const store = useAppStore()
 const workflows = ref<Entity[]>([]), agents = ref<Entity[]>([]), knowledgeBases = ref<Entity[]>([]), tools = ref<Entity[]>([]), runs = ref<Entity[]>([]), approvalPolicies = ref<Entity[]>([])
 const currentWorkflow = ref<Entity | null>(null), nodes = ref<CanvasNode[]>([]), edges = ref<CanvasEdge[]>([])
 const selectedNodeId = ref(''), selectedEdgeIndex = ref<number | null>(null), connectingFrom = ref(''), connectingSlot = ref('output'), pointer = reactive({ x: 0, y: 0 })
-const studio = ref<HTMLElement | null>(null), canvas = ref<HTMLElement | null>(null), search = ref(''), task = ref('围绕真实教学科研痛点，形成一份可验证的解决方案。'), output = ref('')
+const studio = ref<HTMLElement | null>(null), canvas = ref<HTMLElement | null>(null), search = ref(''), task = ref(''), output = ref('')
 const workflowForm = reactive({ name: '', description: '' })
 const variables = ref<WorkflowVariable[]>([])
 const execution = reactive({ loop_enabled: false, loop_count: 1, artifact_enabled: true, stop_condition: '', intent_validation: true })
@@ -120,6 +120,9 @@ const RUN_STATE_KEY = 'evoagent-workflow-run-state-v2'
 const resourceTab = ref<'agents' | 'knowledge' | 'components'>('agents')
 const paletteCollapsed = ref(false), inspectorCollapsed = ref(false), runCollapsed = ref(true), fullScreen = ref(false)
 const expertOpen = ref(false)
+const EXPERT_SESSION_MAP_KEY = 'evoagent-workflow-expert-session-map-v1'
+const createDraftSessionKey = () => `draft:${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`
+const expertSessionKey = ref(createDraftSessionKey())
 const clarificationOpen = ref(false), clarificationChecking = ref(false), clarificationSubmitting = ref(false)
 const clarificationResult = ref<ClarificationResult | null>(null)
 const clarificationAnswers = ref<Record<string, any>>({})
@@ -911,6 +914,21 @@ function parseDefinition(value: string) {
   try { return JSON.parse(value) } catch { return { nodes: [], edges: [] } }
 }
 
+function expertSessionMap(): Record<string, string> {
+  try { return JSON.parse(window.localStorage.getItem(EXPERT_SESSION_MAP_KEY) || '{}') }
+  catch { return {} }
+}
+
+function expertSessionForWorkflow(workflowId: string) {
+  return expertSessionMap()[workflowId] || `workflow:${workflowId}`
+}
+
+function bindExpertSession(workflowId: string) {
+  const sessions = expertSessionMap()
+  sessions[workflowId] = expertSessionKey.value
+  window.localStorage.setItem(EXPERT_SESSION_MAP_KEY, JSON.stringify(sessions))
+}
+
 function normalizeNodes(definition: Entity): CanvasNode[] {
   const raw = definition.nodes || []
   return raw.map((node: Entity, index: number) => {
@@ -956,6 +974,8 @@ async function load() {
 }
 
 function openWorkflow(workflow: Entity) {
+  expertOpen.value = false
+  expertSessionKey.value = expertSessionForWorkflow(workflow.id)
   currentWorkflow.value = workflow
   workflowForm.name = workflow.name
   workflowForm.description = workflow.description
@@ -984,6 +1004,11 @@ function openWorkflow(workflow: Entity) {
   })
   selectedNodeId.value = ''
   selectedEdgeIndex.value = null
+  task.value = ''
+  clarificationOpen.value = false
+  clarificationResult.value = null
+  clarificationAnswers.value = {}
+  clarificationOriginalTask.value = ''
   output.value = ''
   runArtifacts.value = []
   pendingApprovals.value = []
@@ -1002,6 +1027,8 @@ function openWorkflow(workflow: Entity) {
 function newWorkflow() {
   persistRunState()
   stopRunPolling()
+  expertOpen.value = false
+  expertSessionKey.value = createDraftSessionKey()
   currentWorkflow.value = null
   workflowForm.name = '未命名协作工作流'
   workflowForm.description = ''
@@ -1022,6 +1049,11 @@ function newWorkflow() {
   })
   selectedNodeId.value = ''
   selectedEdgeIndex.value = null
+  task.value = ''
+  clarificationOpen.value = false
+  clarificationResult.value = null
+  clarificationAnswers.value = {}
+  clarificationOriginalTask.value = ''
   output.value = ''
   runArtifacts.value = []
   pendingApprovals.value = []
@@ -1502,48 +1534,62 @@ function addAssignment(node: CanvasNode) {
 }
 
 async function applyExpertProposal(proposal: Entity) {
-  const definition = proposal.definition || {}
-  if (proposal.created_agents?.length) {
-    agents.value = await api.get<Entity[]>('/agents')
+  try {
+    const definition = proposal.definition || {}
+    if (proposal.created_agents?.length) {
+      agents.value = await api.get<Entity[]>('/agents')
+    }
+    workflowForm.name = proposal.name || workflowForm.name
+    workflowForm.description = proposal.description || workflowForm.description
+    if (proposal.objective) task.value = proposal.objective
+    nodes.value = normalizeNodes(definition)
+    edges.value = (definition.edges || []).map((edge: Entity) => ({
+      source: edge.source,
+      target: edge.target,
+      source_slot: edge.source_slot || 'output',
+      target_slot: edge.target_slot || 'input',
+    }))
+    variables.value = (definition.variables || []).map((item: Entity) => ({
+      name: item.name || '',
+      type: item.type || 'string',
+      default: item.default ?? '',
+      description: item.description || '',
+      required: Boolean(item.required),
+    }))
+    Object.assign(execution, {
+      loop_enabled: false,
+      loop_count: 1,
+      artifact_enabled: true,
+      stop_condition: '',
+      intent_validation: true,
+      ...(definition.execution || {}),
+    })
+    selectedNodeId.value = ''
+    selectedEdgeIndex.value = null
+    await nextTick()
+    await fitCanvas()
+    const saved = await persistWorkflow(false)
+    if (!saved) throw new Error('编排草案未通过画板校验')
+    store.notify(
+      proposal.created_agents?.length
+        ? `已创建 ${proposal.created_agents.length} 个在线 Agent，画板已校验并保存，可直接运行`
+        : '工作流已应用、校验并保存，可继续手动调整或直接运行',
+    )
+  } catch (error: any) {
+    store.notify(error.message || '工作流应用失败，请根据提示调整', 'error')
   }
-  workflowForm.name = proposal.name || workflowForm.name
-  workflowForm.description = proposal.description || workflowForm.description
-  nodes.value = normalizeNodes(definition)
-  edges.value = (definition.edges || []).map((edge: Entity) => ({
-    source: edge.source,
-    target: edge.target,
-    source_slot: edge.source_slot || 'output',
-    target_slot: edge.target_slot || 'input',
-  }))
-  variables.value = (definition.variables || []).map((item: Entity) => ({
-    name: item.name || '',
-    type: item.type || 'string',
-    default: item.default ?? '',
-    description: item.description || '',
-    required: Boolean(item.required),
-  }))
-  Object.assign(execution, {
-    loop_enabled: false,
-    loop_count: 1,
-    artifact_enabled: true,
-    stop_condition: '',
-    intent_validation: true,
-    ...(definition.execution || {}),
-  })
-  selectedNodeId.value = ''
-  selectedEdgeIndex.value = null
-  await nextTick()
-  fitCanvas()
 }
 
 async function persistWorkflow(showNotice = true) {
   const error = validateWorkflow()
   if (error) { store.notify(error, 'error'); return null }
   const payload = { name: workflowForm.name, description: workflowForm.description, definition: buildDefinition() }
+  const wasNew = !currentWorkflow.value
   const saved: Entity = currentWorkflow.value
     ? await api.put(`/workflows/${currentWorkflow.value.id}`, payload)
     : await api.post('/workflows', payload)
   currentWorkflow.value = saved
+  if (wasNew) bindExpertSession(saved.id)
   workflows.value = await api.get('/workflows')
   if (showNotice) store.notify('可视化工作流已保存')
   return saved
@@ -2148,7 +2194,15 @@ onBeforeUnmount(() => {
     :visits="researchVisits"
     @verification-completed="markResearchVerification"
   />
-  <WorkflowExpertWindow :open="expertOpen" :definition="buildDefinition()" :workflow-name="workflowForm.name" :workflow-description="workflowForm.description" @close="expertOpen=false" @apply="applyExpertProposal" />
+  <WorkflowExpertWindow
+    :open="expertOpen"
+    :session-key="expertSessionKey"
+    :definition="buildDefinition()"
+    :workflow-name="workflowForm.name"
+    :workflow-description="workflowForm.description"
+    @close="expertOpen=false"
+    @apply="applyExpertProposal"
+  />
 </template>
 
 <style scoped>

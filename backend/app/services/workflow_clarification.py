@@ -160,6 +160,11 @@ class WorkflowClarificationService:
         r"brief\s+scan|standard\s+research|deep\s+research|in-depth",
         re.I,
     )
+    _workflow_strategy = re.compile(
+        r"质量优先|效率优先|可追溯|严格审核|快速交付|并行执行|串行执行|"
+        r"quality[-\s]?first|speed[-\s]?first|traceab|parallel|serial",
+        re.I,
+    )
 
     @staticmethod
     def _choice(
@@ -238,6 +243,7 @@ class WorkflowClarificationService:
         workflow_name: str = "",
         workflow_description: str = "",
         definition: dict[str, Any] | None = None,
+        phase: str = "run",
     ) -> dict[str, Any]:
         normalized = " ".join(task.strip().split())
         context = " ".join(f"{workflow_name} {workflow_description}".split())
@@ -635,6 +641,25 @@ class WorkflowClarificationService:
                     ]
                 )
 
+        if (
+            phase == "orchestration"
+            and len(questions) < 5
+            and not self._workflow_strategy.search(combined)
+        ):
+            questions.append(
+                self._choice(
+                    "workflow_strategy",
+                    "编排侧重",
+                    "这条工作流应优先保证什么？",
+                    [
+                        ("quality", "质量优先", "增加复核、事实核验和失败回退，适合正式交付"),
+                        ("balanced", "质量与效率平衡", "保留必要复核，并尽量减少重复调用"),
+                        ("speed", "效率优先", "减少中间节点和模型调用，适合快速产出初稿"),
+                    ],
+                    "balanced",
+                )
+            )
+
         questions = questions[:5]
         labels = {
             "literature_review": "文献综述",
@@ -646,6 +671,19 @@ class WorkflowClarificationService:
             "writing": "内容写作",
             "research": "研究调研",
             "generic": "通用任务",
+        }
+        intent = {
+            "category": task_type,
+            "category_label": labels[task_type],
+            "objective": normalized,
+            "phase": phase,
+            "confidence": round(max(0.35, 1.0 - len(questions) * 0.12), 2),
+            "missing_decisions": [str(item.get("label") or "") for item in questions],
+            "known_context": {
+                "workflow_name": workflow_name.strip(),
+                "workflow_description": workflow_description.strip(),
+                "existing_node_count": len((definition or {}).get("nodes") or []),
+            },
         }
         return {
             "required": bool(questions),
@@ -660,6 +698,8 @@ class WorkflowClarificationService:
             "original_task": task.strip(),
             "resolved_task": task.strip() if not questions else "",
             "definition_node_count": len((definition or {}).get("nodes") or []),
+            "phase": phase,
+            "intent": intent,
         }
 
     @staticmethod
@@ -684,12 +724,14 @@ class WorkflowClarificationService:
         workflow_name: str = "",
         workflow_description: str = "",
         definition: dict[str, Any] | None = None,
+        phase: str = "run",
     ) -> dict[str, Any]:
         analysis = self.analyze(
             task,
             workflow_name=workflow_name,
             workflow_description=workflow_description,
             definition=definition,
+            phase=phase,
         )
         requirements: list[dict[str, str]] = []
         for question in analysis["questions"]:

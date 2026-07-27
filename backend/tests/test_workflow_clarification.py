@@ -89,6 +89,21 @@ def test_explicit_cross_domain_tasks_do_not_trigger_redundant_questions(task, ta
     assert result["questions"] == []
 
 
+def test_new_canvas_orchestration_has_independent_intent_and_strategy_question():
+    result = workflow_clarification_service.analyze(
+        "为新生设计一套校园适应支持方案",
+        workflow_name="未命名协作工作流",
+        definition={"nodes": [{"id": "input"}, {"id": "output"}], "edges": []},
+        phase="orchestration",
+    )
+
+    assert result["phase"] == "orchestration"
+    assert result["intent"]["objective"] == "为新生设计一套校园适应支持方案"
+    assert result["intent"]["known_context"]["existing_node_count"] == 2
+    assert "workflow_strategy" in question_ids(result)
+    assert "编排侧重" in result["intent"]["missing_decisions"]
+
+
 def test_confirmed_answers_are_added_to_executable_task():
     result = workflow_clarification_service.resolve(
         "生成一篇人工智能教育领域综述",

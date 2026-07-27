@@ -1288,6 +1288,7 @@ async def clarify_workflow_requirements(
         "workflow_name": payload.workflow_name,
         "workflow_description": payload.workflow_description,
         "definition": payload.definition,
+        "phase": payload.phase,
     }
     if not payload.confirmed:
         return workflow_clarification_service.analyze(payload.task, **context)
@@ -1302,7 +1303,7 @@ async def create_workflow(
     payload: WorkflowCreate, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     try:
-        workflow_engine.validate_definition(payload.definition)
+        await workflow_engine.validate_runtime_definition(db, payload.definition)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     item = Workflow(
@@ -1324,7 +1325,7 @@ async def update_workflow(
     if not item:
         raise not_found("工作流")
     try:
-        workflow_engine.validate_definition(payload.definition)
+        await workflow_engine.validate_runtime_definition(db, payload.definition)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     item.name = payload.name
@@ -1355,6 +1356,8 @@ async def run_workflow(
         )
     except LookupError as exc:
         raise not_found("工作流") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return row(result)
 
 
@@ -1427,15 +1430,18 @@ async def chat_with_workflow_expert(
     payload: WorkflowExpertChatRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    result = await workflow_expert.chat(
-        db,
-        message=payload.message,
-        history=payload.history,
-        current_definition=payload.current_definition,
-        current_agent_drafts=payload.current_agent_drafts,
-        workflow_name=payload.workflow_name,
-        workflow_description=payload.workflow_description,
-    )
+    try:
+        result = await workflow_expert.chat(
+            db,
+            message=payload.message,
+            history=payload.history,
+            current_definition=payload.current_definition,
+            current_agent_drafts=payload.current_agent_drafts,
+            workflow_name=payload.workflow_name,
+            workflow_description=payload.workflow_description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await audit(
         db,
         "workflow.expert.proposed",

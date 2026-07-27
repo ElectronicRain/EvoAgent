@@ -71,6 +71,35 @@ class WorkflowExpert:
         return f"{item.name} {getattr(item, 'description', '')}".lower()
 
     @staticmethod
+    def _intent_terms(message: str) -> list[str]:
+        stop_words = {
+            "工作流", "智能体", "agent", "用户", "任务", "一个", "需要", "进行",
+            "生成", "创建", "完成", "实现", "加入", "添加", "然后", "以及", "相关",
+        }
+        terms = {
+            item.lower()
+            for item in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{2,8}", message)
+            if item.lower() not in stop_words
+        }
+        domain_terms = (
+            "文献", "综述", "检索", "论文", "研究", "数据", "分析", "写作", "审核",
+            "核验", "教学", "科研", "方案", "规划", "开发", "测试", "翻译", "演示",
+            "网格质量", "风险", "报告", "知识库",
+        )
+        terms.update(term for term in domain_terms if term in message)
+        return sorted(terms, key=len, reverse=True)
+
+    def _resource_score(self, item: Any, message: str) -> int:
+        text = self._resource_text(item)
+        name = str(getattr(item, "name", "")).lower()
+        message_lower = message.lower()
+        score = 8 if name and name in message_lower else 0
+        for term in self._intent_terms(message):
+            if term in text:
+                score += 3 if len(term) >= 4 else 1
+        return score
+
+    @staticmethod
     def _position_nodes(nodes: list[dict[str, Any]]) -> None:
         for index, node in enumerate(nodes):
             if node.get("position"):
@@ -84,6 +113,20 @@ class WorkflowExpert:
     def _safe_key(value: str, fallback: str) -> str:
         normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", value.strip()).strip("_").lower()
         return normalized[:70] or fallback
+
+    @staticmethod
+    def _suggest_workflow_name(message: str) -> str:
+        source = message.split("【运行前已确认的执行要求】", 1)[0].strip()
+        match = re.search(
+            r"(?:生成|创建|规划|设计|开发|实现|撰写|制作)(?:一个|一套|一篇|一份)?"
+            r"([^，。；,;\n]{2,32})",
+            source,
+        )
+        candidate = (match.group(1) if match else source.splitlines()[0]).strip()
+        candidate = re.sub(r"^(?:请|帮我|需要|我要|希望)", "", candidate).strip()
+        candidate = re.sub(r"(?:方案|任务)?工作流$", "", candidate).strip()
+        candidate = candidate[:26].strip(" ：:，,。；;") or "智能协作"
+        return f"{candidate}工作流"
 
     @staticmethod
     def _unique_node_id(definition: dict[str, Any], prefix: str) -> str:
@@ -374,7 +417,6 @@ class WorkflowExpert:
         agents: list[AgentDefinition],
         knowledge_bases: list[KnowledgeBase],
     ) -> tuple[dict[str, Any], list[str]]:
-        lower = message.lower()
         changes: list[str] = []
         if current:
             definition = deepcopy(current)
@@ -451,15 +493,11 @@ class WorkflowExpert:
             if changes:
                 return definition, changes
 
-        matched_agents = [
-            item for item in agents if item.name.lower() in lower or any(
-                token in self._resource_text(item)
-                for token in re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", lower)
-            )
-        ]
-        if not matched_agents:
-            matched_agents = agents[: min(2, len(agents))]
-        matched_agents = matched_agents[:3]
+        matched_agents = sorted(
+            (item for item in agents if self._resource_score(item, message) >= 3),
+            key=lambda item: self._resource_score(item, message),
+            reverse=True,
+        )[:3]
         wants_knowledge = any(
             word in message for word in ("知识库", "检索", "资料", "文档", "RAG", "依据")
         )
@@ -620,16 +658,45 @@ class WorkflowExpert:
                 unique.append(role)
         return unique[:4] or ["任务执行"]
 
+    @staticmethod
+    def _recommended_agent_roles(message: str) -> list[str]:
+        """Infer a small task-specific team when no existing Agent is suitable."""
+        lower = message.lower()
+        quality_first = "质量优先" in message or "严格审核" in message
+        speed_first = "效率优先" in message or "快速交付" in message
+        if re.search(r"综述|文献回顾|系统评价|review|论文检索", lower, re.I):
+            roles = ["资料检索", "内容撰写", "事实核验"]
+        elif re.search(r"调研|研究|检索|research|搜索", lower, re.I):
+            roles = ["资料检索", "内容撰写", "事实核验"]
+        elif re.search(r"数据|统计|分析|预测|data|excel|csv", lower, re.I):
+            roles = ["数据分析", "内容撰写", "质量审核"]
+        elif re.search(r"开发|实现|修复|代码|系统|功能|implement|develop|code", lower, re.I):
+            roles = ["需求分析", "开发实现", "测试验证"]
+        elif re.search(r"方案|规划|计划|路线图|proposal|roadmap|plan", lower, re.I):
+            roles = ["项目规划", "风险评估", "方案评审"]
+        elif re.search(r"翻译|译成|translate", lower, re.I):
+            roles = ["内容撰写", "质量审核"]
+        elif re.search(r"撰写|写一篇|报告|文章|文案|write|draft", lower, re.I):
+            roles = ["内容撰写", "质量审核"]
+        else:
+            roles = ["需求分析", "任务执行", "质量审核"]
+        if speed_first:
+            return roles[:2]
+        if quality_first and not any(word in roles for word in ("质量审核", "事实核验", "测试验证", "方案评审")):
+            roles.append("质量审核")
+        return roles[:4]
+
     def _build_requested_agent_drafts(
         self,
         message: str,
         *,
         endpoint: ModelEndpoint | None,
         knowledge_bases: list[KnowledgeBase],
+        roles: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         drafts: list[dict[str, Any]] = []
         knowledge_ids = [item.id for item in knowledge_bases if item.name in message]
-        for index, role in enumerate(self._requested_agent_roles(message), 1):
+        for index, role in enumerate(roles if roles is not None else self._requested_agent_roles(message), 1):
             role_key_map = {
                 "需求分析": "requirements_analyst",
                 "质量审核": "quality_reviewer",
@@ -641,6 +708,8 @@ class WorkflowExpert:
                 "测试验证": "test_validator",
                 "事实核验": "fact_checker",
                 "方案评审": "solution_reviewer",
+                "开发实现": "implementation_engineer",
+                "任务执行": "task_executor",
             }
             key = f"draft_{role_key_map.get(role, self._safe_key(role, f'agent_{index}'))}"
             quality_role = any(word in role for word in ("审核", "核验", "评审", "测试"))
@@ -848,11 +917,34 @@ class WorkflowExpert:
         workflow_name: str,
         workflow_description: str,
     ) -> dict[str, Any]:
+        endpoint = await db.scalar(
+            select(ModelEndpoint)
+            .where(
+                ModelEndpoint.enabled.is_(True),
+                ModelEndpoint.modality == "chat",
+            )
+            .order_by(desc(ModelEndpoint.updated_at))
+        )
+        enabled_endpoint_ids = set(
+            await db.scalars(
+                select(ModelEndpoint.id).where(
+                    ModelEndpoint.enabled.is_(True),
+                    ModelEndpoint.modality == "chat",
+                )
+            )
+        )
+        agent_query = (
+            select(AgentDefinition)
+            .where(AgentDefinition.status.in_(["active", "candidate"]))
+            .order_by(AgentDefinition.name)
+        )
+        if settings.require_online_agents:
+            agent_query = agent_query.where(
+                AgentDefinition.model_endpoint_id.in_(enabled_endpoint_ids)
+            )
         agents = (
             await db.scalars(
-                select(AgentDefinition)
-                .where(AgentDefinition.status.in_(["active", "candidate"]))
-                .order_by(AgentDefinition.name)
+                agent_query
             )
         ).all()
         knowledge_bases = (await db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.name))).all()
@@ -862,14 +954,6 @@ class WorkflowExpert:
         proposed = fallback
         raw_agent_drafts = deepcopy(current_agent_drafts or [])
         reply = ""
-        endpoint = await db.scalar(
-            select(ModelEndpoint)
-            .where(
-                ModelEndpoint.enabled.is_(True),
-                ModelEndpoint.modality == "chat",
-            )
-            .order_by(desc(ModelEndpoint.updated_at))
-        )
         if settings.require_online_agents and not endpoint:
             raise ValueError(
                 "工作流智能编排需要在线对话模型接口。"
@@ -957,10 +1041,26 @@ class WorkflowExpert:
                     )
             except Exception:
                 pass
+        explicit_roles = self._requested_agent_roles(message)
+        eligible_agent_ids = {item.id for item in agents}
+        has_bound_agent = any(
+            node.get("type") == "agent"
+            and (
+                (node.get("config") or {}).get("agent_id") in eligible_agent_ids
+                or (node.get("config") or {}).get("agent_draft_key")
+            )
+            for node in proposed.get("nodes", [])
+        )
+        inferred_roles = (
+            explicit_roles
+            if explicit_roles
+            else ([] if has_bound_agent else self._recommended_agent_roles(message))
+        )
         requested_drafts = self._build_requested_agent_drafts(
             message,
             endpoint=endpoint,
             knowledge_bases=list(knowledge_bases),
+            roles=inferred_roles,
         )
         existing_draft_keys = {
             self._safe_key(
@@ -1017,6 +1117,10 @@ class WorkflowExpert:
                 list(knowledge_bases),
                 draft_keys,
             )
+        generic_names = {"", "未命名协作工作流", "智能编排工作流", "新工作流"}
+        final_name = workflow_name.strip()
+        if final_name in generic_names:
+            final_name = self._suggest_workflow_name(message)
         return {
             "reply": reply
             or (
@@ -1024,7 +1128,7 @@ class WorkflowExpert:
                 "节点、分支、变量、知识库、循环和产出配置都可以继续调整；"
                 "你也可以继续告诉我增删哪些节点或修改哪项参数。"
             ),
-            "name": workflow_name.strip() or "智能编排工作流",
+            "name": final_name,
             "description": workflow_description.strip() or message[:240],
             "change_summary": fallback_changes,
             "definition": sanitized,
@@ -1134,6 +1238,7 @@ class WorkflowExpert:
             list(agents),
             list(knowledge_bases),
         )
+        validation = await WorkflowEngine().validate_runtime_definition(db, sanitized)
         result = deepcopy(proposal)
         result["definition"] = sanitized
         result["agent_drafts"] = []
@@ -1158,6 +1263,7 @@ class WorkflowExpert:
             }
             for item in created
         ]
+        result["validation"] = validation
         return result
 
 

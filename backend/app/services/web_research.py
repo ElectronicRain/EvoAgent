@@ -1167,7 +1167,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.3.21 "
+                        "EvoAgent/0.3.22 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

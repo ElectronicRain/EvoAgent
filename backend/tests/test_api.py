@@ -1408,7 +1408,7 @@ def test_workflow_stream_reports_live_node_progress(client):
     assert events[-1]["type"] == "done"
 
 
-def test_workflow_stream_marks_failed_node_with_readable_error(client):
+def test_workflow_save_marks_missing_agent_with_readable_error(client):
     definition = {
         "nodes": [
             {"id": "input", "type": "input", "label": "任务输入"},
@@ -1433,31 +1433,14 @@ def test_workflow_stream_marks_failed_node_with_readable_error(client):
             {"source": "missing_agent", "target": "output"},
         ],
     }
-    workflow = client.post(
+    response = client.post(
         "/api/workflows",
         json={"name": "失败节点可视化", "description": "节点失败事件", "definition": definition},
-    ).json()
-
-    response = client.post(
-        f"/api/workflows/{workflow['id']}/run/stream",
-        json={"input": {"task": "验证失败节点"}},
     )
-    events = [
-        json.loads(line.removeprefix("data: "))
-        for line in response.text.splitlines()
-        if line.startswith("data: ")
-    ]
-    failed_step = next(
-        event["step"]
-        for event in events
-        if event["type"] == "step" and event["step"]["type"] == "workflow_node_failed"
-    )
-    result = next(event["run"] for event in events if event["type"] == "workflow_result")
 
-    assert failed_step["node_id"] == "missing_agent"
-    assert failed_step["label"] == "不可用 Agent"
-    assert "Agent 不存在或未启用" in failed_step["error"]
-    assert result["status"] == "failed"
+    assert response.status_code == 422
+    assert "不可用 Agent" in response.json()["detail"]
+    assert "未绑定存在的 Agent" in response.json()["detail"]
 
 
 def test_workflow_run_security_waits_for_inline_approval_and_exposes_reconnect_state(
@@ -1826,6 +1809,72 @@ def test_workflow_expert_creates_new_agents_and_executable_branches(client):
     assert run.json()["status"] == "completed"
     assert run.json()["iteration_count"] == 2
     assert client.get(f"/api/workflow-runs/{run.json()['id']}/artifacts").json()
+
+
+def test_workflow_expert_generalizes_new_canvas_with_task_specific_agents(client):
+    for endpoint in client.get("/api/model-endpoints").json():
+        client.patch(f"/api/model-endpoints/{endpoint['id']}", json={"enabled": False})
+
+    response = client.post(
+        "/api/workflow-expert/chat",
+        json={
+            "message": "规划一套极地科考站食品补给方案，识别风险并形成可审核的交付文档。",
+            "history": [],
+            "current_definition": {
+                "nodes": [
+                    {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+                    {"id": "output", "type": "output", "label": "结果输出", "config": {}},
+                ],
+                "edges": [],
+            },
+            "workflow_name": "未命名协作工作流",
+            "workflow_description": "",
+        },
+    )
+
+    assert response.status_code == 200
+    proposal = response.json()
+    assert proposal["name"] == "极地科考站食品补给方案工作流"
+    names = {item["name"] for item in proposal["agent_drafts"]}
+    assert {"项目规划 Agent", "风险评估 Agent", "方案评审 Agent"}.issubset(names)
+
+    materialized = client.post("/api/workflow-expert/materialize", json={"proposal": proposal})
+    assert materialized.status_code == 200
+    assert materialized.json()["validation"]["executable"] is True
+
+
+def test_workflow_save_rejects_missing_runtime_agent_before_run(client):
+    response = client.post(
+        "/api/workflows",
+        json={
+            "name": "不可执行 Agent 引用",
+            "description": "应在保存时阻止失效资源",
+            "definition": {
+                "nodes": [
+                    {"id": "input", "type": "input", "label": "任务输入", "config": {}},
+                    {
+                        "id": "agent",
+                        "type": "agent",
+                        "label": "已删除 Agent",
+                        "config": {"agent_id": "missing-agent", "input": "{{input.task}}"},
+                    },
+                    {
+                        "id": "output",
+                        "type": "output",
+                        "label": "结果输出",
+                        "config": {"value": {"result": "{{nodes.agent.output}}"}},
+                    },
+                ],
+                "edges": [
+                    {"source": "input", "target": "agent"},
+                    {"source": "agent", "target": "output"},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "未绑定存在的 Agent" in response.json()["detail"]
 
 
 def test_offline_agent_create_and_existing_agent_update(client):

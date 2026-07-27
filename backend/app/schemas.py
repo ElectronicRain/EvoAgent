@@ -274,6 +274,7 @@ class WorkflowClarificationRequest(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     answers: dict[str, Any] = Field(default_factory=dict)
     confirmed: bool = False
+    phase: Literal["run", "orchestration"] = "run"
 
 
 class WorkflowRunRequest(BaseModel):
