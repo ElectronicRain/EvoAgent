@@ -685,6 +685,21 @@ class WorkflowEngine:
                     pass
         return max(counts, default=0)
 
+    @staticmethod
+    def _reference_count(output: Any) -> int:
+        text = primary_output_text(output).strip()
+        reference_match = re.search(
+            r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
+            r"(?:参考文献|references|bibliography)\b(?:\*\*)?([\s\S]*)$",
+            text,
+            re.I,
+        )
+        reference_block = reference_match.group(1) if reference_match else ""
+        doi_refs = set(re.findall(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", reference_block, re.I))
+        linked_refs = set(re.findall(r"https?://[^\s)>]+", reference_block, re.I))
+        numbered_refs = re.findall(r"(?m)^\s*(?:\[\d+\]|\d+[.)])\s+\S", reference_block)
+        return max(len(doi_refs), len(linked_refs), len(numbered_refs))
+
     @classmethod
     def _delivery_quality_issues(
         cls,
@@ -724,28 +739,14 @@ class WorkflowEngine:
         for label, pattern in required_sections.items():
             if not re.search(pattern, text, re.I):
                 issues.append(f"缺少完整的“{label}”章节")
-        reference_match = re.search(
-            r"(?:^|\n)\s*(?:#{1,3}\s*(?:\d+(?:\.\d+)*[.)]?\s*)?|\*\*\s*)"
-            r"(?:参考文献|references|bibliography)\b(?:\*\*)?([\s\S]*)$",
-            text,
-            re.I,
-        )
-        reference_block = reference_match.group(1) if reference_match else ""
-        doi_refs = set(re.findall(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", reference_block, re.I))
-        linked_refs = set(re.findall(r"https?://[^\s)>]+", reference_block, re.I))
-        numbered_refs = re.findall(r"(?m)^\s*(?:\[\d+\]|\d+[.)])\s+\S", reference_block)
-        reference_count = max(len(doi_refs), len(linked_refs), len(numbered_refs))
-        if requested and reference_count < requested:
-            issues.append(
-                f"用户要求纳入 {requested} 篇文献，但参考文献列表仅识别到 {reference_count} 条"
-            )
+        reference_count = cls._reference_count(output)
+        if reference_count == 0:
+            target_text = f"（优先目标约 {requested} 篇）" if requested else ""
+            issues.append(f"参考文献列表没有可识别的真实条目{target_text}")
         source_count = cls._research_source_count(context)
-        if requested and source_count < requested:
-            issues.append(
-                f"真实联网检索仅记录 {source_count} 条可追溯来源，未达到用户要求的 {requested} 篇"
-            )
-        elif source_count == 0:
-            issues.append("没有记录任何真实联网文献来源，不能作为文献综述最终稿交付")
+        if source_count == 0:
+            target_text = f"（优先目标约 {requested} 篇）" if requested else ""
+            issues.append(f"没有记录任何真实联网文献来源{target_text}，不能作为文献综述最终稿交付")
         tail = text[-180:].strip()
         if (
             re.search(r"(?:\\[A-Za-z]{0,8}|[,;:，；：\-–—])$", tail)
@@ -754,6 +755,32 @@ class WorkflowEngine:
         ):
             issues.append("正文结尾或公式结构不完整，疑似被模型输出上限截断")
         return list(dict.fromkeys(issues))[:12]
+
+    @classmethod
+    def _delivery_quality_warnings(
+        cls,
+        workflow_input: dict[str, Any],
+        output: Any,
+        context: dict[str, Any],
+    ) -> list[str]:
+        task = str(workflow_input.get("task") or workflow_input)
+        if not ACADEMIC_REVIEW_PATTERN.search(task):
+            return []
+        target = cls._requested_reference_count(task)
+        if not target:
+            return []
+        warnings: list[str] = []
+        reference_count = cls._reference_count(output)
+        if 0 < reference_count < target:
+            warnings.append(
+                f"参考文献优先目标约 {target} 篇，最终稿实际列出 {reference_count} 条；已按真实结果继续交付"
+            )
+        source_count = cls._research_source_count(context)
+        if 0 < source_count < target:
+            warnings.append(
+                f"真实联网来源优先目标约 {target} 篇，实际取得 {source_count} 条；未使用虚构文献补足数量"
+            )
+        return list(dict.fromkeys(warnings))[:12]
 
     async def _align_result_with_intent(
         self,
@@ -769,6 +796,11 @@ class WorkflowEngine:
             final_output,
             context,
         )
+        deterministic_warnings = self._delivery_quality_warnings(
+            workflow_input,
+            final_output,
+            context,
+        )
         task = str(workflow_input.get("task") or workflow_input)
         if deterministic_issues or ACADEMIC_REVIEW_PATTERN.search(task):
             passed = not deterministic_issues
@@ -778,6 +810,7 @@ class WorkflowEngine:
                 "issues": deterministic_issues,
                 "improved": False,
                 "quality_issues": deterministic_issues,
+                "quality_warnings": deterministic_warnings,
                 "mode": "deterministic",
                 "tokens": 0,
             }
@@ -885,6 +918,9 @@ class WorkflowEngine:
                 else:
                     final_output = improved_result
             quality_issues = self._delivery_quality_issues(workflow_input, final_output, context)
+            quality_warnings = self._delivery_quality_warnings(
+                workflow_input, final_output, context
+            )
             issues = list(dict.fromkeys([*issues, *quality_issues]))[:12]
             passed = bool(passed and not quality_issues)
             improved = bool(improved and not quality_issues)
@@ -894,6 +930,7 @@ class WorkflowEngine:
                 "issues": issues,
                 "improved": improved,
                 "quality_issues": quality_issues,
+                "quality_warnings": quality_warnings,
                 "endpoint": endpoint.name,
                 "model": endpoint.default_model,
                 "tokens": response.tokens,
@@ -907,12 +944,16 @@ class WorkflowEngine:
             return final_output, validation
         except Exception as exc:
             quality_issues = self._delivery_quality_issues(workflow_input, final_output, context)
+            quality_warnings = self._delivery_quality_warnings(
+                workflow_input, final_output, context
+            )
             validation = {
                 "passed": False,
                 "score": 0,
                 "issues": list(dict.fromkeys([str(exc)[:500], *quality_issues]))[:12],
                 "improved": False,
                 "quality_issues": quality_issues,
+                "quality_warnings": quality_warnings,
             }
             await control.emit(
                 {
@@ -1671,6 +1712,9 @@ class WorkflowEngine:
                     quality_issues = list(
                         context["runtime"].get("intent_validation", {}).get("quality_issues", [])
                     )
+                    quality_warnings = list(
+                        context["runtime"].get("intent_validation", {}).get("quality_warnings", [])
+                    )
                     artifact = await self._create_artifact(
                         db,
                         workflow,
@@ -1688,8 +1732,15 @@ class WorkflowEngine:
                         metadata={
                             "source": "workflow_iteration",
                             "workflow_version": workflow.version,
-                            "delivery_status": ("needs_revision" if quality_issues else "ready"),
+                            "delivery_status": (
+                                "needs_revision"
+                                if quality_issues
+                                else "ready_with_warnings"
+                                if quality_warnings
+                                else "ready"
+                            ),
                             "quality_issues": quality_issues,
+                            "quality_warnings": quality_warnings,
                         },
                     )
                     await control.emit(
@@ -1703,6 +1754,9 @@ class WorkflowEngine:
                 quality_issues = list(
                     context["runtime"].get("intent_validation", {}).get("quality_issues", [])
                 )
+                quality_warnings = list(
+                    context["runtime"].get("intent_validation", {}).get("quality_warnings", [])
+                )
                 if quality_issues:
                     await control.emit(
                         {
@@ -1712,6 +1766,14 @@ class WorkflowEngine:
                         }
                     )
                     raise RuntimeError("最终交付质量校验未通过：" + "；".join(quality_issues))
+                if quality_warnings:
+                    await control.emit(
+                        {
+                            "type": "workflow_delivery_quality_warning",
+                            "iteration": iteration,
+                            "warnings": quality_warnings,
+                        }
+                    )
                 await control.emit(
                     {
                         "type": "workflow_iteration_completed",

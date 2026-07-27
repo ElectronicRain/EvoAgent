@@ -559,7 +559,8 @@ function agentEventInfo(event: Entity) {
     human_verification_skipped: { title: '已跳过人工验证', stage: '联网检索 · 备用源', progress: 42 },
     human_verification_timed_out: { title: '人工验证等待超时', stage: '联网检索 · 备用源', progress: 42 },
     research_sources_selected: { title: '已选定可信资料来源', stage: '联网检索 · 来源选择', progress: 45 },
-    research_requirements_unmet: { title: '真实来源数量不足，已停止生成', stage: '联网检索 · 前置校验', progress: 48 },
+    research_target_shortfall: { title: '来源未达偏好目标，继续生成', stage: '联网检索 · 目标提示', progress: 48 },
+    research_requirements_unmet: { title: '未取得真实来源，已停止生成', stage: '联网检索 · 前置校验', progress: 48 },
     web_fetch_started: { title: '正在读取来源正文', stage: '联网检索 · 正文抓取', progress: 50 },
     web_page_fetched: { title: '已读取一个资料来源', stage: '联网检索 · 正文抓取', progress: 57 },
     research_context_ready: { title: '检索证据已压缩并注入', stage: '联网检索 · 上下文整理', progress: 60 },
@@ -608,7 +609,8 @@ function agentEventInfo(event: Entity) {
   else if (type === 'human_verification_completed') detail = `重试取得 ${event.count || 0} 条结果`
   else if (type.startsWith('human_verification_')) detail = String(event.error || event.message || event.provider || '')
   else if (type === 'research_sources_selected') detail = `选定 ${event.count || 0} 个可追溯来源 · 近 3 年 ${event.recent_3_year_count || 0} 篇 · 近 5 年 ${event.recent_5_year_count || 0} 篇${event.research_scope ? ` · ${event.research_scope}` : ''}`
-  else if (type === 'research_requirements_unmet') detail = `要求 ${event.required_sources || 0} 条 · 实际 ${event.actual_sources || 0} 条 · 未调用模型综合`
+  else if (type === 'research_target_shortfall') detail = `目标约 ${event.target_sources || 0} 条 · 实际 ${event.actual_sources || 0} 条 · 将继续生成并披露数量`
+  else if (type === 'research_requirements_unmet') detail = `目标约 ${event.target_sources || 0} 条 · 实际 0 条 · 未调用模型综合`
   else if (type === 'research_context_ready') detail = `${event.sources || 0} 个来源 · ${event.context_chars || 0}/${event.context_char_limit || 0} 字符`
   else if (type === 'web_page_fetched') detail = `${event.title || event.url || ''} · ${event.status || '已读取'}`
   else if (type === 'model_response') detail = `第 ${event.iteration || 1} 次响应 · ${event.stage || 'answer'}${event.tool_calls?.length ? ` · 调用 ${event.tool_calls.join('、')}` : ''}`
@@ -759,6 +761,10 @@ function handleWorkflowStep(step: Entity) {
     const detail = step.error || step.issues?.join('；') || '意图校验未完成'
     output.value = `节点链路已完成，但${detail}`
     appendRunTimeline('', '最终意图校验未完成', detail, 'warning', step.type)
+  } else if (step.type === 'workflow_delivery_quality_warning') {
+    const detail = step.warnings?.join('；') || '真实来源数量低于优先目标，已按实际结果完成交付'
+    output.value = detail
+    appendRunTimeline('', '交付完成，来源数量低于优先目标', detail, 'warning', step.type)
   } else if (step.type === 'workflow_run_interrupted') {
     output.value = step.error || '工作流已中断'
     appendRunTimeline('', '工作流已中断', step.error || '', 'warning', step.type)
@@ -2248,7 +2254,8 @@ onBeforeUnmount(() => {
               :max="question.max"
             >
             <span>{{ question.suffix }}</span>
-            <small>可填写 {{ question.min }}–{{ question.max }}</small>
+            <small v-if="question.id === 'literature_count'">优先目标；实际不足时仍会继续，并如实披露</small>
+            <small v-else>可填写 {{ question.min }}–{{ question.max }}</small>
           </label>
           <textarea
             v-else

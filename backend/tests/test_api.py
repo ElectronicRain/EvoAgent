@@ -2475,7 +2475,7 @@ def test_workflow_research_stops_before_model_when_sources_are_missing(client, m
     assert any(item["type"] == "research_requirements_unmet" for item in agent_events)
     result = next(item["run"] for item in events if item["type"] == "workflow_result")
     assert result["status"] == "failed"
-    assert "要求 40 条，实际取得 0 条" in result["error"]
+    assert "未取得可追溯来源" in result["error"]
 
 
 def test_workflow_reuses_duplicate_tool_call_then_converges(client, monkeypatch):

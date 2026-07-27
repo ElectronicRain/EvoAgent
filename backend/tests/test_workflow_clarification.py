@@ -119,13 +119,15 @@ def test_confirmed_answers_are_added_to_executable_task():
     assert result["confirmed"] is True
     assert result["required"] is False
     assert "输出语言：英文" in result["resolved_task"]
-    assert "文献规模：40篇" in result["resolved_task"]
+    assert "目标文献数：40篇" in result["resolved_task"]
     assert "综述类型：系统综述" in result["resolved_task"]
     assert "不得擅自缩减范围" in result["resolved_task"]
+    assert "文献数量是优先检索目标" in result["resolved_task"]
+    assert "实际数量并继续完成交付" in result["resolved_task"]
 
 
 def test_confirmed_number_is_range_checked():
-    with pytest.raises(ValueError, match="文献规模"):
+    with pytest.raises(ValueError, match="目标文献数"):
         workflow_clarification_service.resolve(
             "生成一篇人工智能教育领域综述",
             {

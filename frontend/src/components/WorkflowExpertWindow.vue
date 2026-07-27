@@ -318,7 +318,9 @@ async function applyProposal() {
                   </div>
                   <label v-else-if="question.type === 'number'" class="expert-number">
                     <input v-model.number="clarificationAnswers[question.id]" type="number" :min="question.min" :max="question.max" />
-                    <b>{{ question.suffix }}</b><small>{{ question.min }}–{{ question.max }}</small>
+                    <b>{{ question.suffix }}</b>
+                    <small v-if="question.id === 'literature_count'">优先目标，实际不足仍会继续</small>
+                    <small v-else>{{ question.min }}–{{ question.max }}</small>
                   </label>
                   <textarea
                     v-else

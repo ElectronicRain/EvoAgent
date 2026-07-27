@@ -144,6 +144,74 @@ def test_web_research_extracts_short_subject_and_constraints_from_workflow_promp
     assert all("【" not in query and len(query) < 100 for query in queries)
 
 
+def test_hpe_research_ignores_upstream_mesh_scope_and_year_contamination():
+    service = WebResearchService()
+    task = """【用户原始意图】
+新建一个工作流，帮我调查人体姿态估计相关论文，并写为SCI综述
+【运行前已确认的执行要求】
+- 目标文献数：30篇
+- 文献时间范围：近 10 年
+【当前工作流节点】
+HPE文献检索Agent
+【本节点收到的输入】
+上游提纲错误提到了 2014—2024 年的 2D structured mesh quality metrics、Jacobian 和 CFD。
+"""
+
+    assert service.research_request(task).endswith("- 文献时间范围：近 10 年")
+    assert service.normalized_research_subject(service.research_subject(task)) == "人体姿态估计"
+    assert service.explicit_source_count(task) == 30
+    assert service.requested_year_range(task) == (date.today().year - 10, date.today().year)
+    assert service.mesh_domain(service.research_subject(task)) is None
+    assert service.query_variants(task)[0] == '"human pose estimation"'
+
+    ranked = service._rank_results(
+        task,
+        [
+            {
+                "title": "Transformer Methods for Human Pose Estimation",
+                "description": "A recent study of 2D and 3D human keypoint estimation.",
+                "url": "https://doi.org/10.1000/hpe-recent",
+                "doi": "10.1000/hpe-recent",
+                "source": "Crossref",
+                "published_year": date.today().year - 2,
+            },
+            {
+                "title": "Jacobian metrics for structured computational meshes",
+                "description": "CFD mesh quality and numerical simulation.",
+                "url": "https://doi.org/10.1000/mesh",
+                "doi": "10.1000/mesh",
+                "source": "Crossref",
+                "published_year": date.today().year - 1,
+            },
+        ],
+    )
+
+    assert [item["doi"] for item in ranked] == ["10.1000/hpe-recent"]
+
+
+def test_academic_quality_gate_treats_positive_source_shortfall_as_warning():
+    references = "\n".join(
+        f"[{index}] Author. Verified HPE study {index}. https://doi.org/10.1234/hpe.{index}"
+        for index in range(1, 13)
+    )
+    document = (
+        "# Human Pose Estimation Review\n\n"
+        "## Abstract\n\nA complete abstract.\n\n"
+        "## 1. Introduction\n\nA complete introduction.\n\n"
+        "## 2. Evidence synthesis\n\n"
+        + ("Evidence-based synthesis of verified HPE studies. " * 220)
+        + "\n\n## 8. Conclusion\n\nA complete conclusion.\n\n"
+        "## References\n\n" + references
+    )
+    task = {"task": "Write an English literature review targeting about 30 papers about HPE"}
+    context = {"nodes": {"research": {"research": {"source_count": 12}}}}
+
+    assert WorkflowEngine._delivery_quality_issues(task, {"result": document}, context) == []
+    warnings = WorkflowEngine._delivery_quality_warnings(task, {"result": document}, context)
+    assert any("优先目标约 30" in item and "实际列出 12" in item for item in warnings)
+    assert any("实际取得 12" in item and "未使用虚构文献" in item for item in warnings)
+
+
 def test_academic_research_extracts_human_pose_topic_from_workflow_instruction():
     service = WebResearchService()
     task = "新建一个工作流，人体姿态估计相关论文，并写为SCI"

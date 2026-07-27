@@ -79,7 +79,7 @@ const agent = computed(() => chatWindow.value?.agent || null)
 const agentGeneration = computed(() => parseObject(agent.value?.generation_config_json || '{}'))
 const openingMessage = computed(() => agentGeneration.value.opening_message || `你好，我是 ${agent.value?.name || 'Agent'}。告诉我你的目标，我会基于可用证据完成任务。`)
 const suggestedQuestions = computed<string[]>(() => agentGeneration.value.suggested_questions || [])
-const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','web_search_provider_error','research_sources_selected','research_requirements_unmet','web_fetch_started','web_page_fetched','research_context_ready','web_research_empty','human_verification_required','human_verification_retrying','human_verification_completed','human_verification_retry_failed','human_verification_skipped','human_verification_timed_out'].includes(item.type)))
+const webEvents = computed(() => steps.value.filter(item => ['web_search_started','web_search_results','web_search_provider_error','research_sources_selected','research_target_shortfall','research_requirements_unmet','web_fetch_started','web_page_fetched','research_context_ready','web_research_empty','human_verification_required','human_verification_retrying','human_verification_completed','human_verification_retry_failed','human_verification_skipped','human_verification_timed_out'].includes(item.type)))
 const chatResearchVisits = computed<ChatResearchVisit[]>(() => {
   const visits = new Map<string, Entity>()
   const put = (value: Entity, status: string) => {
@@ -587,6 +587,7 @@ function stepTitle(step: Entity) {
     request_submitted: '任务已提交', stream_connected: '已连接 Agent 执行引擎',
     context_ready: '会话上下文已装载', research_planning: '生成检索计划',
     research_sources_selected: `选定 ${step.count || 0} 条高相关来源`,
+    research_target_shortfall: `来源低于偏好目标，继续生成`,
     web_research_empty: '联网研究未取得来源', web_search_provider_error: '一个检索源暂时不可用', research_requirements_unmet: '真实来源数量不足，已停止生成', research_context_ready: '检索证据已压缩并注入', research_synthesis_started: '开始多来源综合',
     human_verification_required: '检索站点等待机器人验证',
     human_verification_retrying: '已同步验证会话，正在重试',
@@ -652,6 +653,7 @@ function stepMeta(step: Entity) {
   if (step.type === 'model_response') return `第 ${step.iteration} 轮模型响应`
   if (step.type === 'web_search_results') return `${step.results?.slice(0,2).map((item:Entity)=>item.title).join('；') || '没有通过过滤的结果'}`
   if (step.type === 'research_sources_selected') return `${step.count || 0} 条真实来源 · 近 3 年 ${step.recent_3_year_count || 0} 篇 · 近 5 年 ${step.recent_5_year_count || 0} 篇`
+  if (step.type === 'research_target_shortfall') return `目标约 ${step.target_sources || 0} 条 · 实际 ${step.actual_sources || 0} 条 · 将继续并披露数量`
   if (step.type === 'web_page_fetched') return `${step.status} · ${step.title || step.url}`
   if (step.type === 'human_verification_required') return `${step.provider || '检索站点'} · 最多等待 ${step.wait_seconds || 90} 秒`
   if (step.type.startsWith('human_verification_')) return step.error || step.message || step.provider || '已处理'

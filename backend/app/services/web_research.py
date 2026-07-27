@@ -125,14 +125,15 @@ class WebResearchService:
         return "academic" if self.academic_trigger.search(task) else "web"
 
     def explicit_source_count(self, task: str) -> int | None:
-        """Return an explicit evidence count, or None when the user did not set one."""
+        """Return the user's preferred evidence target, not a hard success gate."""
 
+        request = self.research_request(task)
         patterns = (
             r"(?:至少|不少于|约|大约|检索|搜寻|纳入|包含|覆盖)?\s*(\d{1,3})\s*(?:篇|条)\s*(?:文献|论文|资料)?",
             r"(\d{1,3})\s*(?:papers?|articles?|references?|studies)",
         )
         for pattern in patterns:
-            match = re.search(pattern, task, re.I)
+            match = re.search(pattern, request, re.I)
             if match:
                 return max(5, min(int(match.group(1)), 80))
         return None
@@ -142,12 +143,13 @@ class WebResearchService:
 
         return self.explicit_source_count(task) or 12
 
-    @staticmethod
-    def requested_year_range(task: str) -> tuple[int, int] | None:
+    @classmethod
+    def requested_year_range(cls, task: str) -> tuple[int, int] | None:
+        request = cls.research_request(task)
         current_year = date.today().year
         explicit = re.search(
             r"\b(19\d{2}|20\d{2})\s*(?:[-–—~至到]|to)\s*(19\d{2}|20\d{2})\b",
-            task,
+            request,
             re.I,
         )
         if explicit:
@@ -155,16 +157,34 @@ class WebResearchService:
             return max(1900, start), min(current_year + 1, end)
         recent = re.search(
             r"(?:(?:近|最近|过去)\s*(\d{1,2})\s*年|(?:recent|past)\s+(\d{1,2})\s+years?)",
-            task,
+            request,
             re.I,
         )
         if recent:
             years = max(1, min(int(recent.group(1) or recent.group(2)), 50))
             return current_year - years, current_year
-        since = re.search(r"(?:自|从)\s*(19\d{2}|20\d{2})\s*年?(?:以来|起)", task)
+        since = re.search(r"(?:自|从)\s*(19\d{2}|20\d{2})\s*年?(?:以来|起)", request)
         if since:
             return int(since.group(1)), current_year
         return None
+
+    @staticmethod
+    def research_request(task: str) -> str:
+        """Keep user-confirmed constraints while excluding upstream node content."""
+
+        match = re.search(
+            r"【用户原始意图】\s*([\s\S]*?)(?=\n\s*【当前工作流节点】|$)",
+            task,
+            re.I,
+        )
+        if match and match.group(1).strip():
+            return match.group(1).strip()[:8000]
+        value = re.split(
+            r"\n\s*【(?:当前工作流节点|本节点收到的输入|执行约束|节点专用任务说明)】",
+            task,
+            maxsplit=1,
+        )[0]
+        return value.strip()[:8000]
 
     @staticmethod
     def research_subject(task: str) -> str:
@@ -250,11 +270,12 @@ class WebResearchService:
         return value or None
 
     def query_variants(self, task: str) -> list[str]:
-        mode = self.research_mode(task)
+        request = self.research_request(task)
+        mode = self.research_mode(request)
         subject = self.research_subject(task)
         normalized_subject = self.normalized_research_subject(subject)
-        mesh_domain = self.mesh_domain(task)
-        institution = self.institution_name(task)
+        mesh_domain = self.mesh_domain(subject)
+        institution = self.institution_name(request)
         if institution and mode == "web":
             return [
                 f'"{institution}" 官网 招生',
@@ -394,11 +415,13 @@ class WebResearchService:
         return list(dict.fromkeys(values))[:4]
 
     async def collect(self, task: str, on_event: EventHandler) -> list[dict[str, Any]]:
-        mode = self.research_mode(task)
+        request = self.research_request(task)
+        subject = self.research_subject(task)
+        mode = self.research_mode(request)
         queries = self.query_variants(task)
         target_sources = self.requested_source_count(task) if mode == "academic" else 12
         year_range = self.requested_year_range(task) if mode == "academic" else None
-        mesh_domain = self.mesh_domain(task)
+        mesh_domain = self.mesh_domain(subject)
         await on_event(
             {
                 "type": "research_planning",
@@ -577,7 +600,10 @@ class WebResearchService:
                 )
                 candidates.extend(relevant)
 
-            sources = self._rank_results(task, candidates)[:target_sources]
+            # The requested count is a preferred target. Keep additional relevant
+            # records when available, while bounding evidence context and UI size.
+            selection_limit = min(80, max(target_sources, target_sources * 2))
+            sources = self._rank_results(task, candidates)[:selection_limit]
             current_year = date.today().year
             await on_event(
                 {
@@ -757,11 +783,12 @@ class WebResearchService:
     def _rank_results(self, task: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         subject = self.normalized_research_subject(self.research_subject(task))
         task_lower = (subject or task).lower()
-        scope_lower = task.lower()
-        mesh_domain = self.mesh_domain(task)
+        request = self.research_request(task)
+        scope_lower = request.lower()
+        mesh_domain = self.mesh_domain(subject)
         year_range = self.requested_year_range(task)
         groups: list[tuple[str, list[str], int, bool]] = []
-        institution = self.institution_name(task)
+        institution = self.institution_name(request)
         if institution:
             groups.append(("institution", [institution.lower()], 8, True))
         if re.search(r"(?<![a-z0-9])2d(?![a-z0-9])|二维", scope_lower):
@@ -1275,7 +1302,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.3.23 "
+                        "EvoAgent/0.3.24 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

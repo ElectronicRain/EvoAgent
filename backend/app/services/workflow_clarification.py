@@ -296,11 +296,11 @@ class WorkflowClarificationService:
                 questions.append(
                     self._number(
                         "literature_count",
-                        "文献规模",
-                        "计划检索并纳入多少篇核心文献？",
+                        "目标文献数",
+                        "希望尽量检索并纳入多少篇核心文献？",
                         30,
                         5,
-                        500,
+                        80,
                         "篇",
                     )
                 )
@@ -766,11 +766,18 @@ class WorkflowClarificationService:
             requirement_text = "\n".join(
                 f"- {item['label']}：{item['value']}" for item in requirements
             )
+            literature_target_note = (
+                "\n文献数量是优先检索目标：应尽量达到或超过；若已取得真实来源但数量不足，"
+                "请如实披露实际数量并继续完成交付，严禁使用虚构文献补足。"
+                if any(item["id"] == "literature_count" for item in requirements)
+                else ""
+            )
             resolved_task = (
                 f"{task.strip()}\n\n"
                 "【运行前已确认的执行要求】\n"
                 f"{requirement_text}\n"
                 "请严格依据以上已确认要求完成任务；不得擅自缩减范围或改变交付形式。"
+                f"{literature_target_note}"
             )
         else:
             resolved_task = task.strip()

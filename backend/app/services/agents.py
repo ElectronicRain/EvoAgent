@@ -817,7 +817,7 @@ class AgentEngine:
             research_sources: list[dict[str, Any]] = []
             if research_requested:
                 research_sources = await web_research_service.collect(input_text, emit)
-                explicit_source_count = web_research_service.explicit_source_count(input_text)
+                target_source_count = web_research_service.explicit_source_count(input_text)
                 if not research_sources:
                     await emit(
                         {
@@ -825,22 +825,31 @@ class AgentEngine:
                             "message": "联网检索未取得可追溯来源，已停止模型生成以防止虚构资料。",
                         }
                     )
-                if not research_sources or (
-                    explicit_source_count and len(research_sources) < explicit_source_count
-                ):
-                    required = explicit_source_count or 1
+                if not research_sources:
                     await emit(
                         {
                             "type": "research_requirements_unmet",
-                            "required_sources": required,
-                            "actual_sources": len(research_sources),
-                            "message": "真实来源数量不足，未调用模型综合。",
+                            "target_sources": target_source_count or 1,
+                            "required_sources": target_source_count or 1,
+                            "actual_sources": 0,
+                            "message": "没有取得真实来源，未调用模型综合。",
                         }
                     )
                     raise RuntimeError(
-                        "真实联网检索来源不足："
-                        f"要求 {required} 条，实际取得 {len(research_sources)} 条；"
+                        "真实联网检索未取得可追溯来源；"
                         "已在模型生成前停止，避免基于零来源编造文献或继续消耗额度"
+                    )
+                target_shortfall = bool(
+                    target_source_count and len(research_sources) < target_source_count
+                )
+                if target_shortfall:
+                    await emit(
+                        {
+                            "type": "research_target_shortfall",
+                            "target_sources": target_source_count,
+                            "actual_sources": len(research_sources),
+                            "message": "未达到偏好目标，但已有真实来源，将继续综合并披露实际数量。",
+                        }
                     )
                 research_context = web_research_service.context(
                     research_sources,
@@ -853,6 +862,13 @@ class AgentEngine:
                     "严禁添加 Gap Filler、Representative Work、To be verified 或任何占位文献；"
                     "文献表中的每一项必须与下方真实来源一一对应。\n\n" + research_context
                 )
+                if target_shortfall:
+                    system_prompt += (
+                        "\n\n本轮用户设置的是偏好目标，不是硬性成功门槛："
+                        f"目标约 {target_source_count} 篇，实际取得 {len(research_sources)} 篇。"
+                        "请继续完成任务，在摘要或方法部分如实披露实际纳入数量；"
+                        "不得把缺少的数量补造成虚假文献。"
+                    )
                 await emit(
                     {
                         "type": "research_context_ready",
