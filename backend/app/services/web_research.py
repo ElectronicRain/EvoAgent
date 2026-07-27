@@ -64,7 +64,8 @@ class WebResearchService:
     )
     academic_trigger = re.compile(
         r"学术|文献|论文|综述|期刊|会议论文|参考文献|引用|引文|DOI|"
-        r"研究现状|研究进展|systematic review|literature review|paper|citation",
+        r"研究现状|研究进展|systematic review|literature review|"
+        r"\breview\b|\bsurvey\b|\bpapers?\b|\barticles?\b|\breferences?\b|citation",
         re.I,
     )
 
@@ -210,7 +211,7 @@ class WebResearchService:
 
         value = " ".join(str(subject or "").split()).strip(" ：:，,。；;、")
         value = re.sub(
-            r"^(?:(?:请|麻烦|帮我|请帮我|我想|我需要|需要|想要)\s*)?"
+            r"^(?:(?:请|麻烦|帮我|请帮我|给我|我想|我需要|需要|想要)\s*)?"
             r"(?:(?:新建|创建|构建|设计|生成|制作|编排|启动)\s*"
             r"(?:一个|一份|一套|新的?)?\s*(?:智能|自动)?\s*工作流\s*"
             r"(?:来|用于|用来|以便)?\s*[,，:：、-]?\s*)+",
@@ -219,13 +220,19 @@ class WebResearchService:
             flags=re.I,
         )
         value = re.sub(
-            r"^(?:(?:请|麻烦|帮我|请帮我|我想|我需要|需要|想要)\s*)?"
+            r"^(?:(?:请|麻烦|帮我|请帮我|给我|我想|我需要|需要|想要)\s*)?"
             r"(?:查找|检索|搜索|查询|调查|调研|了解|整理|汇总)\s*",
             "",
             value,
             flags=re.I,
         )
         value = re.sub(r"^(?:关于|围绕|针对|有关|就)\s*", "", value, flags=re.I)
+        value = re.sub(
+            r"^(?:please\s+)?(?:review|search|find|research|investigate|summarize)\s+",
+            "",
+            value,
+            flags=re.I,
+        )
         # Delivery instructions describe what to do with evidence, not what to
         # search for. Cutting them before query construction keeps scholarly
         # indexes from receiving the whole workflow command.
@@ -269,6 +276,26 @@ class WebResearchService:
         )
         return value or None
 
+    @staticmethod
+    def generalized_academic_queries(topic: str) -> list[str]:
+        """Build domain-independent recall facets for any scholarly topic."""
+
+        base = " ".join(str(topic or "").split()).strip(" ：:，,。；;、-–—\"")[:180]
+        if not base:
+            return []
+        facets = (
+            ("文献综述", "研究进展", "方法", "评价", "应用")
+            if re.search(r"[\u4e00-\u9fff]", base)
+            else (
+                "systematic review",
+                "recent advances",
+                "methods",
+                "benchmark evaluation",
+                "applications",
+            )
+        )
+        return [f'"{base}"', *(f'"{base}" "{facet}"' for facet in facets)]
+
     def query_variants(self, task: str) -> list[str]:
         request = self.research_request(task)
         mode = self.research_mode(request)
@@ -285,7 +312,7 @@ class WebResearchService:
             ]
 
         cleaned = re.sub(
-            r"帮我|请|关于|完成|总结|综述|调查|调研|查询|查找",
+            r"帮我|给我|请|关于|完成|总结|综述|调查|调研|查询|查找",
             " ",
             normalized_subject or subject,
             flags=re.I,
@@ -345,9 +372,11 @@ class WebResearchService:
                 primary = f'"{" ".join(part for part in (modifiers, canonical) if part)}"'
                 values = [
                     primary,
-                    f'"{canonical} survey"',
-                    f'"{canonical} deep learning transformer"',
-                    f'"{canonical} benchmark dataset evaluation"',
+                    f'"{canonical}" "survey"',
+                    f'"{canonical}" "deep learning"',
+                    f'"{canonical}" "transformer"',
+                    f'"{canonical}" "benchmark dataset"',
+                    f'"{canonical}" "applications"',
                 ]
             elif re.search(
                 r"(?:mesh|grid).*(?:quality|assessment)|(?:quality|assessment).*(?:mesh|grid)",
@@ -359,24 +388,32 @@ class WebResearchService:
                     # dominated by perceptual quality papers about textured 3D media.
                     if "structured" in academic_base.lower():
                         values = [
-                            f'"{academic_base}"',
-                            '"structured mesh quality metrics"',
-                            '"structured grid quality"',
-                            '"structured mesh quality indicators"',
+                            '"2D structured mesh" "quality evaluation"'
+                            if "2d" in academic_base.lower()
+                            else '"structured mesh" "quality evaluation"',
+                            '"structured grid" "quality assessment"',
+                            '"structured mesh" "quality metrics"',
+                            '"structured grid" "quality indicators"',
+                            '"computational mesh" "quality metrics"',
+                            '"mesh quality" "numerical simulation"',
                         ]
                     else:
                         values = [
-                            '"mesh quality assessment"',
-                            '"mesh quality metrics"',
-                            '"unstructured mesh quality"',
-                            '"mesh quality indicators"',
+                            '"mesh quality" "assessment"',
+                            '"mesh quality" "metrics"',
+                            '"unstructured mesh" "quality"',
+                            '"mesh quality" "indicators"',
+                            '"computational mesh" "quality"',
+                            '"mesh quality" "numerical simulation"',
                         ]
                 elif mesh_domain == "visual":
                     values = [
                         '"3D mesh visual quality assessment"',
-                        '"textured mesh quality assessment" perceptual metric',
-                        '"no-reference mesh quality" deep learning',
-                        '"colored mesh quality" visual perception',
+                        '"textured mesh quality assessment"',
+                        '"no-reference mesh quality"',
+                        '"colored mesh quality"',
+                        '"3D mesh visual quality" "benchmark"',
+                        '"mesh perceptual quality" "dataset"',
                     ]
                 elif mesh_domain == "comparative":
                     values = [
@@ -384,24 +421,13 @@ class WebResearchService:
                         '"mesh quality metrics"',
                         '"3D mesh visual quality assessment"',
                         '"textured mesh quality assessment"',
+                        '"computational mesh quality" "evaluation"',
+                        '"mesh perceptual quality" "evaluation"',
                     ]
                 else:
-                    values.extend(
-                        [
-                            '"mesh quality assessment"',
-                            '"mesh quality metrics"',
-                            '"mesh quality evaluation"',
-                            '"mesh quality machine learning"',
-                        ]
-                    )
+                    values = self.generalized_academic_queries(academic_base)
             else:
-                values.extend(
-                    [
-                        f"{academic_base} literature review",
-                        f"{academic_base} methods evaluation",
-                        f"{academic_base} latest research",
-                    ]
-                )
+                values = self.generalized_academic_queries(academic_base)
         else:
             values.append(base_query)
         if mode != "academic" and len(values) == 1:
@@ -417,12 +443,24 @@ class WebResearchService:
         # and the visible browser panel must execute exactly the same phrase.
         if mode == "academic":
             values = [
-                f'"{self.crossref_query(value)}"'
-                if re.search(r'["“][^"”]+["”]', value)
-                else value
+                self.exact_quoted_query(value)
                 for value in values
             ]
-        return list(dict.fromkeys(values))[:4]
+        return list(dict.fromkeys(values))[: (6 if mode == "academic" else 4)]
+
+    @staticmethod
+    def exact_quoted_query(query: str) -> str:
+        """Drop unquoted suffixes while preserving independent phrase groups."""
+
+        value = " ".join(str(query or "").split()).strip()
+        quoted = [
+            " ".join(part.split()).strip()
+            for part in re.findall(r'["“]([^"”]+)["”]', value)
+            if part.strip()
+        ]
+        if not quoted:
+            return value[:300]
+        return " ".join(f'"{part}"' for part in dict.fromkeys(quoted))[:300]
 
     @staticmethod
     def crossref_query(query: str) -> str:
@@ -846,14 +884,14 @@ class WebResearchService:
         if institution:
             groups.append(("institution", [institution.lower()], 8, True))
         if re.search(r"(?<![a-z0-9])2d(?![a-z0-9])|二维", scope_lower):
-            groups.append(("dimension", ["2d", "two-dimensional", "二维"], 4, True))
+            groups.append(("dimension", ["2d", "two-dimensional", "二维"], 4, False))
         if re.search(r"结构化网格|structured\s+(grid|mesh)", scope_lower):
             groups.append(
                 (
                     "structured_mesh",
                     ["structured mesh", "structured grid", "block structured", "结构化网格"],
                     5,
-                    True,
+                    False,
                 )
             )
         if re.search(r"网格|\bmesh\b|\bgrid\b", scope_lower):
@@ -1382,7 +1420,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.4.1 "
+                        "EvoAgent/0.4.2 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

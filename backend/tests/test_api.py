@@ -274,7 +274,7 @@ def test_web_research_relevance_rejects_structural_engineering_noise():
         "computational_mesh",
     ]
     assert web_research_service.query_variants(task)[0] == (
-        '"2D structured grid mesh quality assessment"'
+        '"2D structured mesh" "quality evaluation"'
     )
 
 

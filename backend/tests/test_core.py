@@ -140,8 +140,8 @@ def test_web_research_extracts_short_subject_and_constraints_from_workflow_promp
     assert service.explicit_source_count(task) == 40
     assert service.requested_year_range(task) == (date.today().year - 10, date.today().year)
     queries = service.query_variants(task)
-    assert queries[0] == '"mesh quality assessment"'
-    assert len(queries) == 4
+    assert queries[0] == '"mesh quality" "assessment"'
+    assert len(queries) == 6
     assert all("【" not in query and len(query) < 100 for query in queries)
 
 
@@ -221,9 +221,11 @@ def test_academic_research_extracts_human_pose_topic_from_workflow_instruction()
     queries = service.query_variants(task)
     assert queries == [
         '"human pose estimation"',
-        '"human pose estimation survey"',
-        '"human pose estimation deep learning transformer"',
-        '"human pose estimation benchmark dataset evaluation"',
+        '"human pose estimation" "survey"',
+        '"human pose estimation" "deep learning"',
+        '"human pose estimation" "transformer"',
+        '"human pose estimation" "benchmark dataset"',
+        '"human pose estimation" "applications"',
     ]
     assert all("工作流" not in query and "SCI" not in query and "论文" not in query for query in queries)
 
@@ -274,12 +276,48 @@ def test_all_structured_mesh_queries_end_at_the_closing_quote():
     queries = service.query_variants("二维结构化网格质量评估文献综述")
 
     assert queries == [
-        '"2D structured grid mesh quality assessment"',
-        '"structured mesh quality metrics"',
-        '"structured grid quality"',
-        '"structured mesh quality indicators"',
+        '"2D structured mesh" "quality evaluation"',
+        '"structured grid" "quality assessment"',
+        '"structured mesh" "quality metrics"',
+        '"structured grid" "quality indicators"',
+        '"computational mesh" "quality metrics"',
+        '"mesh quality" "numerical simulation"',
     ]
-    assert all(re.fullmatch(r'"[^\"]+"', query) for query in queries)
+    assert all(re.fullmatch(r'"[^\"]+"(?:\s+"[^\"]+")*', query) for query in queries)
+
+
+def test_mixed_language_mesh_query_removes_user_instruction_words():
+    service = WebResearchService()
+
+    queries = service.query_variants("给我 2D structured grid mesh quality assessment 文献综述")
+
+    assert len(queries) == 6
+    assert all("给我" not in query for query in queries)
+    assert service.crossref_query(queries[0]) == "2D structured mesh quality evaluation"
+
+
+def test_arbitrary_academic_topic_gets_domain_independent_query_facets():
+    service = WebResearchService()
+
+    chinese = service.query_variants("帮我检索多模态医学影像诊断相关论文并撰写综述")
+    english = service.query_variants("Review retrieval augmented generation for legal research")
+
+    assert chinese == [
+        '"多模态医学影像诊断"',
+        '"多模态医学影像诊断" "文献综述"',
+        '"多模态医学影像诊断" "研究进展"',
+        '"多模态医学影像诊断" "方法"',
+        '"多模态医学影像诊断" "评价"',
+        '"多模态医学影像诊断" "应用"',
+    ]
+    assert english == [
+        '"retrieval augmented generation for legal research"',
+        '"retrieval augmented generation for legal research" "systematic review"',
+        '"retrieval augmented generation for legal research" "recent advances"',
+        '"retrieval augmented generation for legal research" "methods"',
+        '"retrieval augmented generation for legal research" "benchmark evaluation"',
+        '"retrieval augmented generation for legal research" "applications"',
+    ]
 
 
 def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
