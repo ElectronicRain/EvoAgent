@@ -1302,14 +1302,15 @@ async def clarify_workflow_requirements(
 async def create_workflow(
     payload: WorkflowCreate, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
+    definition = workflow_engine.normalized_definition(payload.definition)
     try:
-        await workflow_engine.validate_runtime_definition(db, payload.definition)
+        await workflow_engine.validate_runtime_definition(db, definition)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     item = Workflow(
         name=payload.name,
         description=payload.description,
-        definition_json=dumps(payload.definition),
+        definition_json=dumps(definition),
     )
     db.add(item)
     await db.flush()
@@ -1324,13 +1325,14 @@ async def update_workflow(
     item = await db.get(Workflow, workflow_id)
     if not item:
         raise not_found("工作流")
+    definition = workflow_engine.normalized_definition(payload.definition)
     try:
-        await workflow_engine.validate_runtime_definition(db, payload.definition)
+        await workflow_engine.validate_runtime_definition(db, definition)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     item.name = payload.name
     item.description = payload.description
-    item.definition_json = dumps(payload.definition)
+    item.definition_json = dumps(definition)
     item.version += 1
     await audit(db, "workflow.updated", "workflow", item.id)
     return row(item)
@@ -1530,6 +1532,13 @@ async def export_workflow_artifact_docx(
     artifact = await db.get(WorkflowArtifact, artifact_id)
     if artifact is None:
         raise not_found("工作流产出文档")
+    run = await db.get(WorkflowRun, artifact.run_id)
+    metadata = loads(artifact.metadata_json, {})
+    if not run or run.status != "completed" or metadata.get("delivery_status") == "needs_revision":
+        raise HTTPException(
+            status_code=409,
+            detail="本次运行未通过最终质量校验，不能作为最终成果导出；请修复问题并重新运行。",
+        )
     filename = safe_docx_filename(artifact.title)
     return Response(
         content=markdown_to_docx(artifact.title, artifact.content),
@@ -1545,6 +1554,11 @@ async def export_workflow_run_docx(
     run = await db.get(WorkflowRun, run_id)
     if run is None:
         raise not_found("工作流运行")
+    if run.status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="本次运行未完成或未通过质量校验，不能导出为最终成果。",
+        )
     workflow = await db.get(Workflow, run.workflow_id)
     title = f"{workflow.name if workflow else '工作流'}-最终成果"
     # Run exports are clean deliverables: omit workflow metadata, task wrappers,

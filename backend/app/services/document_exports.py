@@ -24,6 +24,7 @@ _INLINE_PATTERN = re.compile(
 _TABLE_SEPARATOR = re.compile(r"^:?-{3,}:?$")
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _JSON_FENCE = re.compile(r"```json\s*\n([\s\S]*?)\n```", re.IGNORECASE)
+_OUTPUT_KEYS = ("result", "output", "content", "answer", "markdown", "text", "document")
 
 BODY_COLOR = RGBColor(38, 55, 70)
 HEADING_BLUE = RGBColor(46, 116, 181)
@@ -49,25 +50,49 @@ def content_disposition(filename: str) -> str:
 
 
 def output_to_markdown(value: str | dict[str, Any] | list[Any] | Any) -> str:
+    """Return the human-facing document nested inside a workflow result.
+
+    Completed runs normally store ``{"result": "..."}``, while interrupted
+    and historical runs may contain additional envelopes such as
+    ``{"output": {"result": "..."}}`` or a full node-context snapshot.  A
+    shallow unwrap turned those snapshots into a giant JSON code block in Word.
+    Recursively follow only the well-known delivery keys and keep arbitrary JSON
+    examples intact when no delivery value exists.
+    """
+
+    def extract(current: Any, depth: int = 0) -> str | None:
+        if depth >= 12:
+            return None
+        if isinstance(current, str):
+            source = current.strip()
+            if not source:
+                return ""
+            if source[:1] in "[{\"":
+                try:
+                    decoded = json.loads(source)
+                except (TypeError, json.JSONDecodeError):
+                    return current
+                nested = extract(decoded, depth + 1)
+                return nested if nested is not None else current
+            return current
+        if isinstance(current, dict):
+            for key in _OUTPUT_KEYS:
+                if key not in current:
+                    continue
+                nested = extract(current.get(key), depth + 1)
+                if nested is not None and nested.strip():
+                    return nested
+            return None
+        if isinstance(current, list) and len(current) == 1:
+            return extract(current[0], depth + 1)
+        return None
+
+    extracted = extract(value)
+    if extracted is not None:
+        return extracted
+
     current = value
-    for _ in range(3):
-        if not isinstance(current, str):
-            break
-        source = current.strip()
-        if not source or source[:1] not in "[{\"":
-            return current
-        try:
-            current = json.loads(source)
-        except (TypeError, json.JSONDecodeError):
-            return current
-    if isinstance(current, str):
-        return current
     if isinstance(current, dict):
-        preferred = ("result", "output", "content", "answer", "markdown", "text", "document")
-        for key in preferred:
-            candidate = current.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate
         sections = []
         for key, candidate in current.items():
             if isinstance(candidate, str) and candidate.strip():
@@ -95,10 +120,13 @@ def expand_embedded_result_json(markdown: str) -> str:
             return match.group(0)
         if not isinstance(payload, dict):
             return match.group(0)
-        for key in ("result", "output", "content", "answer", "markdown", "text", "document"):
+        for key in _OUTPUT_KEYS:
             value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+            if value is None:
+                continue
+            expanded = output_to_markdown(value).strip()
+            if expanded and not expanded.startswith("```json"):
+                return expanded
         return match.group(0)
 
     expanded = str(markdown or "")

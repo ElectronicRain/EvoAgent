@@ -4,7 +4,7 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-0.3.24-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-0.3.25-1769c2)](#windows-桌面端)
 
 EvoAgent 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。当前版本已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、安全审批、用户记忆和成果数据库交付。
 
@@ -70,8 +70,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.24_x64-setup.exe
-frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.24_x64_en-US.msi
+frontend/src-tauri/target/release/bundle/nsis/EvoAgent_0.3.25_x64-setup.exe
+frontend/src-tauri/target/release/bundle/msi/EvoAgent_0.3.25_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -177,7 +177,9 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **v0.3.24**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **v0.3.25**。源码构建后，主程序和安装包位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+
+v0.3.25 修复工作流终稿交付链：产出节点会自动跟随画布实际末端节点，评审与修订 Agent 会同时接收检索证据、正文和评审意见；失败或未通过质量校验的运行不能再伪装成“最终成果”导出，嵌套运行结果也会在 Word 导出前递归解包为可读 Markdown。
 
 若使用本地源码版快捷方式，推荐目标为：
 

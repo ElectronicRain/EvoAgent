@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
 from zipfile import ZipFile
 
 from docx import Document
@@ -41,6 +42,21 @@ with first_lock:
 def test_output_to_markdown_unwraps_workflow_result_objects():
     assert output_to_markdown('{"result":"## 可读结果\\n\\n正文"}') == "## 可读结果\n\n正文"
     assert output_to_markdown({"answer": "**完成**"}) == "**完成**"
+    assert output_to_markdown(
+        json.dumps({"output": {"result": "# 最终稿\n\n正文"}}, ensure_ascii=False)
+    ) == "# 最终稿\n\n正文"
+
+
+def test_output_to_markdown_does_not_export_a_full_node_context_as_json():
+    snapshot = {
+        "input": {"task": "写综述"},
+        "researcher": {"output": "检索中间结果"},
+        "artifact": {"output": "# 终稿\n\n可读内容"},
+        "output": {"result": "# 终稿\n\n可读内容"},
+    }
+    result = output_to_markdown(json.dumps(snapshot, ensure_ascii=False))
+    assert result == "# 终稿\n\n可读内容"
+    assert "```json" not in result
 
 
 def test_historical_artifact_json_envelope_is_expanded_before_word_export():

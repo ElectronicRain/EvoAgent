@@ -409,6 +409,11 @@ async function downloadArtifactWord(artifact: Entity) {
   }
 }
 
+function artifactReady(artifact: Entity) {
+  const metadata = parseJson(artifact?.metadata_json, {})
+  return workflowRunStatus.value === 'completed' && metadata.delivery_status !== 'needs_revision'
+}
+
 function previewArtifact(artifact: Entity) {
   output.value = String(artifact.content || '')
   runPanelTab.value = 'result'
@@ -2156,7 +2161,7 @@ onBeforeUnmount(() => {
                 <button :class="{active:runPanelTab==='web'}" @click="runPanelTab='web'">访问网站 <b>{{ researchVisits.length }}</b><i v-if="pendingResearchVerifications">{{ pendingResearchVerifications }}</i></button>
                 <button :class="{active:runPanelTab==='result'}" @click="runPanelTab='result'">最终成果</button>
               </nav>
-              <button v-if="currentRunId && !workflowRunning" class="word-download-link" :disabled="!!exportingDocumentId" @click="downloadWorkflowWord"><Download :size="11" />{{ exportingDocumentId==='run' ? '生成中…' : '下载 Word' }}</button>
+              <button v-if="currentRunId && !workflowRunning" class="word-download-link" :disabled="!!exportingDocumentId || workflowRunStatus!=='completed'" :title="workflowRunStatus==='completed' ? '下载通过质量校验的最终成果' : '运行未通过质量校验，暂不能导出最终成果'" @click="downloadWorkflowWord"><Download :size="11" />{{ exportingDocumentId==='run' ? '生成中…' : workflowRunStatus==='completed' ? '下载 Word' : '终稿未就绪' }}</button>
             </div>
           </div>
           <div v-if="runTimeline.length || workflowRunning" class="run-progress-overview">
@@ -2199,7 +2204,7 @@ onBeforeUnmount(() => {
           <div v-if="runArtifacts.length" class="workflow-artifact-list">
             <article v-for="artifact in runArtifacts" :key="artifact.id" tabindex="0" title="点击预览 Markdown 成果" @click="previewArtifact(artifact)" @keydown.enter="previewArtifact(artifact)">
               <FileText :size="13" /><span><strong>{{ artifact.title }}</strong><small>第 {{ artifact.iteration }} 轮 · 已保存到数据库</small></span>
-              <button class="artifact-download-link" :disabled="!!exportingDocumentId" title="下载排版后的 Word 文档" @click.stop="downloadArtifactWord(artifact)"><Download :size="11" />{{ exportingDocumentId===artifact.id ? '生成中' : 'Word' }}</button>
+              <button class="artifact-download-link" :disabled="!!exportingDocumentId || !artifactReady(artifact)" :title="artifactReady(artifact) ? '下载排版后的 Word 文档' : '该产出未通过最终质量校验'" @click.stop="downloadArtifactWord(artifact)"><Download :size="11" />{{ exportingDocumentId===artifact.id ? '生成中' : artifactReady(artifact) ? 'Word' : '待修订' }}</button>
             </article>
           </div>
           <div class="run-history-list"><div v-for="run in runs.slice(0,5)" :key="run.id"><span><strong>{{ run.duration_ms }} ms · {{ run.iteration_count || 1 }} 轮</strong><small>{{ new Date(run.created_at).toLocaleString('zh-CN') }}</small></span><StatusBadge :status="run.status" /></div><p v-if="!runs.length">暂无运行记录</p></div>

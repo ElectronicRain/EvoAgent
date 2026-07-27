@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import re
 import time
@@ -431,6 +432,71 @@ class WorkflowEngine:
             raise ValueError("工作流包含结构循环；请使用运行设置中的受控循环")
         return ordered
 
+    @staticmethod
+    def synchronize_delivery_bindings(definition: dict[str, Any]) -> dict[str, Any]:
+        """Keep artifact/output templates aligned with their actual graph inputs.
+
+        The expert can insert new nodes immediately before the delivery nodes.
+        Older versions rewired the edges but left ``artifact.config.content``
+        pointing at the previous upstream node, so an entire workflow could run
+        successfully and still export an obsolete outline.  The graph is the
+        source of truth: delivery templates are rebuilt from their current
+        incoming edges before validation, persistence, and execution.
+        """
+
+        nodes = list(definition.get("nodes") or [])
+        edges = list(definition.get("edges") or [])
+        node_map = {str(node.get("id") or ""): node for node in nodes}
+
+        def incoming_sources(node_id: str) -> list[str]:
+            return list(
+                dict.fromkeys(
+                    str(edge.get("source") or "")
+                    for edge in edges
+                    if str(edge.get("target") or "") == node_id
+                    and str(edge.get("source") or "") in node_map
+                )
+            )
+
+        for node in nodes:
+            if node.get("type") != "artifact":
+                continue
+            sources = incoming_sources(str(node.get("id") or ""))
+            if not sources:
+                continue
+            body = "\n\n".join(f"{{{{nodes.{source}.output}}}}" for source in sources)
+            config = dict(node.get("config") or {})
+            config["content"] = f"# 工作流产出\n\n{body}"
+            node["config"] = config
+
+        for node in nodes:
+            if node.get("type") != "output":
+                continue
+            sources = incoming_sources(str(node.get("id") or ""))
+            if not sources:
+                continue
+            preferred = next(
+                (
+                    source
+                    for source in reversed(sources)
+                    if node_map[source].get("type") == "artifact"
+                ),
+                None,
+            )
+            # Non-artifact output nodes often intentionally expose several
+            # fields (for example answer + chunk_count). Preserve that schema.
+            if preferred is None:
+                continue
+            config = dict(node.get("config") or {})
+            config["value"] = {"result": f"{{{{nodes.{preferred}.output}}}}"}
+            node["config"] = config
+        return definition
+
+    @classmethod
+    def normalized_definition(cls, definition: dict[str, Any]) -> dict[str, Any]:
+        normalized = deepcopy(definition)
+        return cls.synchronize_delivery_bindings(normalized)
+
     def validate_definition(self, definition: dict[str, Any]) -> None:
         nodes = list(definition.get("nodes") or [])
         edges = list(definition.get("edges") or [])
@@ -520,6 +586,7 @@ class WorkflowEngine:
         save, expert materialization, and run so all three paths make the same
         promise to the UI.
         """
+        self.synchronize_delivery_bindings(definition)
         self.validate_definition(definition)
         nodes = list(definition.get("nodes") or [])
         issues: list[str] = []
@@ -1436,7 +1503,9 @@ class WorkflowEngine:
         workflow = await db.get(Workflow, workflow_id)
         if not workflow or not workflow.enabled:
             raise LookupError("工作流不存在或未启用")
-        definition = loads(workflow.definition_json, {"nodes": [], "edges": []})
+        definition = self.normalized_definition(
+            loads(workflow.definition_json, {"nodes": [], "edges": []})
+        )
         await self.validate_runtime_definition(db, definition)
         run = WorkflowRun(
             workflow_id=workflow.id,
@@ -1815,7 +1884,11 @@ class WorkflowEngine:
         except WorkflowInterrupted as exc:
             run.status = "interrupted"
             run.error = str(exc)
-            run.output_json = dumps(context.get("nodes", {}))
+            run.output_json = dumps(
+                context.get("runtime", {}).get("previous_output")
+                or context.get("nodes", {}).get("output")
+                or {}
+            )
             run.trace_json = dumps(trace + [{"status": "interrupted", "error": str(exc)}])
             run.control_json = dumps(context.get("runtime", {}))
             run.duration_ms = int((time.perf_counter() - started) * 1000)
@@ -1832,7 +1905,11 @@ class WorkflowEngine:
             error_message = str(exc).strip() or f"{type(exc).__name__}：执行未返回错误详情"
             run.status = "failed"
             run.error = error_message
-            run.output_json = dumps(context.get("nodes", {}))
+            run.output_json = dumps(
+                context.get("runtime", {}).get("previous_output")
+                or context.get("nodes", {}).get("output")
+                or {}
+            )
             run.trace_json = dumps(trace + [{"status": "failed", "error": error_message}])
             run.control_json = dumps(context.get("runtime", {}))
             run.duration_ms = int((time.perf_counter() - started) * 1000)

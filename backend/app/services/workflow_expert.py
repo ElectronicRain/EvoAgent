@@ -262,6 +262,7 @@ class WorkflowExpert:
         knowledge_bases: list[KnowledgeBase],
         agent_draft_keys: set[str] | None = None,
     ) -> dict[str, Any]:
+        definition = WorkflowEngine.normalized_definition(definition)
         agent_ids = {item.id for item in agents}
         agent_draft_keys = agent_draft_keys or set()
         knowledge_ids = {item.id for item in knowledge_bases}
@@ -501,11 +502,17 @@ class WorkflowExpert:
         wants_knowledge = any(
             word in message for word in ("知识库", "检索", "资料", "文档", "RAG", "依据")
         )
-        matched_knowledge = [
-            item for item in knowledge_bases if item.name in message
-        ]
-        if wants_knowledge and not matched_knowledge:
-            matched_knowledge = knowledge_bases[:1]
+        matched_knowledge = [item for item in knowledge_bases if item.name in message]
+        if wants_knowledge and not matched_knowledge and re.search(r"知识库|RAG", message, re.I):
+            matched_knowledge = sorted(
+                (
+                    item
+                    for item in knowledge_bases
+                    if self._resource_score(item, message) >= 3
+                ),
+                key=lambda item: self._resource_score(item, message),
+                reverse=True,
+            )
         matched_knowledge = matched_knowledge[:2]
         nodes: list[dict[str, Any]] = [
             {"id": "input", "type": "input", "label": "任务输入", "config": {}},
@@ -807,6 +814,91 @@ class WorkflowExpert:
             )
             changes.append(f"生成新 Agent 完整配置：{draft['name']}")
 
+    @staticmethod
+    def _preserve_review_context(definition: dict[str, Any]) -> None:
+        """Route source material and manuscript sections into review/revision nodes.
+
+        A purely linear chain can lose the manuscript when a reviewer outputs
+        only comments and the following reviser receives only those comments.
+        For expert-generated, non-branching graphs, quality nodes therefore get
+        direct inputs from relevant upstream research/writing nodes as well as
+        the immediate reviewer. The runtime's ``auto_input`` mode labels every
+        source, so the final Agent can distinguish evidence, draft, and review.
+        """
+
+        nodes = list(definition.get("nodes") or [])
+        edges = definition.setdefault("edges", [])
+        if any(node.get("type") == "condition" for node in nodes):
+            return
+        node_map = {str(node.get("id") or ""): node for node in nodes}
+        incoming: dict[str, set[str]] = {node_id: set() for node_id in node_map}
+        for edge in edges:
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            if source in node_map and target in node_map:
+                incoming[target].add(source)
+
+        def ancestors(node_id: str) -> set[str]:
+            found: set[str] = set()
+            stack = list(incoming.get(node_id, set()))
+            while stack:
+                current = stack.pop()
+                if current in found:
+                    continue
+                found.add(current)
+                stack.extend(incoming.get(current, set()))
+            return found
+
+        quality_pattern = re.compile(
+            r"审核|评审|核验|校验|修订|改写|润色|终稿|review|revis|final",
+            re.I,
+        )
+        source_pattern = re.compile(
+            r"检索|研究|资料|文献|提纲|大纲|撰写|写作|正文|主体|首尾|摘要|引言|结论|"
+            r"research|literature|outline|writer|draft|introduction|conclusion",
+            re.I,
+        )
+        existing = {
+            (str(edge.get("source") or ""), str(edge.get("target") or ""))
+            for edge in edges
+        }
+        order = {str(node.get("id") or ""): index for index, node in enumerate(nodes)}
+        for target in nodes:
+            if target.get("type") != "agent" or not quality_pattern.search(
+                str(target.get("label") or "")
+            ):
+                continue
+            target_id = str(target.get("id") or "")
+            upstream = sorted(ancestors(target_id), key=lambda item: order.get(item, -1))
+            selected = [
+                node_id
+                for node_id in upstream
+                if node_map[node_id].get("type") == "agent"
+                and (
+                    source_pattern.search(str(node_map[node_id].get("label") or ""))
+                    or quality_pattern.search(str(node_map[node_id].get("label") or ""))
+                )
+            ][-8:]
+            for source in selected:
+                if (source, target_id) in existing:
+                    continue
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target_id,
+                        "source_slot": "output",
+                        "target_slot": "input",
+                    }
+                )
+                existing.add((source, target_id))
+            config = dict(target.get("config") or {})
+            config["auto_input"] = True
+            config["input_context_char_limit"] = max(
+                int(config.get("input_context_char_limit") or 0),
+                100000,
+            )
+            target["config"] = config
+
     def _augment_requested_branch(
         self,
         definition: dict[str, Any],
@@ -1081,6 +1173,7 @@ class WorkflowExpert:
         )
         self._insert_agent_drafts(proposed, agent_drafts, fallback_changes)
         self._augment_requested_branch(proposed, message, fallback_changes)
+        self._preserve_review_context(proposed)
         proposed.setdefault("execution", {})
         explicit_count = re.search(r"(\d{1,2})\s*(?:次|轮)", message)
         if explicit_count and any(word in message for word in ("循环", "迭代", "执行")):
@@ -1111,6 +1204,7 @@ class WorkflowExpert:
                 message,
                 fallback_changes,
             )
+            self._preserve_review_context(safe_fallback)
             sanitized = self._sanitize(
                 safe_fallback,
                 list(agents),
@@ -1339,6 +1433,7 @@ class WorkflowExpert:
             knowledge_bases=list(knowledge_bases),
             full_capabilities=full_capabilities,
         )
+        self._preserve_review_context(definition)
         referenced_keys = {
             str((node.get("config") or {}).get("agent_draft_key"))
             for node in definition.get("nodes", [])
