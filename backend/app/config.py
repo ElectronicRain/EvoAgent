@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EvoAgent"
-    version: str = "0.3.25"
+    version: str = "0.4.0"
     debug: bool = True
     database_url: str = f"sqlite+aiosqlite:///{(DATA_ROOT / 'evoagent.db').as_posix()}"
     workspace_root: Path = DATA_ROOT / "workspace"

@@ -255,6 +255,18 @@ def test_academic_research_extracts_human_pose_topic_from_workflow_instruction()
     assert ranked[0]["matched_concepts"] == ["pose_estimation", "human_body"]
 
 
+def test_crossref_query_uses_only_explicit_quoted_concepts():
+    service = WebResearchService()
+
+    assert service.crossref_query(
+        '"structured grid quality" finite volume solver evaluation'
+    ) == "structured grid quality"
+    assert service.crossref_query(
+        '"human pose estimation" deep learning transformer 2D 3D'
+    ) == "human pose estimation"
+    assert service.crossref_query("mesh quality CFD") == "mesh quality CFD"
+
+
 def test_computational_mesh_research_excludes_visual_and_medical_namesakes():
     service = WebResearchService()
     task = "数值计算网格质量评估近 5 年文献综述"

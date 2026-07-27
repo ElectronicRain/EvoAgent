@@ -414,6 +414,27 @@ class WebResearchService:
             )
         return list(dict.fromkeys(values))[:4]
 
+    @staticmethod
+    def crossref_query(query: str) -> str:
+        """Use explicit quoted concepts as Crossref's bibliographic query.
+
+        Query variants may append discovery modifiers for a web search engine,
+        for example ``"structured grid quality" finite volume solver evaluation``.
+        Crossref treats every appended word as bibliographic evidence, which can
+        dilute an otherwise precise concept search.  When the variant contains
+        quoted phrases, those phrases are therefore the complete Crossref query.
+        """
+
+        value = " ".join(str(query or "").split()).strip()
+        quoted = [
+            " ".join(part.split()).strip()
+            for part in re.findall(r'["“]([^"”]+)["”]', value)
+            if part.strip()
+        ]
+        if quoted:
+            return " ".join(dict.fromkeys(quoted))[:300]
+        return value[:300]
+
     async def collect(self, task: str, on_event: EventHandler) -> list[dict[str, Any]]:
         request = self.research_request(task)
         subject = self.research_subject(task)
@@ -435,12 +456,20 @@ class WebResearchService:
         )
         candidates: list[dict[str, Any]] = []
         verification_offered = False
+        used_crossref_queries: set[str] = set()
         async with httpx.AsyncClient(
             timeout=15,
             follow_redirects=True,
             headers={"User-Agent": "EvoAgent/0.1 academic-research"},
         ) as client:
             for query in queries:
+                crossref_query = self.crossref_query(query)
+                crossref_query_key = crossref_query.casefold()
+                include_crossref = (
+                    mode == "academic" and crossref_query_key not in used_crossref_queries
+                )
+                if include_crossref:
+                    used_crossref_queries.add(crossref_query_key)
                 search_url = (
                     self.scholar_search_url(query)
                     if mode == "academic"
@@ -448,14 +477,21 @@ class WebResearchService:
                 )
                 provider_urls = (
                     [
-                        {"provider": "Google Scholar", "url": search_url},
-                        {
-                            "provider": "Crossref",
-                            "url": (
-                                "https://api.crossref.org/works?query.bibliographic="
-                                f"{quote_plus(query)}"
-                            ),
-                        },
+                        {"provider": "Google Scholar", "query": query, "url": search_url},
+                        *(
+                            [
+                                {
+                                    "provider": "Crossref",
+                                    "query": crossref_query,
+                                    "url": (
+                                        "https://api.crossref.org/works?query.bibliographic="
+                                        f"{quote_plus(crossref_query)}"
+                                    ),
+                                }
+                            ]
+                            if include_crossref
+                            else []
+                        ),
                     ]
                     if mode == "academic"
                     else [
@@ -470,6 +506,10 @@ class WebResearchService:
                         },
                     ]
                 )
+                provider_queries = {
+                    str(item["provider"]): str(item.get("query") or query)
+                    for item in provider_urls
+                }
                 await on_event(
                     {
                         "type": "web_search_started",
@@ -481,6 +521,7 @@ class WebResearchService:
                         ),
                         "scholar_url": search_url if mode == "academic" else None,
                         "provider_urls": provider_urls,
+                        "provider_queries": provider_queries,
                     }
                 )
                 results, provider_errors = await self._search(
@@ -489,6 +530,8 @@ class WebResearchService:
                     mode,
                     target_sources,
                     year_range=year_range,
+                    crossref_query=crossref_query,
+                    include_crossref=include_crossref,
                 )
                 for provider_error in provider_errors:
                     provider_target = next(
@@ -579,6 +622,7 @@ class WebResearchService:
                         "type": "web_search_results",
                         "query": query,
                         "mode": mode,
+                        "provider_queries": provider_queries,
                         "count": len(relevant),
                         "discarded": len(results) - len(relevant),
                         "results": [
@@ -1011,20 +1055,23 @@ class WebResearchService:
         target_sources: int = 12,
         *,
         year_range: tuple[int, int] | None = None,
+        crossref_query: str | None = None,
+        include_crossref: bool = True,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if mode == "academic":
-            providers = [
-                ("Google Scholar", self._search_google_scholar(client, query)),
-                (
-                    "Crossref",
-                    self._search_crossref(
-                        client,
-                        query,
-                        rows=max(20, min(target_sources * 2, 80)),
-                        year_range=year_range,
-                    ),
-                ),
-            ]
+            providers = [("Google Scholar", self._search_google_scholar(client, query))]
+            if include_crossref:
+                providers.append(
+                    (
+                        "Crossref",
+                        self._search_crossref(
+                            client,
+                            crossref_query or self.crossref_query(query),
+                            rows=max(20, min(target_sources * 2, 80)),
+                            year_range=year_range,
+                        ),
+                    )
+                )
         else:
             providers = [
                 ("360 Web Search", self._search_360(client, query)),
@@ -1302,7 +1349,7 @@ class WebResearchService:
                 params=params,
                 headers={
                     "User-Agent": (
-                        "EvoAgent/0.3.25 "
+                        "EvoAgent/0.4.0 "
                         "(+https://github.com/ElectronicRain/EvoAgent)"
                     )
                 },

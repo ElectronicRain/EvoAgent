@@ -102,7 +102,7 @@ const chatResearchVisits = computed<ChatResearchVisit[]>(() => {
   for (const event of steps.value) {
     if (event.type === 'web_search_started') {
       for (const target of event.provider_urls || [{ ...event, url: event.search_url }]) {
-        put({ ...event, ...target, title: `${target.provider || event.search_label}：${event.query}` }, 'searched')
+        put({ ...event, ...target, title: `${target.provider || event.search_label}：${target.query || event.query}` }, 'searched')
       }
     } else if (['web_search_results', 'research_sources_selected'].includes(event.type)) {
       for (const result of event.results || []) put(result, 'discovered')

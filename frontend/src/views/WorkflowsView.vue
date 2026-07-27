@@ -490,15 +490,19 @@ function recordResearchEvent(event: Entity, nodeId: string) {
     const targets = event.provider_urls || [{ ...event, url: event.search_url }]
     for (const target of targets) {
       upsertResearchVisit(
-        { ...event, ...target, title: `${target.provider || event.search_label}：${event.query}` },
+        { ...event, ...target, title: `${target.provider || event.search_label}：${target.query || event.query}` },
         nodeId,
         'searching',
       )
     }
   } else if (type === 'web_search_results' || type === 'research_sources_selected') {
     if (type === 'web_search_results') {
+      const providerQueries = Object.values(event.provider_queries || {}).map(String)
       for (const visit of researchVisits.value) {
-        if (visit.status === 'searching' && visit.title.endsWith(String(event.query || ''))) visit.status = 'searched'
+        if (
+          visit.status === 'searching'
+          && [String(event.query || ''), ...providerQueries].some(query => query && visit.title.endsWith(query))
+        ) visit.status = 'searched'
       }
     }
     for (const result of event.results || []) upsertResearchVisit(result, nodeId, 'discovered')
