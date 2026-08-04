@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 
+from .research_routing import research_routing_service
+
 
 @dataclass
 class TaskIntent:
@@ -13,6 +15,10 @@ class TaskIntent:
     required_capabilities: list[str]
     confidence: float
     needs_clarification: bool = False
+    domain: str = "general_web"
+    domain_label: str = "通用任务"
+    research_mode: str | None = None
+    preferred_sources: list[str] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -41,22 +47,36 @@ class IntentService:
         r"modify|fix|add|delete|refactor|implement|create|write",
         re.I,
     )
-    _analysis = re.compile(r"分析|比较|解释|总结|审查|检查|评估|规划|设计|review|analy[sz]e|explain", re.I)
+    _analysis = re.compile(
+        r"分析|比较|解释|总结|审查|检查|评估|规划|设计|review|analy[sz]e|explain", re.I
+    )
 
     def classify(self, text: str) -> TaskIntent:
         normalized = " ".join(text.strip().split())
+        route = research_routing_service.classify(normalized)
         command = bool(self._command.search(normalized))
         local = bool(self._local.search(normalized))
         knowledge = bool(self._knowledge.search(normalized))
-        research = bool(self._research.search(normalized))
         change = bool(self._change.search(normalized))
+        research = bool(self._research.search(normalized)) or (
+            not change and research_routing_service.should_research(normalized)
+        )
 
         # A workflow instruction such as “执行前沿文献检索” describes the research
         # goal, not a shell command. Route it to deterministic web research unless
         # the user also refers to a local resource/command environment.
-        if research and not local:
+        explicit_external_research = bool(
+            re.search(r"联网|网页|网站|在线搜索|最新新闻|\bonline\b|\bweb\b", normalized, re.I)
+        )
+        if knowledge and not explicit_external_research:
+            category = "knowledge_retrieval"
+            capabilities = ["knowledge", "mcp"]
+        elif research and not local:
             category = "web_research"
             capabilities = ["web_research", "mcp"]
+        elif change and not local:
+            category = "implementation"
+            capabilities = ["skills", "exec"]
         elif command:
             category = "command_execution"
             capabilities = ["exec", "local_files"]
@@ -66,12 +86,6 @@ class IntentService:
         elif local:
             category = "local_file_access"
             capabilities = ["local_files"]
-        elif knowledge:
-            category = "knowledge_retrieval"
-            capabilities = ["knowledge", "mcp"]
-        elif change:
-            category = "implementation"
-            capabilities = ["skills", "exec"]
         elif self._analysis.search(normalized):
             category = "analysis"
             capabilities = ["skills"]
@@ -87,7 +101,11 @@ class IntentService:
             "执行": r"执行|运行|测试|构建|安装|run|exec|test|build|install",
             "分析": r"分析|比较|解释|总结|审查|评估|analy[sz]e|review|explain",
         }
-        actions = [label for label, pattern in action_patterns.items() if re.search(pattern, normalized, re.I)]
+        actions = [
+            label
+            for label, pattern in action_patterns.items()
+            if re.search(pattern, normalized, re.I)
+        ]
         targets = []
         for match in re.findall(r"[`“\"]([^`”\"]{2,240})[`”\"]", normalized):
             if match not in targets:
@@ -98,7 +116,9 @@ class IntentService:
                 targets.append(cleaned)
 
         goal = normalized[:300]
-        vague = len(normalized) < 4 or bool(re.fullmatch(r"(?:处理|搞一下|看看|继续|这个|那个)[吧。！!]?", normalized))
+        vague = len(normalized) < 4 or bool(
+            re.fullmatch(r"(?:处理|搞一下|看看|继续|这个|那个)[吧。！!]?", normalized)
+        )
         return TaskIntent(
             category=category,
             goal=goal,
@@ -107,6 +127,10 @@ class IntentService:
             required_capabilities=capabilities,
             confidence=0.55 if vague else 0.92 if category != "conversation" else 0.72,
             needs_clarification=vague,
+            domain=route.domain,
+            domain_label=route.domain_label,
+            research_mode=route.mode if research else None,
+            preferred_sources=list(route.preferred_sources) if research else None,
         )
 
     @staticmethod
@@ -119,7 +143,14 @@ class IntentService:
             f"动作：{'、'.join(intent.actions)}\n"
             f"目标对象：{targets}\n"
             f"所需能力：{'、'.join(intent.required_capabilities)}\n"
-            "先核对目标和约束，再选择工具；工具执行后依据真实结果回答。"
+            f"任务领域：{intent.domain_label}（{intent.domain}）\n"
+            + (
+                f"检索模式：{intent.research_mode}；优先来源："
+                f"{'、'.join(intent.preferred_sources or [])}\n"
+                if intent.research_mode
+                else ""
+            )
+            + "先核对目标和约束，再选择工具；工具执行后依据真实结果回答。"
         )
 
 

@@ -23,6 +23,50 @@ def test_vague_review_requests_key_decisions_before_run():
     } == question_ids(result)
 
 
+def test_stock_research_asks_market_specific_questions_before_orchestration():
+    result = workflow_clarification_service.analyze(
+        "我想研究后面A股哪只股票会大涨，哪些板块比较看好，"
+        "给我建议，价格区间在50元以下的，有潜力的股票和建议",
+        phase="orchestration",
+    )
+
+    assert result["task_type"] == "financial_research"
+    assert result["task_type_label"] == "证券市场研究"
+    assert "price_ceiling" not in question_ids(result)
+    assert {
+        "investment_horizon",
+        "risk_preference",
+        "analysis_style",
+        "candidate_count",
+        "workflow_strategy",
+    } == question_ids(result)
+
+
+def test_stock_software_development_is_not_misclassified_as_market_research():
+    result = workflow_clarification_service.analyze("开发一个A股行情分析系统")
+
+    assert result["task_type"] == "implementation"
+    assert "runtime_platform" in question_ids(result)
+    assert "risk_preference" not in question_ids(result)
+
+
+def test_resolved_stock_research_adds_current_data_and_risk_constraints():
+    result = workflow_clarification_service.resolve(
+        "研究A股50元以下的潜力股票和行业板块",
+        {
+            "investment_horizon": "medium",
+            "risk_preference": "balanced",
+            "analysis_style": "comprehensive",
+            "candidate_count": 8,
+        },
+    )
+
+    assert "研究周期：中期（1—6 个月）" in result["resolved_task"]
+    assert "行情与资料基准日期" in result["resolved_task"]
+    assert "不得承诺某只股票必涨" in result["resolved_task"]
+    assert "非投资建议声明" in result["resolved_task"]
+
+
 def test_explicit_review_does_not_repeat_answers_already_in_task():
     result = workflow_clarification_service.analyze(
         "用中文撰写一篇系统综述，检索近5年不少于30篇文献，重点比较生成式人工智能在高校教学中的应用效果。"

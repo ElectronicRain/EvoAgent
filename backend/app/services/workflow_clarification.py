@@ -25,6 +25,16 @@ class WorkflowClarificationService:
                 re.I,
             ),
         ),
+        (
+            "financial_research",
+            re.compile(
+                r"A股|股票|个股|板块|股价|涨停|大涨|牛股|证券|沪深|上证|深证|"
+                r"创业板|科创板|北交所|港股|美股|ETF|基金|行业轮动|资金流向|"
+                r"市盈率|市净率|估值|财报|基本面|上市公司|"
+                r"stock|equity|share\s+price|securities|portfolio|valuation|earnings",
+                re.I,
+            ),
+        ),
         ("translation", re.compile(r"翻译|译成|中译英|英译中|translate|translation", re.I)),
         (
             "presentation",
@@ -165,6 +175,32 @@ class WorkflowClarificationService:
         r"quality[-\s]?first|speed[-\s]?first|traceab|parallel|serial",
         re.I,
     )
+    _investment_horizon = re.compile(
+        r"短线|超短|日内|中短期|中期|长期|长线|未来\s*\d+\s*(?:天|周|月|年)|"
+        r"持有\s*\d+\s*(?:天|周|月|年)|investment\s+horizon|short[-\s]?term|long[-\s]?term",
+        re.I,
+    )
+    _risk_preference = re.compile(
+        r"保守|稳健|平衡|进取|激进|低风险|中风险|高风险|风险偏好|最大回撤|"
+        r"conservative|balanced|aggressive|risk\s+(?:profile|tolerance)",
+        re.I,
+    )
+    _market_analysis_style = re.compile(
+        r"基本面|技术面|量化|资金面|政策面|估值分析|财务分析|综合分析|"
+        r"fundamental|technical\s+analysis|quantitative|multi[-\s]?factor",
+        re.I,
+    )
+    _price_constraint = re.compile(
+        r"(?:价格|股价)?\s*(?:区间)?\s*(?:在|低于|不高于|小于|≤)?\s*"
+        r"\d+(?:\.\d+)?\s*元\s*(?:以下|以内|之内)?|"
+        r"(?:under|below)\s*[¥￥$]?\s*\d+(?:\.\d+)?",
+        re.I,
+    )
+    _candidate_count = re.compile(
+        r"(?:推荐|筛选|给出|选择|候选)?\s*\d+\s*只(?:股票|个股)?|"
+        r"(?:top|recommend)\s*\d+\s*(?:stocks?|equities)",
+        re.I,
+    )
 
     @staticmethod
     def _choice(
@@ -231,6 +267,13 @@ class WorkflowClarificationService:
 
     def _task_type(self, task: str, context: str) -> str:
         combined = f"{task}\n{context}"
+        explicit_implementation = re.compile(
+            r"开发|实现|编程|写代码|修复|重构|搭建|部署|接口开发|"
+            r"implement|develop|code|refactor|deploy|debug|fix",
+            re.I,
+        )
+        if explicit_implementation.search(combined):
+            return "implementation"
         for task_type, pattern in self._task_patterns:
             if pattern.search(combined):
                 return task_type
@@ -340,6 +383,74 @@ class WorkflowClarificationService:
                         "最希望综述重点回答什么问题？",
                         "发展脉络、核心方法、代表性成果、主要争议与未来趋势",
                         "例如：重点比较不同技术路线的效果和适用场景",
+                    )
+                )
+
+        elif task_type == "financial_research":
+            if not self._investment_horizon.search(normalized):
+                questions.append(
+                    self._choice(
+                        "investment_horizon",
+                        "研究周期",
+                        "候选股票主要按哪个时间周期评估？",
+                        [
+                            ("short", "短期（1—4 周）", "更关注事件催化、资金与波动风险"),
+                            ("medium", "中期（1—6 个月）", "兼顾行业景气、业绩趋势和估值"),
+                            ("long", "长期（6 个月以上）", "侧重商业质量、竞争力和长期现金流"),
+                        ],
+                        "medium",
+                    )
+                )
+            if not self._risk_preference.search(normalized):
+                questions.append(
+                    self._choice(
+                        "risk_preference",
+                        "风险偏好",
+                        "研究建议按什么风险偏好筛选？",
+                        [
+                            ("conservative", "稳健", "优先盈利质量、现金流和较低波动"),
+                            ("balanced", "平衡", "兼顾增长潜力、估值与风险"),
+                            ("aggressive", "进取", "允许较高波动，重视成长和催化空间"),
+                        ],
+                        "balanced",
+                    )
+                )
+            if not self._market_analysis_style.search(normalized):
+                questions.append(
+                    self._choice(
+                        "analysis_style",
+                        "分析侧重",
+                        "候选筛选应采用哪类分析框架？",
+                        [
+                            ("comprehensive", "综合分析", "结合行业、基本面、估值、资金与风险"),
+                            ("fundamental", "基本面优先", "侧重业绩、现金流、竞争力与估值"),
+                            ("market", "市场与催化优先", "侧重趋势、资金、政策与事件催化"),
+                        ],
+                        "comprehensive",
+                    )
+                )
+            if not self._price_constraint.search(normalized):
+                questions.append(
+                    self._number(
+                        "price_ceiling",
+                        "价格上限",
+                        "候选股票的当前价格上限是多少？",
+                        50,
+                        1,
+                        10000,
+                        "元",
+                    )
+                )
+            if not self._candidate_count.search(normalized) and len(questions) < 5:
+                questions.append(
+                    self._number(
+                        "candidate_count",
+                        "候选数量",
+                        "最终希望给出多少只重点候选股票？",
+                        8,
+                        1,
+                        30,
+                        "只",
                     )
                 )
 
@@ -663,6 +774,7 @@ class WorkflowClarificationService:
         questions = questions[:5]
         labels = {
             "literature_review": "文献综述",
+            "financial_research": "证券市场研究",
             "translation": "翻译",
             "presentation": "演示文稿",
             "data_analysis": "数据分析",
@@ -772,12 +884,20 @@ class WorkflowClarificationService:
                 if any(item["id"] == "literature_count" for item in requirements)
                 else ""
             )
+            financial_research_note = (
+                "\n证券市场结论必须注明行情与资料基准日期，优先核验交易所、"
+                "巨潮资讯、公司公告及监管信息；严格区分已核实事实、模型推断与情景假设。"
+                "不得承诺某只股票必涨或保证收益，应列出反向风险、失效条件和非投资建议声明。"
+                if analysis["task_type"] == "financial_research"
+                else ""
+            )
             resolved_task = (
                 f"{task.strip()}\n\n"
                 "【运行前已确认的执行要求】\n"
                 f"{requirement_text}\n"
                 "请严格依据以上已确认要求完成任务；不得擅自缩减范围或改变交付形式。"
                 f"{literature_target_note}"
+                f"{financial_research_note}"
             )
         else:
             resolved_task = task.strip()

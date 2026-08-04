@@ -610,7 +610,13 @@ function agentEventInfo(event: Entity) {
   else if (type === 'rag_hybrid_retrieval_completed') detail = `向量候选 ${event.dense_candidates || 0} · 全文候选 ${event.lexical_candidates || 0}`
   else if (type === 'rag_rerank_completed') detail = `重排 ${event.reranked || 0} 条 · 选中 ${event.selected || 0} 条`
   else if (type === 'rag_context_assembled') detail = `上下文 ${event.context_chars || 0} 字 · 引用 ${event.citation_count || 0} 条`
-  else if (type === 'research_planning') detail = `${event.mode === 'academic' ? '学术' : '网页'}模式 · ${event.queries?.length || 0} 组检索词`
+  else if (type === 'research_planning') {
+    const domain = event.domain_label || (event.mode === 'academic' ? '学术研究' : '网页研究')
+    const sources = Array.isArray(event.preferred_sources)
+      ? event.preferred_sources.slice(0, 2).join('、')
+      : ''
+    detail = `${domain} · ${event.queries?.length || 0} 组检索词${sources ? ` · 优先 ${sources}` : ''}`
+  }
   else if (type === 'web_search_started') detail = String(event.query || '')
   else if (type === 'web_search_results') detail = `取得 ${event.count || 0} 条 · 排除 ${event.discarded || 0} 条`
   else if (type === 'web_search_provider_error') detail = `${event.provider || '检索源'} · ${event.error_type || ''} · ${event.error || '暂时不可用'}`

@@ -9,6 +9,7 @@ import pytest
 from backend.app.services.agents import AgentEngine, AgentToolPolicy
 from backend.app.services.knowledge import chunk_text
 from backend.app.services.intent import intent_service
+from backend.app.services.research_routing import research_routing_service
 from backend.app.services.secrets import secret_store
 from backend.app.services.tools import ToolRuntime
 from backend.app.services.workflows import (
@@ -18,12 +19,136 @@ from backend.app.services.workflows import (
     render_value,
 )
 from backend.app.services.web_research import WebResearchService
+from backend.app.services.workflow_expert import WorkflowExpert
 
 
 def test_template_rendering_preserves_typed_values():
     context = {"input": {"count": 3}, "nodes": {"a": {"output": "done"}}}
     assert render_value("{{input.count}}", context) == 3
     assert render_value("result={{nodes.a.output}}", context) == "result=done"
+
+
+def test_financial_research_uses_current_web_sources_instead_of_scholar():
+    task = (
+        "我想研究后面A股哪只股票会大涨，哪些板块比较看好，给我建议，"
+        "价格区间在50元以下的，有潜力的股票和建议"
+    )
+    route = research_routing_service.classify(task)
+    queries = WebResearchService().query_variants(task)
+    intent = intent_service.classify(task)
+
+    assert route.domain == "finance_markets"
+    assert route.mode == "web"
+    assert route.high_stakes is True
+    assert intent.category == "web_research"
+    assert intent.domain == "finance_markets"
+    assert intent.research_mode == "web"
+    assert len(queries) == 6
+    assert any("50元以下" in query and "估值" in query for query in queries)
+    assert any("cninfo.com.cn" in query for query in queries)
+    assert any("风险" in query for query in queries)
+    assert all("Google Scholar" not in query and "Crossref" not in query for query in queries)
+
+
+def test_explicit_finance_literature_request_still_uses_academic_route():
+    task = "检索A股因子投资相关论文并撰写综述"
+    route = research_routing_service.classify(task)
+
+    assert route.domain == "finance_markets"
+    assert route.mode == "academic"
+    assert "Google Scholar" in route.preferred_sources
+
+
+def test_financial_web_results_are_ranked_by_market_evidence_not_full_sentence():
+    service = WebResearchService()
+    task = "研究A股50元以下的潜力股票和看好的行业板块"
+    official = {
+        "title": "某上市公司年度业绩与现金流公告",
+        "url": "https://www.cninfo.com.cn/new/disclosure/detail/example",
+        "source": "Bing",
+        "description": "A股上市公司披露营业收入、净利润和经营现金流变化。",
+    }
+    noise = {
+        "title": "海外旅游摄影攻略",
+        "url": "https://example.com/travel",
+        "source": "Bing",
+        "description": "介绍景点和相机参数。",
+    }
+
+    ranked = service._rank_results(task, [noise, official])
+
+    assert [item["title"] for item in ranked] == [official["title"]]
+    assert "finance_market" in ranked[0]["matched_concepts"]
+    assert "official_source" in ranked[0]["matched_concepts"]
+
+
+def test_non_academic_workflow_guard_rejects_scholarly_template_leakage():
+    bad_definition = {
+        "nodes": [
+            {
+                "id": "papers",
+                "type": "agent",
+                "label": "Google Scholar 论文检索",
+                "config": {},
+            }
+        ]
+    }
+
+    assert WorkflowExpert._definition_looks_academic(bad_definition, []) is True
+    assert (
+        WorkflowExpert._definition_looks_academic(
+            {
+                "nodes": [
+                    {
+                        "id": "market",
+                        "type": "agent",
+                        "label": "上市公司基本面分析",
+                        "config": {},
+                    }
+                ]
+            },
+            [],
+        )
+        is False
+    )
+
+
+def test_workflow_expert_builds_a_market_team_for_non_academic_stock_research():
+    roles = WorkflowExpert._recommended_agent_roles("研究A股50元以下的潜力股票和看好的行业板块")
+
+    assert roles == [
+        "市场与行业研究",
+        "上市公司基本面分析",
+        "风险与合规审查",
+        "投资建议整合",
+    ]
+
+
+def test_domain_does_not_override_a_stock_software_implementation_request():
+    task = "开发一个A股行情分析系统并完成接口测试"
+
+    assert intent_service.classify(task).category == "implementation"
+    assert WorkflowExpert._recommended_agent_roles(task) == [
+        "需求分析",
+        "开发实现",
+        "测试验证",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("task", "domain", "mode"),
+    [
+        ("调查最新教育政策对高校的影响", "policy_government", "web"),
+        ("整理今天人工智能行业的重要新闻", "news_current", "web"),
+        ("比较今年适合旅行拍照的手机", "product_comparison", "web"),
+        ("检索人工智能教育相关论文", "education", "academic"),
+    ],
+)
+def test_research_routing_generalizes_across_domains(task, domain, mode):
+    route = research_routing_service.classify(task)
+
+    assert route.domain == domain
+    assert route.mode == mode
 
 
 def test_workflow_cycle_detection():
@@ -227,7 +352,9 @@ def test_academic_research_extracts_human_pose_topic_from_workflow_instruction()
         '"human pose estimation" "benchmark dataset"',
         '"human pose estimation" "applications"',
     ]
-    assert all("工作流" not in query and "SCI" not in query and "论文" not in query for query in queries)
+    assert all(
+        "工作流" not in query and "SCI" not in query and "论文" not in query for query in queries
+    )
 
     ranked = service._rank_results(
         task,
@@ -252,21 +379,21 @@ def test_academic_research_extracts_human_pose_topic_from_workflow_instruction()
             },
         ],
     )
-    assert [item["title"] for item in ranked] == [
-        "Human Pose Estimation with Spatial Transformers"
-    ]
+    assert [item["title"] for item in ranked] == ["Human Pose Estimation with Spatial Transformers"]
     assert ranked[0]["matched_concepts"] == ["pose_estimation", "human_body"]
 
 
 def test_crossref_query_uses_only_explicit_quoted_concepts():
     service = WebResearchService()
 
-    assert service.crossref_query(
-        '"structured grid quality" finite volume solver evaluation'
-    ) == "structured grid quality"
-    assert service.crossref_query(
-        '"human pose estimation" deep learning transformer 2D 3D'
-    ) == "human pose estimation"
+    assert (
+        service.crossref_query('"structured grid quality" finite volume solver evaluation')
+        == "structured grid quality"
+    )
+    assert (
+        service.crossref_query('"human pose estimation" deep learning transformer 2D 3D')
+        == "human pose estimation"
+    )
     assert service.crossref_query("mesh quality CFD") == "mesh quality CFD"
 
 

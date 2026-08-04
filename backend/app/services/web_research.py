@@ -13,6 +13,8 @@ from xml.etree import ElementTree
 
 import httpx
 
+from .research_routing import research_routing_service
+
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -57,18 +59,6 @@ class WebResearchService:
         "GOOGLE_ABUSE_EXEMPTION",
         "_GRECAPTCHA",
     }
-    trigger = re.compile(
-        r"综述|文献|资料|检索|搜索|查找|调查|调研|查询|了解|联网|网络|网页|"
-        r"review|survey|search|research",
-        re.I,
-    )
-    academic_trigger = re.compile(
-        r"学术|文献|论文|综述|期刊|会议论文|参考文献|引用|引文|DOI|"
-        r"研究现状|研究进展|systematic review|literature review|"
-        r"\breview\b|\bsurvey\b|\bpapers?\b|\barticles?\b|\breferences?\b|citation",
-        re.I,
-    )
-
     def __init__(self) -> None:
         self._verification_sessions: dict[str, dict[str, Any]] = {}
         self._scholar_cookie_header = ""
@@ -120,10 +110,13 @@ class WebResearchService:
         )
         if local_path and local_action:
             return False
-        return bool(self.trigger.search(task))
+        return research_routing_service.should_research(task)
 
     def research_mode(self, task: str) -> str:
-        return "academic" if self.academic_trigger.search(task) else "web"
+        return research_routing_service.classify(task).mode
+
+    def research_domain(self, task: str) -> str:
+        return research_routing_service.classify(task).domain
 
     def explicit_source_count(self, task: str) -> int | None:
         """Return the user's preferred evidence target, not a hard success gate."""
@@ -221,7 +214,7 @@ class WebResearchService:
         )
         value = re.sub(
             r"^(?:(?:请|麻烦|帮我|请帮我|给我|我想|我需要|需要|想要)\s*)?"
-            r"(?:查找|检索|搜索|查询|调查|调研|了解|整理|汇总)\s*",
+            r"(?:查找|检索|搜索|查询|调查|调研|研究|了解|整理|汇总)\s*",
             "",
             value,
             flags=re.I,
@@ -262,8 +255,69 @@ class WebResearchService:
             value,
             flags=re.I,
         )
-        value = re.sub(r"\b(?:write|create|generate)\s+(?:an?\s+)?(?:sci|review)\b.*$", "", value, flags=re.I)
+        value = re.sub(
+            r"\b(?:write|create|generate)\s+(?:an?\s+)?(?:sci|review)\b.*$", "", value, flags=re.I
+        )
         return " ".join(value.split()).strip(" ：:，,。；;、-–—")[:180]
+
+    @staticmethod
+    def _finance_query_variants(request: str) -> list[str]:
+        """Build evidence-oriented market queries instead of searching the request verbatim."""
+
+        market_match = re.search(
+            r"A股|港股|美股|沪深(?:两市)?|创业板|科创板|北交所|"
+            r"S&P\s*500|Nasdaq|NYSE|Hong\s+Kong\s+stocks?",
+            request,
+            re.I,
+        )
+        market = market_match.group(0) if market_match else "证券市场"
+        price_match = re.search(
+            r"(?:价格|股价)?\s*(?:区间)?\s*(?:在|低于|不高于|小于|≤)?\s*"
+            r"(\d+(?:\.\d+)?)\s*元\s*(?:以下|以内|之内)?",
+            request,
+            re.I,
+        )
+        price = f"{price_match.group(1)}元以下" if price_match else ""
+        constraint = " ".join(item for item in (market, price) if item)
+        theme_match = re.search(
+            r"(?:围绕|关注|看好|研究|分析)\s*([^，。；;]{2,24}?)(?:行业|板块|产业)",
+            request,
+            re.I,
+        )
+        theme = f"{theme_match.group(1)}行业" if theme_match else "行业板块"
+        return [
+            f"{market} {theme} 景气度 政策催化 最新",
+            f"{constraint} 上市公司 业绩增长 估值 现金流 最新",
+            f"site:cninfo.com.cn {market} 业绩预告 机构调研 公告",
+            f"site:sse.com.cn OR site:szse.cn {market} 上市公司公告 风险提示",
+            f"{market} 行业轮动 资金流向 市场表现 最新",
+            f"{constraint} 减持 监管 退市 流动性 风险",
+        ]
+
+    @staticmethod
+    def _domain_web_queries(base_query: str, domain: str) -> list[str]:
+        facets: dict[str, tuple[str, str, str]] = {
+            "news_current": ("事件时间线 最新进展", "当事方 官方声明", "事实核查 多来源"),
+            "policy_government": (
+                "site:gov.cn 政策 原文",
+                "主管部门 官方解读",
+                "生效时间 适用范围",
+            ),
+            "legal": ("现行法律 法条 官方", "法院 司法解释 案例", "合规风险 生效状态"),
+            "health_medical": ("临床指南 共识", "卫生部门 权威机构", "证据等级 风险 禁忌"),
+            "product_comparison": ("官方规格 当前价格", "独立评测 实测", "售后 长期使用 反馈"),
+            "travel_local": ("官方 开放时间 预约", "实时交通 天气", "当前价格 安全 提示"),
+            "education": ("课程标准 官方", "教学实践 案例", "评价方法 学习效果"),
+        }
+        suffixes = facets.get(domain)
+        if not suffixes:
+            return [
+                base_query,
+                f"{base_query} 官方 权威来源",
+                f"{base_query} 最新 数据 报告",
+                f"{base_query} 背景 现状",
+            ]
+        return [base_query, *(f"{base_query} {suffix}" for suffix in suffixes)]
 
     def institution_name(self, task: str) -> str | None:
         match = re.search(r"([\u4e00-\u9fff]{2,24}(?:大学|学院))", task)
@@ -280,7 +334,7 @@ class WebResearchService:
     def generalized_academic_queries(topic: str) -> list[str]:
         """Build domain-independent recall facets for any scholarly topic."""
 
-        base = " ".join(str(topic or "").split()).strip(" ：:，,。；;、-–—\"")[:180]
+        base = " ".join(str(topic or "").split()).strip(' ：:，,。；;、-–—"')[:180]
         if not base:
             return []
         facets = (
@@ -298,7 +352,8 @@ class WebResearchService:
 
     def query_variants(self, task: str) -> list[str]:
         request = self.research_request(task)
-        mode = self.research_mode(request)
+        route = research_routing_service.classify(request)
+        mode = route.mode
         subject = self.research_subject(task)
         normalized_subject = self.normalized_research_subject(subject)
         mesh_domain = self.mesh_domain(subject)
@@ -428,25 +483,17 @@ class WebResearchService:
                     values = self.generalized_academic_queries(academic_base)
             else:
                 values = self.generalized_academic_queries(academic_base)
+        elif route.domain == "finance_markets":
+            values = self._finance_query_variants(request)
         else:
-            values.append(base_query)
-        if mode != "academic" and len(values) == 1:
-            values.extend(
-                [
-                    f"{base_query} 官方 权威来源",
-                    f"{base_query} 最新 数据 报告",
-                    f"{base_query} 背景 现状",
-                ]
-            )
+            values = self._domain_web_queries(base_query, route.domain)
         # A quoted academic phrase is already the complete retrieval concept.
         # Never leave discovery modifiers after its closing quote: every provider
         # and the visible browser panel must execute exactly the same phrase.
         if mode == "academic":
-            values = [
-                self.exact_quoted_query(value)
-                for value in values
-            ]
-        return list(dict.fromkeys(values))[: (6 if mode == "academic" else 4)]
+            values = [self.exact_quoted_query(value) for value in values]
+        result_limit = 6 if mode == "academic" or route.domain == "finance_markets" else 4
+        return list(dict.fromkeys(values))[:result_limit]
 
     @staticmethod
     def exact_quoted_query(query: str) -> str:
@@ -486,7 +533,8 @@ class WebResearchService:
     async def collect(self, task: str, on_event: EventHandler) -> list[dict[str, Any]]:
         request = self.research_request(task)
         subject = self.research_subject(task)
-        mode = self.research_mode(request)
+        route = research_routing_service.classify(request)
+        mode = route.mode
         queries = self.query_variants(task)
         target_sources = self.requested_source_count(task) if mode == "academic" else 12
         year_range = self.requested_year_range(task) if mode == "academic" else None
@@ -500,6 +548,11 @@ class WebResearchService:
                 "target_sources": target_sources,
                 "year_range": list(year_range) if year_range else None,
                 "research_scope": mesh_domain,
+                "domain": route.domain,
+                "domain_label": route.domain_label,
+                "preferred_sources": list(route.preferred_sources),
+                "source_strategy": route.guidance,
+                "high_stakes": route.high_stakes,
             }
         )
         candidates: list[dict[str, Any]] = []
@@ -555,8 +608,7 @@ class WebResearchService:
                     ]
                 )
                 provider_queries = {
-                    str(item["provider"]): str(item.get("query") or query)
-                    for item in provider_urls
+                    str(item["provider"]): str(item.get("query") or query) for item in provider_urls
                 }
                 await on_event(
                     {
@@ -714,9 +766,7 @@ class WebResearchService:
                         if item.get("published_year")
                         and int(item["published_year"]) >= current_year - 4
                     ),
-                    "providers": sorted(
-                        {str(item.get("source") or "Web") for item in sources}
-                    ),
+                    "providers": sorted({str(item.get("source") or "Web") for item in sources}),
                     "results": [
                         {
                             "title": item["title"],
@@ -876,6 +926,7 @@ class WebResearchService:
         subject = self.normalized_research_subject(self.research_subject(task))
         task_lower = (subject or task).lower()
         request = self.research_request(task)
+        route = research_routing_service.classify(request)
         scope_lower = request.lower()
         mesh_domain = self.mesh_domain(subject)
         year_range = self.requested_year_range(task)
@@ -944,6 +995,58 @@ class WebResearchService:
                         ],
                         5,
                         True,
+                    ),
+                ]
+            )
+        if route.domain == "finance_markets":
+            groups.extend(
+                [
+                    (
+                        "finance_market",
+                        [
+                            "a股",
+                            "股票",
+                            "个股",
+                            "证券",
+                            "上市公司",
+                            "上证",
+                            "深证",
+                            "stock",
+                            "equity",
+                            "shares",
+                        ],
+                        7,
+                        False,
+                    ),
+                    (
+                        "fundamentals",
+                        [
+                            "财报",
+                            "业绩",
+                            "营收",
+                            "净利润",
+                            "现金流",
+                            "估值",
+                            "市盈率",
+                            "earnings",
+                            "revenue",
+                            "cash flow",
+                            "valuation",
+                        ],
+                        4,
+                        False,
+                    ),
+                    (
+                        "sector_market",
+                        ["板块", "行业", "产业", "景气", "资金流向", "sector", "industry"],
+                        3,
+                        False,
+                    ),
+                    (
+                        "market_risk",
+                        ["风险", "减持", "处罚", "退市", "诉讼", "质押", "risk", "delisting"],
+                        3,
+                        False,
                     ),
                 ]
             )
@@ -1083,6 +1186,8 @@ class WebResearchService:
                     required_ok = False
             if groups and not required_ok:
                 continue
+            if route.domain == "finance_markets" and "finance_market" not in matched:
+                continue
             if computational_hit:
                 matched.append("computational_mesh")
                 score += 7
@@ -1098,14 +1203,44 @@ class WebResearchService:
                 # below papers that explicitly discuss metrics/evaluation.
                 score -= 2
             hostname = (urlparse(str(item.get("url", ""))).hostname or "").lower()
+            if route.domain == "finance_markets":
+                if hostname.endswith(
+                    (
+                        "cninfo.com.cn",
+                        "sse.com.cn",
+                        "szse.cn",
+                        "bse.cn",
+                        "csrc.gov.cn",
+                        "gov.cn",
+                    )
+                ):
+                    score += 8
+                    matched.append("official_source")
+                elif hostname.endswith(("eastmoney.com", "cnstock.com", "stcn.com")):
+                    score += 3
             if institution and hostname.endswith((".edu.cn", ".edu", ".gov.cn", ".gov")):
                 score += 6
             if not groups:
                 tokens = {
                     token
-                    for token in re.findall(r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}", task_lower)
-                    if token not in {"review", "survey"}
+                    for token in re.findall(r"[a-z0-9]{3,}", task_lower)
+                    if token not in {"review", "survey", "search", "research"}
                 }
+                chinese = re.sub(
+                    r"请|帮我|给我|我想|我需要|需要|想要|查找|检索|搜索|查询|"
+                    r"调查|调研|研究|了解|整理|汇总|最新|相关|关于|进行|一份|一个",
+                    " ",
+                    task_lower,
+                )
+                for run in re.findall(r"[\u4e00-\u9fff]{2,}", chinese):
+                    if len(run) <= 6:
+                        tokens.add(run)
+                    else:
+                        tokens.update(
+                            run[index : index + size]
+                            for size in (2, 3, 4)
+                            for index in range(0, len(run) - size + 1)
+                        )
                 overlap = sum(token in text for token in tokens)
                 if not overlap:
                     continue
@@ -1419,10 +1554,7 @@ class WebResearchService:
                 "https://api.crossref.org/works",
                 params=params,
                 headers={
-                    "User-Agent": (
-                        "EvoAgent/0.4.2 "
-                        "(+https://github.com/ElectronicRain/EvoAgent)"
-                    )
+                    "User-Agent": ("EvoAgent/0.4.2 (+https://github.com/ElectronicRain/EvoAgent)")
                 },
             )
             if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:

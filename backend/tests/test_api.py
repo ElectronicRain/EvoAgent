@@ -1843,6 +1843,60 @@ def test_workflow_expert_generalizes_new_canvas_with_task_specific_agents(client
     assert materialized.json()["validation"]["executable"] is True
 
 
+def test_workflow_expert_routes_stock_research_to_market_agents(client):
+    for endpoint in client.get("/api/model-endpoints").json():
+        client.patch(f"/api/model-endpoints/{endpoint['id']}", json={"enabled": False})
+
+    response = client.post(
+        "/api/workflow-expert/chat",
+        json={
+            "message": (
+                "我想研究后面A股哪只股票会大涨，哪些板块比较看好，给我建议，"
+                "价格区间在50元以下的，有潜力的股票和建议"
+            ),
+            "history": [],
+            "workflow_name": "未命名协作工作流",
+            "workflow_description": "",
+        },
+    )
+
+    assert response.status_code == 200
+    proposal = response.json()
+    drafts = proposal["agent_drafts"]
+    names = [item["name"] for item in drafts]
+    combined = "\n".join(
+        [
+            *names,
+            *(item["system_prompt"] for item in drafts),
+            *(node["label"] for node in proposal["definition"]["nodes"]),
+        ]
+    )
+
+    assert names == [
+        "市场与行业研究 Agent",
+        "上市公司基本面分析 Agent",
+        "风险与合规审查 Agent",
+        "投资建议整合 Agent",
+    ]
+    assert all(item["rag_mode"] == "off" for item in drafts)
+    assert [item["tool_policy"] for item in drafts] == [
+        "research",
+        "research",
+        "research",
+        "writing",
+    ]
+    assert "巨潮资讯" in combined
+    assert "不得宣称必涨" in combined
+    assert "Google Scholar" not in combined
+    assert "Crossref" not in combined
+    assert "文献综述" not in combined
+    assert "论文检索" not in combined
+
+    materialized = client.post("/api/workflow-expert/materialize", json={"proposal": proposal})
+    assert materialized.status_code == 200
+    assert materialized.json()["validation"]["executable"] is True
+
+
 def test_workflow_expert_repairs_missing_agent_binding_without_model_call(client):
     from backend.app.config import settings
 
