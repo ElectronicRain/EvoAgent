@@ -4,6 +4,7 @@ import asyncio
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -79,6 +80,7 @@ from .schemas import (
     APIKnowledgeSourceCreate,
     ModelEndpointCreate,
     ModelEndpointUpdate,
+    ResearchVerificationComplete,
     ResearchSourceReviewCreate,
     RuntimeSecurityConfigUpdate,
     TeachingPlanRequest,
@@ -89,6 +91,7 @@ from .schemas import (
     UserProfileUpdate,
     UserRegister,
     UserReplyStyleUpdate,
+    WorkflowClarificationRequest,
     WorkflowCreate,
     WorkflowExpertChatRequest,
     WorkflowExpertMaterializeRequest,
@@ -103,6 +106,8 @@ from .services.knowledge import knowledge_service
 from .services.knowledge_processing import extract_sections
 from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
+from .services.web_research import web_research_service
+from .services.workflow_clarification import workflow_clarification_service
 from .services.llm import (
     OpenAICompatibleImageProvider,
     OpenAICompatibleProvider,
@@ -119,9 +124,16 @@ from .services.model_routing import (
 )
 from .services.secrets import secret_store
 from .services.security import RuntimeSecurityContext, runtime_security_service
+from .services.skill_security import SkillPackageError, skill_security_service
 from .services.teaching import teaching_service
 from .services.tools import tool_runtime
 from .services.users import REPLY_STYLES, user_service
+from .services.document_exports import (
+    content_disposition,
+    markdown_to_docx,
+    output_to_markdown,
+    safe_docx_filename,
+)
 from .services.workflows import workflow_engine
 from .services.workflow_expert import workflow_expert
 
@@ -528,6 +540,36 @@ async def list_agents(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]
     return [row(item) for item in items]
 
 
+async def verified_agent_skill_ids(
+    db: AsyncSession, skill_ids: list[str]
+) -> list[str]:
+    requested = list(dict.fromkeys(skill_ids))
+    if not requested:
+        return []
+    verified = list(
+        (
+            await db.scalars(
+                select(Skill).where(
+                    Skill.id.in_(requested),
+                    Skill.enabled.is_(True),
+                    Skill.validation_status == "verified",
+                )
+            )
+        ).all()
+    )
+    verified_ids = {item.id for item in verified}
+    invalid = [item for item in requested if item not in verified_ids]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Agent 只能绑定已启用且通过安全校验的 Skill",
+                "invalid_skill_ids": invalid,
+            },
+        )
+    return requested
+
+
 @router.post("/agents", status_code=201)
 async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     if await db.scalar(select(AgentDefinition).where(AgentDefinition.slug == payload.slug)):
@@ -563,6 +605,7 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
     group_id = payload.group_id or None
     if group_id and not await db.get(AgentGroup, group_id):
         raise not_found("Agent 分组")
+    skill_ids = await verified_agent_skill_ids(db, payload.skills)
     item = AgentDefinition(
         name=payload.name,
         slug=payload.slug,
@@ -575,7 +618,7 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
         model=endpoint.default_model if endpoint else payload.model,
         temperature=payload.temperature,
         tools_json=dumps(list(dict.fromkeys([*payload.tools, "exec"]))),
-        skills_json=dumps(payload.skills),
+        skills_json=dumps(skill_ids),
         knowledge_bases_json=dumps(payload.knowledge_bases),
         rag_config_json=dumps(payload.rag_config.model_dump()),
         generation_config_json=dumps(payload.generation_config.model_dump()),
@@ -604,6 +647,8 @@ async def update_agent(
     if not item:
         raise not_found("Agent")
     values = payload.model_dump(exclude_unset=True)
+    if "skills" in values:
+        values["skills"] = await verified_agent_skill_ids(db, values["skills"])
     json_fields = {
         "tools": "tools_json",
         "skills": "skills_json",
@@ -1132,6 +1177,7 @@ async def stream_conversation_message(
                         user_context={
                             "conversation_id": conversation_id,
                             "security_profile": payload.security_profile,
+                            "skill_ids": payload.skill_ids,
                             "user_id": user_id,
                             "reply_style_prompt": reply_style_prompt,
                         },
@@ -2766,22 +2812,186 @@ async def knowledge_mcp(
 
 
 @router.get("/skills")
-async def list_skills(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
-    return [row(item) for item in (await db.scalars(select(Skill).order_by(Skill.name))).all()]
+async def list_skills(
+    verified_only: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    query = select(Skill)
+    if verified_only:
+        query = query.where(
+            Skill.enabled.is_(True),
+            Skill.validation_status == "verified",
+        )
+    return [row(item) for item in (await db.scalars(query.order_by(Skill.name))).all()]
 
 
 @router.post("/skills", status_code=201)
 async def create_skill(payload: SkillCreate, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
-    item = Skill(**payload.model_dump())
+    if await db.scalar(select(Skill).where(Skill.name == payload.name)):
+        raise HTTPException(status_code=409, detail="Skill 名称已存在")
+    content = (
+        "---\n"
+        f"name: {dumps(payload.name)}\n"
+        f"description: {dumps(payload.description)}\n"
+        "---\n\n"
+        f"{payload.instructions.strip()}\n"
+    ).encode("utf-8")
+    files, report = skill_security_service.validate_upload("SKILL.md", content)
+    if report["status"] != "verified":
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Skill 未通过格式或安全校验", "report": report},
+        )
+    try:
+        source_path = skill_security_service.install_verified(files, report)
+    except (SkillPackageError, FileExistsError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    item = Skill(
+        name=payload.name,
+        description=payload.description,
+        instructions=payload.instructions,
+        version=payload.version,
+        source_path=str(source_path),
+    )
+    skill_security_service.apply_report(item, report)
     db.add(item)
     await db.flush()
     await audit(db, "skill.created", "skill", item.id)
     return row(item)
 
 
+@router.post("/skills/upload")
+async def upload_skill(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    payload = await file.read(6 * 1024 * 1024 + 1)
+    try:
+        files, report = skill_security_service.validate_upload(file.filename or "", payload)
+    except SkillPackageError as exc:
+        report = exc.report or {
+            "is_skill": False,
+            "safe": False,
+            "status": "rejected",
+            "risk_level": "high",
+            "checks": {},
+            "findings": [
+                {
+                    "severity": "high",
+                    "code": "package-invalid",
+                    "message": str(exc),
+                    "path": file.filename or "upload",
+                    "line": None,
+                }
+            ],
+            "files": [],
+        }
+        await audit(
+            db,
+            "skill.upload_rejected",
+            "skill",
+            detail={"filename": file.filename, "report": report},
+            success=False,
+        )
+        return {"accepted": False, "report": report}
+    if report["status"] != "verified":
+        await audit(
+            db,
+            "skill.upload_rejected",
+            "skill",
+            detail={"filename": file.filename, "report": report},
+            success=False,
+        )
+        return {"accepted": False, "report": report}
+    metadata = report["metadata"]
+    if await db.scalar(select(Skill).where(Skill.name == metadata["name"])):
+        raise HTTPException(status_code=409, detail="同名 Skill 已存在")
+    try:
+        source_path = skill_security_service.install_verified(files, report)
+    except (SkillPackageError, FileExistsError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    item = Skill(
+        name=metadata["name"],
+        description=metadata["description"],
+        instructions=report["instructions"],
+        version=metadata["version"],
+        source_path=str(source_path),
+    )
+    skill_security_service.apply_report(item, report)
+    db.add(item)
+    await db.flush()
+    await audit(
+        db,
+        "skill.upload_verified",
+        "skill",
+        item.id,
+        {"filename": file.filename, "content_hash": item.content_hash},
+    )
+    return {"accepted": True, "skill": row(item), "report": report}
+
+
 @router.post("/skills/sync")
 async def sync_skills(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     return [row(item) for item in await extension_service.sync_skills(db)]
+
+
+@router.get("/skills/{skill_id}")
+async def get_skill(skill_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    item = await db.get(Skill, skill_id)
+    if not item:
+        raise not_found("Skill")
+    data = row(item)
+    data["validation_report"] = loads(item.validation_json, {})
+    data["files"] = []
+    source = Path(item.source_path) if item.source_path and "://" not in item.source_path else None
+    if source and source.exists():
+        root = source.parent
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            try:
+                content = path.read_text("utf-8")
+            except (UnicodeError, OSError):
+                content = ""
+            data["files"].append(
+                {
+                    "path": relative,
+                    "bytes": path.stat().st_size,
+                    "content": content[:100_000],
+                }
+            )
+    return data
+
+
+@router.post("/skills/{skill_id}/validate")
+async def validate_skill(skill_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    item = await db.get(Skill, skill_id)
+    if not item:
+        raise not_found("Skill")
+    if item.source_path.startswith("builtin://"):
+        return await get_skill(skill_id, db)
+    source = Path(item.source_path)
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="Skill 源文件不存在")
+    try:
+        report = skill_security_service.validate_directory(source.parent)
+    except SkillPackageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    metadata = report.get("metadata") or {}
+    item.description = str(metadata.get("description") or item.description)
+    item.instructions = str(report.get("instructions") or item.instructions)
+    item.version = str(metadata.get("version") or item.version)
+    skill_security_service.apply_report(item, report)
+    await audit(
+        db,
+        "skill.validated",
+        "skill",
+        item.id,
+        {"status": item.validation_status, "risk_level": item.risk_level},
+        success=item.validation_status == "verified",
+    )
+    return await get_skill(skill_id, db)
 
 
 @router.get("/extensions")

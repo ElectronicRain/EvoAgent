@@ -15,6 +15,7 @@ from .models import (
     Skill,
     Workflow,
     WorkflowRun,
+    utcnow,
 )
 from .services.common import dumps, loads
 from .services.knowledge import knowledge_service
@@ -269,6 +270,20 @@ async def ensure_builtin_extensions(db):
             await db.flush()
         skill.description = description
         skill.instructions = instructions
+        skill.validation_status = "verified"
+        skill.risk_level = "none"
+        skill.validation_json = dumps(
+            {
+                "is_skill": True,
+                "safe": True,
+                "status": "verified",
+                "risk_level": "none",
+                "checks": {"builtin_trusted": True},
+                "findings": [],
+                "scanner_version": "builtin",
+            }
+        )
+        skill.verified_at = skill.verified_at or utcnow()
         if name == "jsxgraph-math-visualization":
             skill.source_path = "builtin://skills/jsxgraph-math-visualization"
         skills[name] = skill

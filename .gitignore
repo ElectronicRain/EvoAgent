@@ -21,6 +21,10 @@ data/skills/*
 !data/skills/.gitkeep
 !data/skills/jsxgraph-math-visualization/
 !data/skills/jsxgraph-math-visualization/**
+!data/skills/c-language-tutor/
+!data/skills/c-language-tutor/**
+!data/skills/python-language-tutor/
+!data/skills/python-language-tutor/**
 data/plugins/*
 !data/plugins/.gitkeep
 frontend/node_modules/

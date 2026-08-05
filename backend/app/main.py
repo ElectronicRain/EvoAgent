@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -9,9 +10,9 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import router
 from .config import PROJECT_ROOT, settings
-from .db import close_db, init_db
+from .db import close_db, init_db, session_scope
 from .seed import seed_demo_data
-
+from .services.extensions import extension_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +26,8 @@ async def lifespan(_app: FastAPI):
     settings.prepare_directories()
     await init_db()
     await seed_demo_data()
+    async with session_scope() as db:
+        await extension_service.sync_skills(db)
     logger.info("EvoAgent %s started", settings.version)
     yield
     await close_db()

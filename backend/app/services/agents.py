@@ -147,6 +147,79 @@ class AgentEngine:
         }
 
     @staticmethod
+    def skill_schema(skills: list[Skill]) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "use_skill",
+                "description": (
+                    "按需加载一个已经通过格式与恶意风险校验的 Skill。"
+                    "准备采用某个 Skill 的专业流程前必须先调用本工具，不能假装已经读取。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {
+                            "type": "string",
+                            "enum": [item.id for item in skills],
+                            "description": "要加载的已验证 Skill ID",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "本轮为何需要该 Skill",
+                        },
+                    },
+                    "required": ["skill_id", "reason"],
+                },
+            },
+        }
+
+    async def _resolve_skills(
+        self,
+        db: AsyncSession,
+        agent: AgentDefinition,
+        requested_skill_ids: list[str] | None,
+        *,
+        math_query: bool,
+    ) -> list[Skill]:
+        configured_ids = [str(item) for item in loads(agent.skills_json, [])]
+        selected_ids = configured_ids
+        if requested_skill_ids is not None:
+            requested = list(dict.fromkeys(str(item) for item in requested_skill_ids))
+            disallowed = sorted(set(requested) - set(configured_ids))
+            if disallowed:
+                raise ValueError("本轮选择了未授权给该 Agent 的 Skill")
+            selected_ids = requested
+        skills: list[Skill] = []
+        if selected_ids:
+            skills = list(
+                (
+                    await db.scalars(
+                        select(Skill)
+                        .where(
+                            Skill.id.in_(selected_ids),
+                            Skill.enabled.is_(True),
+                            Skill.validation_status == "verified",
+                        )
+                        .order_by(Skill.name)
+                    )
+                ).all()
+            )
+        if math_query and not any(
+            item.name == "jsxgraph-math-visualization" for item in skills
+        ):
+            math_skill = await db.scalar(
+                select(Skill).where(
+                    Skill.enabled.is_(True),
+                    Skill.validation_status == "verified",
+                    Skill.name == "jsxgraph-math-visualization",
+                )
+            )
+            if math_skill:
+                skills.append(math_skill)
+        return skills
+
+    @staticmethod
     def rag_config(agent: AgentDefinition) -> AgentRAGConfig:
         return AgentRAGConfig.model_validate(loads(agent.rag_config_json, {}))
 
@@ -536,6 +609,16 @@ class AgentEngine:
             generation_config = self.generation_config(agent)
             image_endpoint = await self._image_endpoint(db, agent)
             math_query = self.is_math_query(input_text)
+            requested_skill_ids = (user_context or {}).get("skill_ids")
+            if not isinstance(requested_skill_ids, list):
+                requested_skill_ids = None
+            selected_skills = await self._resolve_skills(
+                db,
+                agent,
+                requested_skill_ids,
+                math_query=math_query,
+            )
+            skill_bindings = {item.id: item for item in selected_skills}
 
             async def publish_rag_step(event: dict[str, Any]) -> None:
                 await emit({**event, "type": f"rag_{event['type']}"})
@@ -560,6 +643,7 @@ class AgentEngine:
                 conversation_messages,
                 image_generation_available=bool(image_endpoint),
                 math_query=math_query,
+                skills=selected_skills,
             )
             await emit({"type": "intent_detected", **intent.as_dict()})
             await emit(
@@ -575,7 +659,7 @@ class AgentEngine:
                     "history_messages": len(conversation_messages or []),
                     "capabilities": {
                         "exec": True,
-                        "skills": "【已启用 Skills】" in system_prompt,
+                        "skills": [item.name for item in selected_skills],
                         "mcp_services": mcp_services,
                         "image_generation": bool(image_endpoint),
                         "math_visualization": math_query,
@@ -589,6 +673,8 @@ class AgentEngine:
             ]
             if "call_agent" in allowed_tools:
                 schemas.append(self.call_agent_schema())
+            if selected_skills:
+                schemas.append(self.skill_schema(selected_skills))
             schemas.extend(mcp_schemas)
             if mcp_errors:
                 await emit({"type": "mcp_unavailable", "errors": mcp_errors})
@@ -647,6 +733,7 @@ class AgentEngine:
                             execution,
                             security_context,
                             mcp_bindings,
+                            skill_bindings,
                         )
                         local_result = await self._publish_tool_result(
                             db, emit, planned_tool, local_result
@@ -727,6 +814,7 @@ class AgentEngine:
                             execution,
                             security_context,
                             mcp_bindings,
+                            skill_bindings,
                         )
                     except Exception as exc:
                         # A recoverable tool problem (for example, a stale file path
@@ -1060,6 +1148,7 @@ class AgentEngine:
         conversation_messages: list[dict[str, str]] | None = None,
         image_generation_available: bool = False,
         math_query: bool = False,
+        skills: list[Skill] | None = None,
     ) -> str:
         parts = [
             agent.system_prompt,
@@ -1090,26 +1179,15 @@ class AgentEngine:
             )
         if local_request:
             parts.append("本轮已识别为本地文件任务，不得启动 web_research。")
-        skill_ids = loads(agent.skills_json, [])
-        skill_query = select(Skill).where(Skill.enabled.is_(True))
-        if skill_ids:
-            skill_query = skill_query.where(Skill.id.in_(skill_ids))
-        skills = list((await db.scalars(skill_query.order_by(Skill.name))).all())
-        if math_query and not any(
-            skill.name == "jsxgraph-math-visualization" for skill in skills
-        ):
-            math_skill = await db.scalar(
-                select(Skill).where(
-                    Skill.enabled.is_(True),
-                    Skill.name == "jsxgraph-math-visualization",
-                )
-            )
-            if math_skill:
-                skills.append(math_skill)
         if skills:
             parts.append(
-                "【已启用 Skills】\n"
-                + "\n\n".join(f"## {skill.name}\n{skill.instructions}" for skill in skills)
+                "【已启用 Skills · 需按需调用】\n"
+                "以下仅是本轮允许使用的已验证 Skill 目录。需要采用其中流程时，必须先调用 "
+                "use_skill 读取完整指令；未调用不得声称已经使用。\n"
+                + "\n".join(
+                    f"- {skill.id} · {skill.name}：{skill.description}"
+                    for skill in skills
+                )
             )
         if image_generation_available:
             parts.append(
@@ -1148,7 +1226,43 @@ class AgentEngine:
         execution: ExecutionContext,
         security_context: RuntimeSecurityContext,
         mcp_bindings: dict[str, tuple[Extension, str]],
+        skill_bindings: dict[str, Skill],
     ) -> dict[str, Any]:
+        if name == "use_skill":
+            skill_id = str(arguments.get("skill_id") or "")
+            skill = skill_bindings.get(skill_id)
+            if not skill:
+                return {
+                    "status": "failed",
+                    "error": "Skill 未分配给当前 Agent、未在本轮选中或未通过安全校验",
+                }
+            await audit(
+                db,
+                "skill.invoked",
+                "skill",
+                skill.id,
+                {
+                    "agent_id": agent.id,
+                    "run_id": run.id,
+                    "reason": str(arguments.get("reason") or "")[:500],
+                    "content_hash": skill.content_hash,
+                },
+            )
+            return {
+                "status": "completed",
+                "skill": {
+                    "id": skill.id,
+                    "name": skill.name,
+                    "version": skill.version,
+                    "verified": True,
+                    "content_hash": skill.content_hash,
+                },
+                "instructions": skill.instructions,
+                "execution_contract": (
+                    "遵循以上 Skill 流程；如需读取、写入或运行本地代码，继续显式调用平台工具，"
+                    "所有操作仍受本轮文件范围与审批策略约束。"
+                ),
+            }
         if name == "call_agent":
             target = await db.scalar(
                 select(AgentDefinition).where(
@@ -1233,6 +1347,13 @@ class AgentEngine:
         tool: str,
         result: dict[str, Any],
     ) -> dict[str, Any]:
+        if tool == "use_skill" and result.get("status") == "completed":
+            await emit(
+                {
+                    "type": "skill_invoked",
+                    "skill": result.get("skill"),
+                }
+            )
         await emit(
             {
                 "type": "tool_result",

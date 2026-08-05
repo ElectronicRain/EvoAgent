@@ -34,6 +34,8 @@ const selectedArtifactId = ref('')
 const securityRuntime = ref<Entity | null>(null)
 const securityProfile = ref('default')
 const securityMenu = ref(false)
+const verifiedSkills = ref<Entity[]>([])
+const selectedSkillIds = ref<string[]>([])
 const messagePane = ref<HTMLElement | null>(null)
 const knowledgeBases = ref<Entity[]>([])
 const knowledgeGroups = ref<Entity[]>([])
@@ -102,6 +104,8 @@ const securityProfiles = [
   { value: 'unrestricted_auto', label: '全盘 · 自动执行', description: '最高权限，请谨慎使用', icon: HardDrive },
 ]
 const activeSecurityProfile = computed(() => securityProfiles.find(item => item.value === securityProfile.value) || securityProfiles[0])
+const assignedSkillIds = computed<string[]>(() => parse(agent.value?.skills_json || '[]'))
+const availableSkills = computed(() => verifiedSkills.value.filter(item => assignedSkillIds.value.includes(item.id)))
 
 function parse(value: string) { try { return JSON.parse(value || '[]') } catch { return [] } }
 function parseObject(value: string) { try { return JSON.parse(value || '{}') } catch { return {} } }
@@ -152,6 +156,8 @@ function resetConversationState() {
   chatRunning.value = false
   currentRunId.value = ''
   currentRunStatus.value = 'idle'
+  verifiedSkills.value = []
+  selectedSkillIds.value = []
 }
 
 async function loadAgent(nextAgent: Entity | null) {
@@ -161,17 +167,20 @@ async function loadAgent(nextAgent: Entity | null) {
   loadRagSettings(nextAgent)
   securityProfile.value = permissions.security_profile || 'default'
   try {
-    const [items, runtime, bases, groups] = await Promise.all([
+    const [items, runtime, bases, groups, safeSkills] = await Promise.all([
       api.get<Entity[]>(`/agents/${nextAgent.id}/conversations`),
       api.get<Entity>('/security/runtime'),
       api.get<Entity[]>('/knowledge-bases'),
       api.get<Entity[]>('/knowledge-groups'),
+      api.get<Entity[]>('/skills?verified_only=true'),
     ])
     if (agent.value?.id !== nextAgent.id) return
     conversations.value = items
     securityRuntime.value = runtime
     knowledgeBases.value = bases
     knowledgeGroups.value = groups
+    verifiedSkills.value = safeSkills
+    selectedSkillIds.value = safeSkills.filter(item => assignedSkillIds.value.includes(item.id)).map(item => item.id)
     if (items.length) await openConversation(items[0])
   } catch (error: any) {
     app.notify(error.message, 'error')
@@ -394,7 +403,11 @@ async function sendMessage() {
   currentRunStatus.value = 'running'
   await scrollMessages()
   try {
-    await api.stream(`/conversations/${conversation.id}/messages/stream`, { content, security_profile: securityProfile.value }, event => {
+    await api.stream(`/conversations/${conversation.id}/messages/stream`, {
+      content,
+      security_profile: securityProfile.value,
+      skill_ids: selectedSkillIds.value,
+    }, event => {
       if (event.type === 'step') {
         if (event.step.run_id) {
           chat.updateTask(taskId, { runId: event.step.run_id })
@@ -563,6 +576,7 @@ function stepTitle(step: Entity) {
   if (step.type === 'mcp_unavailable') return '部分 MCP 服务暂不可用'
   if (step.type === 'approval_required') return `等待批准 · ${step.tool}`
   if (step.type === 'approval_resolved') return `审批已处理 · ${step.tool}`
+  if (step.type === 'skill_invoked') return `已调用 Skill · ${step.skill?.name || '未知 Skill'}`
   if (step.type === 'web_search_started') return `搜索：${step.query}`
   if (step.type === 'web_search_results') return `找到 ${step.count || 0} 条候选来源`
   if (step.type === 'web_fetch_started') return `抓取网页 ${step.index}`
@@ -581,6 +595,7 @@ function stepMeta(step: Entity) {
   if (step.type === 'mcp_unavailable') return step.errors?.join('；') || '连接失败，Agent 将使用其余可用能力'
   if (step.type === 'approval_required') return `${step.risk || '高'}风险操作已暂停，请批准或拒绝`
   if (step.type === 'approval_resolved') return step.status === 'completed' ? '操作已执行，Agent 继续工作' : '操作未执行'
+  if (step.type === 'skill_invoked') return `安全校验通过 · v${step.skill?.version || '1.0.0'}`
   if (step.type === 'stream_connected') return '运行轨迹将实时写入 SQLite'
   if (step.type === 'context_ready') return `历史消息 ${step.history_messages || 0} 条`
   if (step.type === 'rag_query_condensed') return step.changed ? step.standalone_query : '当前问题已经可以独立检索'
@@ -687,10 +702,24 @@ onBeforeUnmount(() => {
                 <article v-if="chatRunning" class="chat-message assistant"><div class="message-avatar"><Bot :size="15" /></div><div class="message-copy"><strong>{{ agent.name }}</strong><p class="message-bubble typing">正在执行任务并整理回复</p></div></article>
               </div>
               <div class="chat-composer">
-                <div class="composer-security"><Shield :size="12" /><span>本轮使用“{{ activeSecurityProfile.label }}”</span><button @click="securityMenu=!securityMenu">调整</button></div>
+                <div class="composer-security"><Shield :size="12" /><span>本轮使用“{{ activeSecurityProfile.label }}” · {{ selectedSkillIds.length }} 个 Skill</span><button @click="securityMenu=!securityMenu">调整</button></div>
                 <textarea v-model="chatInput" class="textarea" placeholder="输入消息；Ctrl + Enter 发送" @keydown.ctrl.enter.prevent="sendMessage" />
                 <button class="btn btn-primary" :disabled="chatRunning || !chatInput.trim()" @click="sendMessage"><Send :size="15" />{{ chatRunning ? '执行中' : '发送' }}</button>
-                <div v-if="securityMenu" class="security-menu composer-menu"><button v-for="item in securityProfiles" :key="item.value" :class="{active:securityProfile===item.value}" @click="securityProfile=item.value;securityMenu=false"><component :is="item.icon" :size="15" /><span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span><Check v-if="securityProfile===item.value" :size="14" /></button><p v-if="securityRuntime">全局授权目录 {{ securityRuntime.workspace_roots?.length || 0 }} 个 · 关键命令{{ securityRuntime.block_critical_commands ? '始终拦截' : '允许按规则执行' }}</p></div>
+                <div v-if="securityMenu" class="security-menu composer-menu">
+                  <header><strong>本轮权限与能力</strong><button @click="securityMenu=false">完成</button></header>
+                  <small class="menu-label">本地文件与命令权限</small>
+                  <button v-for="item in securityProfiles" :key="item.value" :class="{active:securityProfile===item.value}" @click="securityProfile=item.value">
+                    <component :is="item.icon" :size="15" /><span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span><Check v-if="securityProfile===item.value" :size="14" />
+                  </button>
+                  <section class="skill-selector">
+                    <small class="menu-label">本轮允许调用的已验证 Skill</small>
+                    <button v-for="item in availableSkills" :key="item.id" :class="{active:selectedSkillIds.includes(item.id)}" @click="toggleValue(selectedSkillIds,item.id)">
+                      <Sparkles :size="14" /><span><strong>{{ item.name }}</strong><small>{{ item.description }}</small></span><Check v-if="selectedSkillIds.includes(item.id)" :size="14" />
+                    </button>
+                    <p v-if="!availableSkills.length">此 Agent 尚未绑定经过安全校验的 Skill，可到 Agent 工厂设置。</p>
+                  </section>
+                  <p v-if="securityRuntime">全局授权目录 {{ securityRuntime.workspace_roots?.length || 0 }} 个 · 关键命令{{ securityRuntime.block_critical_commands ? '始终拦截' : '允许按规则执行' }}。Skill 只能提供工作流程，实际读写和命令仍受本权限约束。</p>
+                </div>
               </div>
             </div>
 
@@ -829,7 +858,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.agent-dialog-layer{position:fixed;inset:0;z-index:900;display:flex;align-items:center;justify-content:center;padding:32px}.agent-dialog-backdrop{position:absolute;inset:0;border:0;background:rgba(8,28,48,.46);backdrop-filter:blur(5px);cursor:default}.agent-dialog{position:relative;width:min(1440px,calc(100vw - 64px));height:min(820px,calc(100vh - 64px));overflow:hidden;border:1px solid #bdd4e5;border-radius:16px;background:#fff;box-shadow:0 30px 90px rgba(8,31,52,.32)}.agent-dialog-header{height:68px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dde8f0;background:linear-gradient(120deg,#f8fbfe,#eef7fd)}.agent-dialog-identity{display:flex;align-items:center;gap:11px}.agent-dialog-avatar{display:grid;width:39px;height:39px;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1266bb,#22a0c4)}.agent-dialog-identity>div{display:grid;grid-template-columns:auto auto;align-items:end;gap:2px 8px}.agent-dialog-identity small{grid-column:1/-1;font-size:8px;letter-spacing:1.4px;color:#6e879b}.agent-dialog-identity strong{font-size:15px;color:#153b62}.agent-dialog-identity span{font-size:9px;color:#7890a5}.agent-dialog-actions{display:flex;align-items:center;gap:7px}.agent-dialog-actions>button{position:relative;display:grid;width:31px;height:31px;place-items:center;border:1px solid #cbdce9;border-radius:8px;color:#587289;background:#fff;cursor:pointer}.agent-dialog-actions>button:hover,.agent-dialog-actions>button.active{color:#1269bd;border-color:#8fbee0;background:#f1f8fd}.document-shortcut b{position:absolute;right:-5px;top:-6px;min-width:16px;height:16px;padding:0 4px;display:grid;place-items:center;border:2px solid #f4f9fd;border-radius:99px;color:#fff;background:#1769c2;font-size:8px}.overlay-layout{height:calc(100% - 68px);min-height:0;grid-template-columns:190px minmax(360px,1fr) 370px}.overlay-layout :deep(.message-pane){max-height:none}.chat-composer{position:relative;padding-top:29px!important}.composer-security{position:absolute;top:7px;left:12px;right:12px;display:flex;align-items:center;gap:6px;color:#617f97;font-size:8px}.composer-security button{margin-left:auto;border:0;color:#1769c2;background:transparent;font-size:8px;cursor:pointer}.security-menu{position:absolute;z-index:40;width:300px;padding:7px;border:1px solid #cbddea;border-radius:10px;background:#fff;box-shadow:0 14px 36px #143d5c2e}.composer-menu{right:12px;bottom:100%}.security-menu>button{display:grid;width:100%;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;padding:9px;border:0;border-radius:7px;text-align:left;color:#6a8296;background:transparent;cursor:pointer}.security-menu>button:hover,.security-menu>button.active{color:#1769c2;background:#edf6fd}.security-menu span{display:flex;flex-direction:column;gap:2px}.security-menu strong{font-size:10px;color:#315875}.security-menu small{font-size:8px}.security-menu>p{margin:6px 5px 2px;padding-top:7px;border-top:1px solid #e3ebf2;color:#7890a3;font-size:8px}.inline-approval{display:flex;gap:5px;margin-top:7px}.inline-approval button{display:inline-flex;align-items:center;gap:3px;padding:4px 7px;border:1px solid #8ac4ac;border-radius:5px;color:#137653;background:#edfaf4;font-size:8px;cursor:pointer}.inline-approval button.reject{border-color:#e3adad;color:#a73c3c;background:#fff5f5}.approval-state{display:inline-block;margin-top:5px;color:#187855;font-size:8px;font-weight:700}.agent-chat-float{position:fixed;z-index:880;width:260px;height:72px;padding:9px 10px 9px 6px;display:flex;align-items:center;gap:9px;border:1px solid #87b8da;border-radius:14px;color:#244c6f;background:rgba(255,255,255,.96);box-shadow:0 14px 38px rgba(17,64,99,.25);backdrop-filter:blur(10px);cursor:grab;touch-action:none;user-select:none}.agent-chat-float.dragging{cursor:grabbing;box-shadow:0 18px 45px rgba(17,64,99,.34)}.float-grip{flex:none;color:#9ab0c1}.float-avatar{position:relative;display:grid;width:39px;height:39px;flex:none;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1769c2,#25a5bc)}.float-avatar i{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border:2px solid #fff;border-radius:50%;background:#20b774}.float-copy{display:flex;min-width:0;flex:1;flex-direction:column;text-align:left}.float-copy small{font-size:8px;color:#7991a6}.float-copy strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.float-open{font-size:8px;font-weight:700;color:#1769c2}.float-close{display:grid;width:22px;height:22px;place-items:center;border-radius:6px;color:#8096a8}.float-close:hover{color:#b44444;background:#fff1f1}.agent-dialog-enter-active,.agent-dialog-leave-active,.agent-float-enter-active,.agent-float-leave-active{transition:opacity .18s ease,transform .18s ease}.agent-dialog-enter-from,.agent-dialog-leave-to{opacity:0}.agent-dialog-enter-from .agent-dialog,.agent-dialog-leave-to .agent-dialog{transform:translateY(12px) scale(.985)}.agent-float-enter-from,.agent-float-leave-to{opacity:0;transform:translateY(8px) scale(.96)}
+.agent-dialog-layer{position:fixed;inset:0;z-index:900;display:flex;align-items:center;justify-content:center;padding:32px}.agent-dialog-backdrop{position:absolute;inset:0;border:0;background:rgba(8,28,48,.46);backdrop-filter:blur(5px);cursor:default}.agent-dialog{position:relative;width:min(1440px,calc(100vw - 64px));height:min(820px,calc(100vh - 64px));overflow:hidden;border:1px solid #bdd4e5;border-radius:16px;background:#fff;box-shadow:0 30px 90px rgba(8,31,52,.32)}.agent-dialog-header{height:68px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dde8f0;background:linear-gradient(120deg,#f8fbfe,#eef7fd)}.agent-dialog-identity{display:flex;align-items:center;gap:11px}.agent-dialog-avatar{display:grid;width:39px;height:39px;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1266bb,#22a0c4)}.agent-dialog-identity>div{display:grid;grid-template-columns:auto auto;align-items:end;gap:2px 8px}.agent-dialog-identity small{grid-column:1/-1;font-size:8px;letter-spacing:1.4px;color:#6e879b}.agent-dialog-identity strong{font-size:15px;color:#153b62}.agent-dialog-identity span{font-size:9px;color:#7890a5}.agent-dialog-actions{display:flex;align-items:center;gap:7px}.agent-dialog-actions>button{position:relative;display:grid;width:31px;height:31px;place-items:center;border:1px solid #cbdce9;border-radius:8px;color:#587289;background:#fff;cursor:pointer}.agent-dialog-actions>button:hover,.agent-dialog-actions>button.active{color:#1269bd;border-color:#8fbee0;background:#f1f8fd}.document-shortcut b{position:absolute;right:-5px;top:-6px;min-width:16px;height:16px;padding:0 4px;display:grid;place-items:center;border:2px solid #f4f9fd;border-radius:99px;color:#fff;background:#1769c2;font-size:8px}.overlay-layout{height:calc(100% - 68px);min-height:0;grid-template-columns:190px minmax(360px,1fr) 370px}.overlay-layout :deep(.message-pane){max-height:none}.chat-composer{position:relative;padding-top:29px!important}.composer-security{position:absolute;top:7px;left:12px;right:12px;display:flex;align-items:center;gap:6px;color:#617f97;font-size:8px}.composer-security button{margin-left:auto;border:0;color:#1769c2;background:transparent;font-size:8px;cursor:pointer}.security-menu{position:absolute;z-index:40;width:360px;max-height:580px;overflow:auto;padding:7px;border:1px solid #cbddea;border-radius:10px;background:#fff;box-shadow:0 14px 36px #143d5c2e}.composer-menu{right:12px;bottom:100%}.security-menu>header{display:flex;align-items:center;justify-content:space-between;padding:5px 7px 8px}.security-menu>header>button{border:0;color:#1769c2;background:transparent;font-size:9px;cursor:pointer}.menu-label{display:block;padding:5px 8px;color:#71899d;font-weight:700}.security-menu>button,.skill-selector>button{display:grid;width:100%;grid-template-columns:auto 1fr auto;align-items:center;gap:9px;padding:9px;border:0;border-radius:7px;text-align:left;color:#6a8296;background:transparent;cursor:pointer}.security-menu>button:hover,.security-menu>button.active,.skill-selector>button:hover,.skill-selector>button.active{color:#1769c2;background:#edf6fd}.security-menu span{display:flex;flex-direction:column;gap:2px}.security-menu strong{font-size:10px;color:#315875}.security-menu small{font-size:8px}.skill-selector{margin-top:6px;padding-top:6px;border-top:1px solid #e3ebf2}.skill-selector>p{margin:5px 8px;color:#7890a3;font-size:8px}.security-menu>p{margin:6px 5px 2px;padding-top:7px;border-top:1px solid #e3ebf2;color:#7890a3;font-size:8px}.inline-approval{display:flex;gap:5px;margin-top:7px}.inline-approval button{display:inline-flex;align-items:center;gap:3px;padding:4px 7px;border:1px solid #8ac4ac;border-radius:5px;color:#137653;background:#edfaf4;font-size:8px;cursor:pointer}.inline-approval button.reject{border-color:#e3adad;color:#a73c3c;background:#fff5f5}.approval-state{display:inline-block;margin-top:5px;color:#187855;font-size:8px;font-weight:700}.agent-chat-float{position:fixed;z-index:880;width:260px;height:72px;padding:9px 10px 9px 6px;display:flex;align-items:center;gap:9px;border:1px solid #87b8da;border-radius:14px;color:#244c6f;background:rgba(255,255,255,.96);box-shadow:0 14px 38px rgba(17,64,99,.25);backdrop-filter:blur(10px);cursor:grab;touch-action:none;user-select:none}.agent-chat-float.dragging{cursor:grabbing;box-shadow:0 18px 45px rgba(17,64,99,.34)}.float-grip{flex:none;color:#9ab0c1}.float-avatar{position:relative;display:grid;width:39px;height:39px;flex:none;place-items:center;border-radius:11px;color:#fff;background:linear-gradient(135deg,#1769c2,#25a5bc)}.float-avatar i{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border:2px solid #fff;border-radius:50%;background:#20b774}.float-copy{display:flex;min-width:0;flex:1;flex-direction:column;text-align:left}.float-copy small{font-size:8px;color:#7991a6}.float-copy strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.float-open{font-size:8px;font-weight:700;color:#1769c2}.float-close{display:grid;width:22px;height:22px;place-items:center;border-radius:6px;color:#8096a8}.float-close:hover{color:#b44444;background:#fff1f1}.agent-dialog-enter-active,.agent-dialog-leave-active,.agent-float-enter-active,.agent-float-leave-active{transition:opacity .18s ease,transform .18s ease}.agent-dialog-enter-from,.agent-dialog-leave-to{opacity:0}.agent-dialog-enter-from .agent-dialog,.agent-dialog-leave-to .agent-dialog{transform:translateY(12px) scale(.985)}.agent-float-enter-from,.agent-float-leave-to{opacity:0;transform:translateY(8px) scale(.96)}
 .execution-panel.document-focused{position:absolute;inset:68px 0 0;z-index:30;border-left:0;background:#f3f7fa;animation:document-in .18s ease}
 .document-focus-toggle{margin-left:auto;padding:6px 9px;border:1px solid #b9d4e8;border-radius:7px;display:flex;align-items:center;gap:5px;color:#1769c2;background:#fff;font-size:9px;font-weight:700;cursor:pointer}
 .document-workspace{min-height:0;flex:1;display:grid;grid-template-columns:1fr;overflow:hidden;background:#f3f7fa}
