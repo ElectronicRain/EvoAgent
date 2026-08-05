@@ -1773,6 +1773,53 @@ async def update_model_endpoint(
     return endpoint_row(item)
 
 
+@router.delete("/model-endpoints/{endpoint_id}", status_code=204)
+async def delete_model_endpoint(
+    endpoint_id: str, db: AsyncSession = Depends(get_db)
+) -> Response:
+    item = await db.get(ModelEndpoint, endpoint_id)
+    if not item:
+        raise not_found("模型接口")
+
+    chat_agents = await db.scalar(
+        select(func.count(AgentDefinition.id)).where(
+            AgentDefinition.model_endpoint_id == item.id
+        )
+    ) or 0
+    image_agents = await db.scalar(
+        select(func.count(AgentDefinition.id)).where(
+            AgentDefinition.image_model_endpoint_id == item.id
+        )
+    ) or 0
+    knowledge_configs = await db.scalar(
+        select(func.count(KnowledgeProviderConfig.id)).where(
+            KnowledgeProviderConfig.llm_endpoint_id == item.id
+        )
+    ) or 0
+    if chat_agents or image_agents or knowledge_configs:
+        usages: list[str] = []
+        if chat_agents:
+            usages.append(f"{chat_agents} 个 Agent 的回答模型")
+        if image_agents:
+            usages.append(f"{image_agents} 个 Agent 的图片模型")
+        if knowledge_configs:
+            usages.append("知识库 LLM 配置")
+        raise HTTPException(
+            status_code=409,
+            detail="该接口仍被" + "、".join(usages) + "使用，请先更换相关配置后再删除",
+        )
+
+    await audit(
+        db,
+        "model_endpoint.deleted",
+        "model_endpoint",
+        item.id,
+        {"name": item.name, "modality": item.modality},
+    )
+    await db.delete(item)
+    return Response(status_code=204)
+
+
 @router.post("/model-endpoints/{endpoint_id}/test")
 async def test_model_endpoint(
     endpoint_id: str, db: AsyncSession = Depends(get_db)

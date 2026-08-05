@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
   AlertTriangle, Boxes, Cable, CheckCircle2, Eye, FileArchive,
-  Image as ImageIcon, KeyRound, Plus, RefreshCw, Server, ShieldCheck, Sparkles, Upload,
+  Image as ImageIcon, KeyRound, Pencil, Plus, RefreshCw, Server, ShieldCheck, Sparkles, Trash2, Upload,
 } from 'lucide-vue-next'
 import PageHeader from '../components/PageHeader.vue'
 import FloatingPanel from '../components/FloatingPanel.vue'
@@ -22,10 +22,34 @@ const uploadFile = ref<File | null>(null)
 const uploadReport = ref<Entity | null>(null)
 const skillDetail = ref<Entity | null>(null)
 const skillDetailOpen = ref(false)
+const editingEndpointId = ref<string | null>(null)
 const endpointForm = reactive({ name:'', modality:'chat', provider_type:'openai-compatible', base_url:'', api_key:'', default_model:'', headersText:'{}', optionsText:'{}', timeout_seconds:90, enabled:true })
 const mcpForm = reactive({ name:'', description:'', transport:'http', url:'', command:'', argsText:'[]' })
 const imageOptionsPlaceholder = '例如：{"size":"1024x1024","quality":"standard"}'
 const verifiedCount = computed(() => skills.value.filter(item => item.validation_status === 'verified').length)
+
+function resetEndpointForm() {
+  Object.assign(endpointForm, {
+    name:'', modality:'chat', provider_type:'openai-compatible', base_url:'', api_key:'',
+    default_model:'', headersText:'{}', optionsText:'{}', timeout_seconds:90, enabled:true,
+  })
+}
+function openAddEndpoint() {
+  editingEndpointId.value = null
+  resetEndpointForm()
+  showForm.value = true
+}
+function openEditEndpoint(item:Entity) {
+  editingEndpointId.value = item.id
+  Object.assign(endpointForm, {
+    name:item.name || '', modality:item.modality || 'chat',
+    provider_type:item.provider_type || 'openai-compatible', base_url:item.base_url || '',
+    api_key:'', default_model:item.default_model || '',
+    headersText:item.headers_json || '{}', optionsText:item.request_options_json || '{}',
+    timeout_seconds:item.timeout_seconds || 90, enabled:Boolean(item.enabled),
+  })
+  showForm.value = true
+}
 
 async function load() {
   store.loading(true)
@@ -42,16 +66,40 @@ async function load() {
 async function saveEndpoint() {
   store.loading(true)
   try {
-    await api.post('/model-endpoints', {
+    const payload:Entity = {
       name:endpointForm.name, modality:endpointForm.modality, provider_type:endpointForm.provider_type,
-      base_url:endpointForm.base_url, api_key:endpointForm.api_key, default_model:endpointForm.default_model,
+      base_url:endpointForm.base_url, default_model:endpointForm.default_model,
       headers:JSON.parse(endpointForm.headersText || '{}'), request_options:JSON.parse(endpointForm.optionsText || '{}'),
       timeout_seconds:endpointForm.timeout_seconds, enabled:endpointForm.enabled,
-    })
-    store.notify(endpointForm.modality === 'image' ? '图片生成 API 已保存' : '对话模型 API 已保存')
+    }
+    if (!editingEndpointId.value || endpointForm.api_key) payload.api_key = endpointForm.api_key
+    if (editingEndpointId.value) {
+      await api.patch(`/model-endpoints/${editingEndpointId.value}`, payload)
+    } else {
+      await api.post('/model-endpoints', payload)
+    }
+    store.notify(editingEndpointId.value ? '模型接口已更新' : endpointForm.modality === 'image' ? '图片生成 API 已保存' : '对话模型 API 已保存')
     showForm.value = false
+    editingEndpointId.value = null
     await load()
   } catch (error: any) {
+    store.notify(error.message, 'error')
+  } finally {
+    store.loading(false)
+  }
+}
+async function deleteEndpoint(item:Entity) {
+  if (!window.confirm(`删除模型接口“${item.name}”？此操作不可撤销。`)) return
+  store.loading(true)
+  try {
+    await api.delete(`/model-endpoints/${item.id}`)
+    if (editingEndpointId.value === item.id) {
+      showForm.value = false
+      editingEndpointId.value = null
+    }
+    store.notify('模型接口已删除')
+    await load()
+  } catch (error:any) {
     store.notify(error.message, 'error')
   } finally {
     store.loading(false)
@@ -169,7 +217,7 @@ onMounted(load)
 
 <template>
   <PageHeader eyebrow="EXTENSIBILITY" title="扩展与模型" description="集中管理模型 API、MCP 服务与经过校验的本地 Skills。">
-    <button class="btn btn-primary" @click="tab==='skills' ? chooseUpload() : showForm=true">
+    <button class="btn btn-primary" @click="tab==='skills' ? chooseUpload() : tab==='models' ? openAddEndpoint() : showForm=true">
       <Upload v-if="tab==='skills'" :size="15" /><Plus v-else :size="15" />
       {{ tab==='models' ? '添加模型接口' : tab==='mcp' ? '添加 MCP' : '上传 Skill' }}
     </button>
@@ -188,7 +236,7 @@ onMounted(load)
           <div style="display:flex;justify-content:space-between"><div class="metric-icon"><ImageIcon v-if="item.modality==='image'" :size="18" /><KeyRound v-else :size="18" /></div><StatusBadge :status="item.health" /></div>
           <h3 style="font-size:14px;color:#153b62">{{ item.name }}</h3><p style="font-size:10px;color:#6b8095;word-break:break-all">{{ item.base_url }}</p>
           <span class="tag">{{ item.modality==='image'?'图片生成':'对话回答' }}</span><span class="tag">{{ item.default_model }}</span>
-          <button class="btn btn-sm" style="width:100%;margin-top:13px" @click="testEndpoint(item.id)">测试连通性</button>
+          <div class="endpoint-actions"><button class="btn btn-sm" @click="testEndpoint(item.id)">测试连通性</button><button class="btn btn-sm" @click="openEditEndpoint(item)"><Pencil :size="12" />编辑</button><button class="btn btn-sm endpoint-delete" @click="deleteEndpoint(item)"><Trash2 :size="12" />删除</button></div>
         </div></article>
         <div v-if="!endpoints.length" class="empty">尚未添加真实模型接口。</div>
       </div>
@@ -216,8 +264,8 @@ onMounted(load)
     </div>
   </div>
 
-  <FloatingPanel v-if="tab==='models'" v-model="showForm" title="自定义模型 API 接口" eyebrow="MODEL ENDPOINT" description="配置对话或图片生成兼容接口。" size="large">
-    <div class="form-grid"><div class="field"><label>接口名称</label><input v-model="endpointForm.name" class="input"></div><div class="field"><label>模型能力</label><select v-model="endpointForm.modality" class="select"><option value="chat">对话回答</option><option value="image">图片生成</option></select></div><div class="field"><label>协议类型</label><select v-model="endpointForm.provider_type" class="select"><option value="openai-compatible">OpenAI Compatible</option><option value="spark-compatible">Spark Compatible</option><option value="custom">Custom Compatible</option></select></div><div class="field full"><label>Base URL</label><input v-model="endpointForm.base_url" class="input" placeholder="https://example.com/v1"></div><div class="field"><label>API Key</label><input v-model="endpointForm.api_key" type="password" class="input"></div><div class="field"><label>默认模型</label><input v-model="endpointForm.default_model" class="input"></div><div class="field"><label>请求超时（秒）</label><input v-model.number="endpointForm.timeout_seconds" type="number" min="5" max="300" class="input"></div><div class="field"><label>接口状态</label><label style="display:flex;align-items:center;gap:8px;height:38px"><input v-model="endpointForm.enabled" type="checkbox">启用</label></div><div class="field full"><label>自定义请求头（JSON）</label><textarea v-model="endpointForm.headersText" class="textarea" /></div><div class="field full"><label>附加请求参数（JSON）</label><textarea v-model="endpointForm.optionsText" class="textarea" :placeholder="endpointForm.modality==='image'?imageOptionsPlaceholder:'{}'" /></div><div class="field full"><button class="btn btn-primary" @click="saveEndpoint">加密保存接口</button></div></div>
+  <FloatingPanel v-if="tab==='models'" v-model="showForm" :title="editingEndpointId ? '编辑模型 API 接口' : '自定义模型 API 接口'" eyebrow="MODEL ENDPOINT" :description="editingEndpointId ? '修改接口配置；API Key 留空将保留原密钥。' : '配置对话或图片生成兼容接口。'" size="large">
+    <div class="form-grid"><div class="field"><label>接口名称</label><input v-model="endpointForm.name" class="input"></div><div class="field"><label>模型能力</label><select v-model="endpointForm.modality" class="select"><option value="chat">对话回答</option><option value="image">图片生成</option></select></div><div class="field"><label>协议类型</label><select v-model="endpointForm.provider_type" class="select"><option value="openai-compatible">OpenAI Compatible</option><option value="spark-compatible">Spark Compatible</option><option value="custom">Custom Compatible</option></select></div><div class="field full"><label>Base URL</label><input v-model="endpointForm.base_url" class="input" placeholder="https://example.com/v1"></div><div class="field"><label>API Key</label><input v-model="endpointForm.api_key" type="password" class="input" :placeholder="editingEndpointId ? '留空则保留现有密钥' : ''"></div><div class="field"><label>默认模型</label><input v-model="endpointForm.default_model" class="input"></div><div class="field"><label>请求超时（秒）</label><input v-model.number="endpointForm.timeout_seconds" type="number" min="5" max="300" class="input"></div><div class="field"><label>接口状态</label><label style="display:flex;align-items:center;gap:8px;height:38px"><input v-model="endpointForm.enabled" type="checkbox">启用</label></div><div class="field full"><label>自定义请求头（JSON）</label><textarea v-model="endpointForm.headersText" class="textarea" /></div><div class="field full"><label>附加请求参数（JSON）</label><textarea v-model="endpointForm.optionsText" class="textarea" :placeholder="endpointForm.modality==='image'?imageOptionsPlaceholder:'{}'" /></div><div class="field full"><button class="btn btn-primary" @click="saveEndpoint">{{ editingEndpointId ? '保存修改' : '加密保存接口' }}</button></div></div>
   </FloatingPanel>
   <FloatingPanel v-if="tab==='mcp'" v-model="showForm" title="注册 MCP 服务" eyebrow="MCP SERVICE" description="接入 Streamable HTTP 或本地 stdio MCP 服务。" size="large">
     <div class="form-grid"><div class="field"><label>名称</label><input v-model="mcpForm.name" class="input"></div><div class="field"><label>Transport</label><select v-model="mcpForm.transport" class="select"><option value="http">Streamable HTTP</option><option value="stdio">stdio</option></select></div><div class="field full"><label>说明</label><input v-model="mcpForm.description" class="input"></div><div v-if="mcpForm.transport==='http'" class="field full"><label>服务 URL</label><input v-model="mcpForm.url" class="input"></div><template v-else><div class="field"><label>Command</label><input v-model="mcpForm.command" class="input"></div><div class="field"><label>Args（JSON 数组）</label><input v-model="mcpForm.argsText" class="input"></div></template><div class="field full"><button class="btn btn-primary" @click="saveMcp">注册服务</button></div></div>
@@ -243,6 +291,7 @@ onMounted(load)
 
 <style scoped>
 .tabs .tab{display:inline-flex;align-items:center;gap:5px}.skill-notice{display:flex;align-items:center;gap:10px;margin-bottom:16px}.skill-notice span{flex:1}
+.endpoint-actions{display:grid;grid-template-columns:1fr auto auto;gap:7px;margin-top:13px}.endpoint-actions .btn{justify-content:center}.endpoint-delete{color:#b33d3d;border-color:#efcaca}.endpoint-delete:hover{background:#fff1f1}
 .skill-card{cursor:pointer;transition:.16s transform,.16s border-color}.skill-card:hover{transform:translateY(-2px);border-color:#85b6df}.skill-card h3{font-size:14px;color:#153b62;margin:12px 0 5px}.skill-card p{min-height:48px;font-size:11px;color:#667d93;line-height:1.55}.skill-card-head,.detail-summary{display:flex;align-items:center;gap:8px}.skill-card-head{justify-content:space-between}.view-button{width:100%;margin-top:13px}
 .validation-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:999px;background:#fff0ed;color:#b13c2d;font-size:10px}.validation-badge.verified{background:#e8f7ef;color:#16724a}.upload-drop{display:grid;place-items:center;gap:7px;padding:30px;border:1px dashed #8eb8dc;border-radius:12px;background:#f5faff;cursor:pointer;text-align:center}.upload-drop span{font-size:11px;color:#6a8095;max-width:620px}
 .report{margin-top:16px;padding:14px;border-radius:10px;background:#fff3f0;border:1px solid #edb4aa}.report.verified{background:#edf9f3;border-color:#a8dac1}.report h3{margin:0 0 5px;font-size:14px}.report p{margin:0;color:#587084;font-size:11px}.finding-list{display:grid;gap:7px;margin-top:11px}.finding-list>div{display:flex;align-items:flex-start;gap:6px;padding:7px;border-radius:7px;background:rgba(255,255,255,.7);font-size:11px}.finding-list span{display:grid}.finding-list small{color:#778a9a}

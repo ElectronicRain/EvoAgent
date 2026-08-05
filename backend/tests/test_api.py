@@ -740,6 +740,82 @@ def test_custom_model_endpoint_never_returns_secret(client):
     assert "super-secret" not in serialized
 
 
+def test_custom_model_endpoint_can_be_edited_without_replacing_secret(client):
+    created = client.post(
+        "/api/model-endpoints",
+        json={
+            "name": "待修改接口",
+            "provider_type": "openai-compatible",
+            "base_url": "https://before.example/v1",
+            "api_key": "keep-this-secret",
+            "default_model": "before-model",
+            "timeout_seconds": 30,
+            "enabled": True,
+        },
+    ).json()
+
+    updated = client.patch(
+        f"/api/model-endpoints/{created['id']}",
+        json={
+            "name": "修改后的接口",
+            "base_url": "https://after.example/v1/",
+            "default_model": "after-model",
+            "timeout_seconds": 45,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "修改后的接口"
+    assert updated.json()["base_url"] == "https://after.example/v1"
+    assert updated.json()["default_model"] == "after-model"
+    assert updated.json()["has_api_key"] is True
+    assert "keep-this-secret" not in str(updated.json())
+
+
+def test_custom_model_endpoint_can_be_deleted_when_unused(client):
+    created = client.post(
+        "/api/model-endpoints",
+        json={
+            "name": "待删除接口",
+            "provider_type": "openai-compatible",
+            "base_url": "https://delete.example/v1",
+            "api_key": "",
+            "default_model": "delete-model",
+            "enabled": False,
+        },
+    ).json()
+
+    deleted = client.delete(f"/api/model-endpoints/{created['id']}")
+    assert deleted.status_code == 204
+    assert all(
+        item["id"] != created["id"]
+        for item in client.get("/api/model-endpoints").json()
+    )
+
+
+def test_custom_model_endpoint_delete_rejects_agent_reference(client):
+    created = client.post(
+        "/api/model-endpoints",
+        json={
+            "name": "被引用接口",
+            "provider_type": "openai-compatible",
+            "base_url": "https://referenced.example/v1",
+            "api_key": "secret",
+            "default_model": "referenced-model",
+            "enabled": True,
+        },
+    ).json()
+    agent = client.get("/api/agents").json()[0]
+    response = client.patch(
+        f"/api/agents/{agent['id']}",
+        json={"model_endpoint_id": created["id"]},
+    )
+    assert response.status_code == 200
+
+    deleted = client.delete(f"/api/model-endpoints/{created['id']}")
+    assert deleted.status_code == 409
+    assert "仍被" in deleted.json()["detail"]
+
+
 def test_custom_model_endpoint_agent_full_chain(client, monkeypatch):
     captured: list[dict] = []
 
