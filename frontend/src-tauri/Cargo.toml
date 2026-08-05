@@ -1,6 +1,6 @@
 [package]
 name = "evoagent-desktop"
-version = "0.4.2"
+version = "1.0.0"
 description = "EvoAgent Windows desktop application"
 authors = ["EvoAgent Team"]
 edition = "2021"

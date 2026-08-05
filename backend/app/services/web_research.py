@@ -1554,7 +1554,7 @@ class WebResearchService:
                 "https://api.crossref.org/works",
                 params=params,
                 headers={
-                    "User-Agent": ("EvoAgent/0.4.2 (+https://github.com/ElectronicRain/EvoAgent)")
+                    "User-Agent": ("EvoAgent/1.0.0 (+https://github.com/ElectronicRain/EvoAgent)")
                 },
             )
             if response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:

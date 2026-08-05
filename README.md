@@ -4,9 +4,9 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-0.4.2-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-1.0.0-1769c2)](#windows-桌面端)
 
-EvoAgent 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。当前版本已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、安全审批、用户记忆和成果数据库交付。
+EvoAgent V1.0.0 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
 
 当前内置“教育学科研证据链”示范场景，可替换成医学、法学、经济学、计算机等学科包。
 
@@ -56,11 +56,12 @@ cd EvoAgent
 - 学科知识库：支持多文件或整个文件夹递归导入，保留目录层级，并完成清洗、去重、父子分块、向量化和检索问答。
 - 安全治理：可为每次 Agent/工作流运行选择只读、应用工作区、指定路径或完全访问，以及继承、人工审批、自动执行或拒绝策略；风险操作会在“运行详情”中等待批准/拒绝，关键风险仍受硬拦截和审计。
 - 审批策略：内置“稳健默认”“严格只读”“演示自动化”，支持自定义 JSON 规则。
-- 自定义模型 API：支持 OpenAI Chat Completions 兼容的文本和图片模型 Endpoint、独立模型名、请求头、附加参数、用途路由和连通性测试；硅基流动自动优先使用 `/v1` 与流式响应，避免长生成被固定读超时误杀；文本接口连通性测试只读取模型列表，不再产生生成费用。Agent 只使用现有在线接口执行任务。
+- 自定义模型 API：支持 OpenAI Chat Completions 兼容的文本和图片模型 Endpoint、独立模型名、请求头、附加参数、用途路由和连通性测试；支持新增、编辑、测试、启停和删除的完整生命周期管理，编辑时留空 API Key 可保留原密钥，被 Agent 或知识库配置引用的 Endpoint 会阻止误删；硅基流动自动优先使用 `/v1` 与流式响应，避免长生成被固定读超时误杀；文本接口连通性测试只读取模型列表，不再产生生成费用。Agent 只使用现有在线接口执行任务。
 - 密钥保护：API Key 加密落盘，列表接口与界面不回传明文。
 - 知识库：PDF/DOCX/PPTX 等文档、网页、数据库和第三方 API 接入；点击卡片打开独立管理窗口，可查看并增删改查文档、正文、分块、向量和数据源；多对多知识库分组与全库/分组/单库检索；清洗去重、结构化父子切分、SiliconFlow Embedding、SQLite 向量 + FTS5 混合检索、Rerank 与带引用生成。
-- 扩展中心：MCP Streamable HTTP / stdio、插件清单和 `SKILL.md` 同步，每个 Agent 均可配置 exec、MCP 和 Skills 能力。
-- 内置扩展：Office 文档解析、Citation Guard、成果导出、工作区 MCP、知识库 MCP、科研 Skills，以及用于数学推导和交互图表的 JSXGraph Skill。
+- 扩展中心：MCP Streamable HTTP / stdio、插件清单和可信 Skill 管理，每个 Agent 均可配置 exec、MCP 和 Skills 能力；对话运行时还可按任务临时选择已验证 Skill，不改变 Agent 的长期配置。
+- 可信 Skill 门禁：支持上传单个 `SKILL.md` 或 ZIP 技能包，对文件格式、路径穿越、可执行内容、凭证外传、持久化行为、提示词注入和破坏性命令进行静态检查；记录扫描器版本、风险等级、问题清单与 SHA-256 内容摘要。只有“已验证且已启用”的 Skill 才能绑定 Agent 或参与运行，未通过验证的技能会被明确拒绝。
+- 内置扩展：Office 文档解析、Citation Guard、成果导出、工作区 MCP、知识库 MCP、科研 Skills、C 语言辅导与 Python 语言辅导 Skill，以及用于数学推导和交互图表的 JSXGraph Skill。
 - 受控进化：围绕 Agent 目标任务自动联网检索改进方法，按来源可信度整理并封装为候选版本专属 `SKILL.md`，同步优化系统提示词和目标任务提示词；支持自定义基准用例、实时过程、基线/候选逐用例评测、Markdown 进化成果、人工批准和旧版本保留。
 - 用户与感知：本地用户注册/登录、每日/每周/每月 Token 用量、使用明细、对话记忆、用户画像以及全局 AI 回复风格预设和自定义。
 - Windows 桌面端：Tauri 自动启动 Python sidecar，提供 NSIS 和 MSI 安装包。
@@ -70,8 +71,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-frontend/.tmp/tauri-target-0.4.2/release/bundle/nsis/EvoAgent_0.4.2_x64-setup.exe
-frontend/.tmp/tauri-target-0.4.2/release/bundle/msi/EvoAgent_0.4.2_x64_en-US.msi
+frontend/.tmp/tauri-target-1.0.0/release/bundle/nsis/EvoAgent_1.0.0_x64-setup.exe
+frontend/.tmp/tauri-target-1.0.0/release/bundle/msi/EvoAgent_1.0.0_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -177,7 +178,9 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **v0.4.2**。源码构建后，主程序和安装包位于 `frontend/.tmp/tauri-target-0.4.2/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **V1.0.0**。源码构建后，主程序和安装包位于 `frontend/.tmp/tauri-target-1.0.0/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+
+V1.0.0 是首个正式版本：在 v0.4.2 的 Agent 工厂、RAG、工作流、联网研究和成果交付基础上，新增可信 Skill 上传与验证门禁、运行级 Skill 选择、C/Python 学科辅导技能、模型 Endpoint 完整编辑与安全删除，并补齐可复现的 Windows 构建流程、PowerShell 执行保护和 Ruff 持续集成基线。V1 的版本号已在 Python 包、后端 API、前端界面、Tauri 配置、Rust 包和安装包中保持一致。
 
 v0.4.2 引入面向任意主题的自适应检索扩展：自动清理“给我、创建工作流、撰写综述”等指令词，为中英文主题生成核心、综述/进展、方法、评估和应用等检索视角；专业约束用于相关性加权，不再因标题未写明某个维度而直接漏掉有效资料。
 
