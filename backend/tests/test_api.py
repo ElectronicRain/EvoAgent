@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -516,19 +517,20 @@ def test_runtime_security_supports_workspace_and_per_turn_full_access(client, tm
             "security_profile": "workspace_auto",
         },
     )
-    executed = client.post(
-        "/api/tools/run",
-        json={
-            "tool": "exec",
-            "arguments": {"command": "Write-Output exec-ready"},
-            "permission_mode": "auto",
-            "security_profile": "custom_auto",
-        },
-    )
     assert workspace_profile_blocked.status_code == 400
-    assert executed.status_code == 200
-    assert executed.json()["result"]["exit_code"] == 0
-    assert "exec-ready" in executed.json()["result"]["stdout"]
+    if os.name == "nt":
+        executed = client.post(
+            "/api/tools/run",
+            json={
+                "tool": "exec",
+                "arguments": {"command": "Write-Output exec-ready"},
+                "permission_mode": "auto",
+                "security_profile": "custom_auto",
+            },
+        )
+        assert executed.status_code == 200
+        assert executed.json()["result"]["exit_code"] == 0
+        assert "exec-ready" in executed.json()["result"]["stdout"]
 
     client.put(
         "/api/security/runtime",
