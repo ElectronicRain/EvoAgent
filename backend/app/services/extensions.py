@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..models import Extension, KnowledgeBase, Skill
 from .common import audit, dumps, loads
+from .skill_security import SkillPackageError, skill_security_service
 
 
 def parse_skill_file(path: Path) -> dict[str, str]:
@@ -46,15 +47,40 @@ class ExtensionService:
     async def sync_skills(self, db: AsyncSession) -> list[Skill]:
         synced: list[Skill] = []
         for path in settings.skills_root.glob("*/SKILL.md"):
-            data = parse_skill_file(path)
-            skill = await db.scalar(select(Skill).where(Skill.name == data["name"]))
+            try:
+                report = skill_security_service.validate_directory(path.parent)
+            except SkillPackageError as exc:
+                report = {
+                    "status": "rejected",
+                    "risk_level": "high",
+                    "content_hash": "",
+                    "metadata": {"name": path.parent.name, "description": "", "version": "1.0.0"},
+                    "instructions": "",
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "code": "package-invalid",
+                            "message": str(exc),
+                            "path": "SKILL.md",
+                            "line": None,
+                        }
+                    ],
+                    "files": [],
+                    "checks": {},
+                    "is_skill": False,
+                    "safe": False,
+                }
+            metadata = report.get("metadata") or {}
+            name = str(metadata.get("name") or path.parent.name)
+            skill = await db.scalar(select(Skill).where(Skill.name == name))
             if not skill:
-                skill = Skill(name=data["name"], instructions=data["instructions"])
+                skill = Skill(name=name, instructions=str(report.get("instructions") or ""))
                 db.add(skill)
-            skill.description = data["description"]
-            skill.version = data["version"]
-            skill.instructions = data["instructions"]
+            skill.description = str(metadata.get("description") or "")
+            skill.version = str(metadata.get("version") or "1.0.0")
+            skill.instructions = str(report.get("instructions") or "")
             skill.source_path = str(path)
+            skill_security_service.apply_report(skill, report)
             synced.append(skill)
         await audit(db, "skills.synced", "skill", detail={"count": len(synced)})
         return synced

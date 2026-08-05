@@ -182,6 +182,7 @@ class AgentConversationCreate(BaseModel):
 
 class AgentMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=100_000)
+    skill_ids: list[str] = Field(default_factory=list, max_length=20)
     security_profile: Literal[
         "default",
         "read_only",

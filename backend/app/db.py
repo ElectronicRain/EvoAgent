@@ -85,6 +85,13 @@ async def init_db() -> None:
             "approvals": {
                 "execution_result_json": "TEXT NOT NULL DEFAULT '{}'",
             },
+            "skills": {
+                "validation_status": "VARCHAR(30) NOT NULL DEFAULT 'pending'",
+                "risk_level": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+                "validation_json": "TEXT NOT NULL DEFAULT '{}'",
+                "content_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+                "verified_at": "DATETIME",
+            },
             "knowledge_documents": {
                 "source_id": "VARCHAR(36)",
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -138,6 +145,12 @@ async def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_agent_runs_user_id "
                 "ON agent_runs(user_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_skills_validation_status "
+                "ON skills(validation_status)"
             )
         )
         await connection.execute(
