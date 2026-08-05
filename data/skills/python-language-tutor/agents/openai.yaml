@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python 语言辅导"
+  short_description: "系统讲解 Python、调试程序并通过本地自动测试验证"
+  default_prompt: "Use $python-language-tutor to teach or debug this Python programming question."

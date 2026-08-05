@@ -1,0 +1,4 @@
+interface:
+  display_name: "C 语言辅导"
+  short_description: "系统讲解 C 语言、诊断代码并通过本地编译测试验证"
+  default_prompt: "Use $c-language-tutor to teach or debug this C programming question."

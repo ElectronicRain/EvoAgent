@@ -130,6 +130,9 @@ const archivedCount = computed(() => agents.value.filter(agent => ['archived', '
 const chatEndpoints = computed(() => endpoints.value.filter(
   endpoint => endpoint.enabled && (endpoint.modality || 'chat') === 'chat',
 ))
+const verifiedSkills = computed(() => skills.value.filter(
+  skill => skill.enabled && skill.validation_status === 'verified',
+))
 const statusSections = computed(() => [
   {
     key: 'active',
@@ -188,7 +191,7 @@ function resetForm() {
     group_id: groups.value.some(group => group.id === activeGroupId.value) ? activeGroupId.value : '',
     model: defaultEndpoint?.default_model || '', temperature: 0.3,
     tools: tools.value.map(item => item.name),
-    skills: skills.value.filter(item => item.enabled).map(item => item.id),
+    skills: [],
     mcp_extensions: extensions.value.filter(item => item.kind === 'mcp' && item.enabled).map(item => item.id),
     knowledge_bases: [],
     approval_policy_id: policies.value.find(item => item.is_default)?.id || '',
@@ -255,7 +258,7 @@ function editAgent(agent: Entity) {
     model: agent.model,
     temperature: agent.temperature,
     tools: Array.from(new Set([...parse(agent.tools_json), 'exec'])),
-    skills: parse(agent.skills_json).length ? parse(agent.skills_json) : skills.value.filter(item => item.enabled).map(item => item.id),
+    skills: parse(agent.skills_json).filter((id:string) => verifiedSkills.value.some(item => item.id === id)),
     mcp_extensions: Array.isArray(permissions.mcp_extensions)
       ? permissions.mcp_extensions
       : extensions.value.filter(item => item.kind === 'mcp' && item.enabled).map(item => item.id),
@@ -313,6 +316,7 @@ async function saveAgent() {
       generation_config: form.generation_config,
       permissions: {
         tool_mode: 'ask',
+        skill_policy: 'verified_only',
         approval_policy_id: form.approval_policy_id,
         security_profile: form.security_profile,
         mcp_extensions: form.mcp_extensions,
@@ -649,7 +653,7 @@ onBeforeUnmount(() => {
                 <div class="field"><label>默认安全策略</label><select v-model="form.security_profile" class="select"><option v-for="item in securityProfiles" :key="item.value" :value="item.value">{{ item.label }}</option></select><span class="field-help">对话时仍可临时切换。</span></div>
                 <div class="field full option-block"><label>工具权限</label><div><button v-for="item in tools" :key="item.name" class="btn btn-sm" :disabled="item.name==='exec'" :title="item.name==='exec'?'每个 Agent 固有的命令执行能力，由安全策略约束':''" :class="{ 'btn-primary': item.name==='exec' || form.tools.includes(item.name) }" @click="item.name!=='exec' && toggle(form.tools,item.name)"><Wrench :size="13" />{{ item.name }}<template v-if="item.name==='exec'"> · 固有</template></button></div></div>
                 <div class="field full option-block"><label>MCP 服务</label><div><button v-for="item in extensions.filter(extension=>extension.kind==='mcp' && extension.enabled)" :key="item.id" class="btn btn-sm" :class="{ 'btn-primary': form.mcp_extensions.includes(item.id) }" @click="toggle(form.mcp_extensions,item.id)">{{ item.name }}</button></div><span class="field-help">选中的 MCP 工具会直接加入 Agent 的模型工具列表。</span></div>
-                <div class="field full option-block"><label>Skills</label><div><button v-for="item in skills" :key="item.id" class="btn btn-sm" :class="{ 'btn-primary': form.skills.includes(item.id) }" @click="toggle(form.skills,item.id)">{{ item.name }}</button></div></div>
+                <div class="field full option-block"><label>已验证 Skills</label><div><button v-for="item in verifiedSkills" :key="item.id" class="btn btn-sm" :class="{ 'btn-primary': form.skills.includes(item.id) }" @click="toggle(form.skills,item.id)"><CheckCircle2 :size="13" />{{ item.name }}</button><span v-if="!verifiedSkills.length" class="field-help">暂无通过校验的 Skill，请先到“扩展与模型”上传或同步。</span></div><span class="field-help">仅列出格式与恶意风险扫描通过的 Skill。模型按需调用后才会读取完整指令，未绑定的 Skill 无法在对话中启用。</span></div>
               </section>
 
               <section v-else class="settings-section preview-section">

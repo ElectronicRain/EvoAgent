@@ -397,6 +397,11 @@ class Skill(TimestampMixin, Base):
     version: Mapped[str] = mapped_column(String(30), default="1.0.0")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     source_path: Mapped[str] = mapped_column(Text, default="")
+    validation_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    risk_level: Mapped[str] = mapped_column(String(20), default="unknown")
+    validation_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Extension(TimestampMixin, Base):
