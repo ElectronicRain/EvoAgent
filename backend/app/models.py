@@ -3,7 +3,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -104,9 +114,7 @@ class AgentMessage(TimestampMixin, Base):
     __tablename__ = "agent_messages"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("agent_conversations.id"), index=True
-    )
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("agent_conversations.id"), index=True)
     role: Mapped[str] = mapped_column(String(20), index=True)
     content: Mapped[str] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
@@ -122,9 +130,7 @@ class UserAccount(TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(Text)
     avatar_color: Mapped[str] = mapped_column(String(20), default="#1769c2")
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -188,9 +194,7 @@ class ResearchSourceReview(TimestampMixin, Base):
     __tablename__ = "research_source_reviews"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("agent_conversations.id"), index=True
-    )
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("agent_conversations.id"), index=True)
     run_id: Mapped[str | None] = mapped_column(
         ForeignKey("agent_runs.id"), nullable=True, index=True
     )
@@ -198,6 +202,312 @@ class ResearchSourceReview(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(Text, default="")
     decision: Mapped[str] = mapped_column(String(20), default="confirmed", index=True)
     credibility_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchProject(TimestampMixin, Base):
+    __tablename__ = "research_projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    discipline: Mapped[str] = mapped_column(String(100), default="计算机科学")
+    description: Mapped[str] = mapped_column(Text, default="")
+    research_question: Mapped[str] = mapped_column(Text, default="")
+    expected_outcome: Mapped[str] = mapped_column(Text, default="论文")
+    citation_style: Mapped[str] = mapped_column(String(30), default="GB/T 7714")
+    language: Mapped[str] = mapped_column(String(20), default="zh-CN")
+    stage: Mapped[str] = mapped_column(String(30), default="literature", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchProjectMember(TimestampMixin, Base):
+    __tablename__ = "research_project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), default="editor", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+
+
+class ResearchProjectInvite(TimestampMixin, Base):
+    __tablename__ = "research_project_invites"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    code_hint: Mapped[str] = mapped_column(String(20), default="")
+    role: Mapped[str] = mapped_column(String(20), default="editor", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    max_uses: Mapped[int] = mapped_column(Integer, default=20)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+
+
+class ResearchProjectLedger(Base):
+    __tablename__ = "research_project_ledger"
+    __table_args__ = (UniqueConstraint("project_id", "sequence"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(100), default="system")
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    resource_type: Mapped[str] = mapped_column(String(60), default="research_project")
+    resource_id: Mapped[str] = mapped_column(String(100), default="")
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    previous_hash: Mapped[str] = mapped_column(String(64), default="")
+    entry_hash: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class ResearchProjectResource(TimestampMixin, Base):
+    __tablename__ = "research_project_resources"
+    __table_args__ = (UniqueConstraint("project_id", "resource_type", "resource_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    resource_type: Mapped[str] = mapped_column(String(40), index=True)
+    resource_id: Mapped[str] = mapped_column(String(100), index=True)
+    label: Mapped[str] = mapped_column(String(240), default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchLiterature(TimestampMixin, Base):
+    __tablename__ = "research_literature"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(Text)
+    authors: Mapped[str] = mapped_column(Text, default="")
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    doi: Mapped[str] = mapped_column(String(300), default="", index=True)
+    url: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(120), default="手动录入")
+    abstract: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    credibility: Mapped[int] = mapped_column(Integer, default=50)
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchIdea(TimestampMixin, Base):
+    __tablename__ = "research_ideas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    problem: Mapped[str] = mapped_column(Text, default="")
+    hypothesis: Mapped[str] = mapped_column(Text, default="")
+    novelty: Mapped[str] = mapped_column(Text, default="")
+    method: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    scores_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="exploring", index=True)
+
+
+class ResearchMemory(TimestampMixin, Base):
+    __tablename__ = "research_memories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    category: Mapped[str] = mapped_column(String(50), default="decision", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(50), default="user")
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ResearchExperiment(TimestampMixin, Base):
+    __tablename__ = "research_experiments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    idea_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_ideas.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    objective: Mapped[str] = mapped_column(Text, default="")
+    hypothesis: Mapped[str] = mapped_column(Text, default="")
+    design_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+
+
+class ResearchArtifact(TimestampMixin, Base):
+    __tablename__ = "research_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), default="markdown", index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    content: Mapped[str] = mapped_column(Text)
+    source_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchManuscript(TimestampMixin, Base):
+    __tablename__ = "research_manuscripts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    format: Mapped[str] = mapped_column(String(20), default="latex")
+    content: Mapped[str] = mapped_column(Text, default="")
+    main_file: Mapped[str] = mapped_column(String(500), default="main.tex")
+    files_json: Mapped[str] = mapped_column(Text, default="{}")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    bibliography: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class ResearchManuscriptVersion(TimestampMixin, Base):
+    __tablename__ = "research_manuscript_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    manuscript_id: Mapped[str] = mapped_column(
+        ForeignKey("research_manuscripts.id", ondelete="CASCADE"), index=True
+    )
+    author_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(Integer, index=True)
+    content: Mapped[str] = mapped_column(Text)
+    main_file: Mapped[str] = mapped_column(String(500), default="main.tex")
+    files_json: Mapped[str] = mapped_column(Text, default="{}")
+    bibliography: Mapped[str] = mapped_column(Text, default="")
+    change_summary: Mapped[str] = mapped_column(Text, default="")
+
+
+class ResearchComment(TimestampMixin, Base):
+    __tablename__ = "research_comments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    manuscript_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_manuscripts.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    author_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("research_comments.id", ondelete="CASCADE"), nullable=True
+    )
+    file_path: Mapped[str] = mapped_column(String(500), default="main.tex")
+    anchored_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quote: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+
+
+class ResearchReview(TimestampMixin, Base):
+    __tablename__ = "research_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    manuscript_id: Mapped[str] = mapped_column(
+        ForeignKey("research_manuscripts.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    round: Mapped[int] = mapped_column(Integer, default=1)
+    roles_json: Mapped[str] = mapped_column(Text, default="[]")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    decision: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    scores_json: Mapped[str] = mapped_column(Text, default="{}")
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+
+
+class ResearchReviewItem(TimestampMixin, Base):
+    __tablename__ = "research_review_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    review_id: Mapped[str] = mapped_column(
+        ForeignKey("research_reviews.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(60), default="method")
+    reviewer_role: Mapped[str] = mapped_column(String(40), default="committee")
+    severity: Mapped[str] = mapped_column(String(20), default="major", index=True)
+    location: Mapped[str] = mapped_column(String(240), default="")
+    issue: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    suggestion: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=0.7)
+    response: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+
+
+class ResearchPresence(TimestampMixin, Base):
+    __tablename__ = "research_presence"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("research_projects.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    page: Mapped[str] = mapped_column(String(80), default="overview")
+    cursor_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class Workflow(TimestampMixin, Base):
@@ -368,15 +678,11 @@ class KnowledgeProviderConfig(TimestampMixin, Base):
     embedding_base_url: Mapped[str] = mapped_column(
         Text, default="https://api.siliconflow.cn/v1/embeddings"
     )
-    embedding_model: Mapped[str] = mapped_column(
-        String(180), default="Qwen/Qwen3-VL-Embedding-8B"
-    )
+    embedding_model: Mapped[str] = mapped_column(String(180), default="Qwen/Qwen3-VL-Embedding-8B")
     rerank_base_url: Mapped[str] = mapped_column(
         Text, default="https://api.siliconflow.cn/v1/rerank"
     )
-    rerank_model: Mapped[str] = mapped_column(
-        String(180), default="BAAI/bge-reranker-v2-m3"
-    )
+    rerank_model: Mapped[str] = mapped_column(String(180), default="BAAI/bge-reranker-v2-m3")
     api_key_ciphertext: Mapped[str] = mapped_column(Text, default="")
     llm_endpoint_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_endpoints.id"), nullable=True
@@ -507,7 +813,9 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
     actor: Mapped[str] = mapped_column(String(100), default="system")
     action: Mapped[str] = mapped_column(String(100), index=True)
     resource_type: Mapped[str] = mapped_column(String(60))

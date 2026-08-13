@@ -4,9 +4,11 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-2.0.0-1769c2)](#windows-桌面端)
 
-EvoAgent V1.0.0 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
+EvoAgent V2.0.0 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
+
+V2 科研应用层已经完整接入：以科研项目为数据边界，支持多人文献研究、参考文献关联图谱、Idea 探索、项目记忆与 Skill、实验承接、LaTeX 协作写作/批改/渲染、版本管理和多角色模拟审稿。后续“教”和“学”应用层可复用同一套项目资源、协作权限与可信知识能力。
 
 当前内置“教育学科研证据链”示范场景，可替换成医学、法学、经济学、计算机等学科包。
 
@@ -37,6 +39,15 @@ cd EvoAgent
 
 ## 已实现能力
 
+- 科研项目中心：新增独立“科研空间”，按课题统一管理研究问题、学科、预期成果、引用格式、文献、Idea、记忆、实验、论文和审稿轮次；支持负责人、项目管理员、共同作者、审稿者和只读成员五级角色，并可绑定已有 Agent、知识库、工作流、会话、成果和 Skill。
+- 智能文献研究：复用 Crossref、Google Scholar 入口、可信度评分和联网访问中心，形成项目级候选/纳入/重点/排除文献集合；仅使用已纳入文献生成带 `[文献 N]` 的综述、主题脉络、方法脉络、争议与研究空白。可生成白底黑字、携带原始 source ID 的学术关系图。
+- Idea 实验室：采用一问一答的苏格拉底式探索，逐轮检查新颖性、可证伪性、数据可得性、方法匹配和反例；Idea 卡片保存研究空白、假设、创新点、方法、证据与评分，可一键转换为包含变量、数据集、基线、指标、消融、随机种子、重复次数和统计检验的实验方案。
+- 科研记忆与实验：项目记忆保存类型、来源、置信度与锁定状态；从已确认记忆生成的 Skill 默认禁用且处于待验证状态，继续复用可信 Skill 门禁。实验记录保存 Idea 版本、设计参数、运行状态、指标、异常和结论。
+- 多人 LaTeX 写作与批改：可直接导入 Overleaf/通用 LaTeX 项目 ZIP、多个 `.tex/.bib` 文件或完整项目文件夹，安全保留 `tex/bib/cls/sty/bst`、图片、PDF 和数据资源。工作区提供项目文件树、主文档识别/切换、新建/删除文件、多文件 `input/include` 即时展开预览、ZIP 导出和本地 PDF 编译。每次保存生成包含全部项目文件的不可变版本，可按所选文件查看统一差异、恢复历史版本，并通过乐观并发控制阻止共同作者覆盖他人修改。批注绑定到具体文件、稿件版本、行号和原文摘录，适合多人写作与教师逐行批改。AI 写作助手支持提纲、润色、逻辑审查、引用检查、学术化、中英互译和审稿回复，但不会自动覆盖原稿。
+- 签名自动更新：桌面端启动后可后台检查 GitHub Release；发现新版本时弹窗展示版本号、发布日期和完整更新说明，用户可选择立即更新、稍后提醒或忽略该版本。用户与感知页面也提供手动检查和自动检查开关。更新包通过 Tauri 公钥验签，下载完成后才安装并重启，应用不会在未经用户确认时更新。
+- LaTeX PDF：检测到 Tectonic、TeX Live 或 MiKTeX 时可编译 PDF；未安装时仍提供即时预览并明确给出安装要求。编译前阻止 `write18`、外部路径 `input/include`、文件读写和 `catcode` 等危险命令，Tectonic 使用不可信模式。
+- 精细模拟审稿：领域、方法、实验、统计、写作规范和严格反方六类委员相互隔离地独立评审，再由确定性委员会规则汇总。用户可设置目标期刊/会议、标准/严格/顶会门槛和本轮关注点；报告量化新颖性、正确性、可复现性、重要性和清晰度，展示委员置信度、分歧度、录用阈值、稿件结构检查、优点、不足、主要/次要问题、原文位置、证据和修改建议。审稿报告固定关联稿件版本，并明确声明不能替代真实同行评议或核验未提供的原始数据；作者可采纳、逐点回复、解决或拒绝意见，形成审稿—修改—再审闭环。
+
 - Agent 工厂：按“启用 / 候选 / 已归档”和自定义分组管理 Agent；支持模板、新建 Agent、完整设置编辑、独立模型、工具、Skills、MCP、知识库、RAG、安全策略和版本谱系。
 - Agent 联动：Agent 可通过 `call_agent` 互相调用，具备深度限制和循环检测。
 - Agent 对话：可同时打开多个浮动对话窗口，支持全屏、最小化堆叠和跨页面悬浮；关闭、最小化或切换页面不会终止后台任务。支持持久化多轮会话、刷新恢复、上下文续聊、流式执行事件和历史步骤回放。
@@ -64,15 +75,17 @@ cd EvoAgent
 - 内置扩展：Office 文档解析、Citation Guard、成果导出、工作区 MCP、知识库 MCP、科研 Skills、C 语言辅导与 Python 语言辅导 Skill，以及用于数学推导和交互图表的 JSXGraph Skill。
 - 受控进化：围绕 Agent 目标任务自动联网检索改进方法，按来源可信度整理并封装为候选版本专属 `SKILL.md`，同步优化系统提示词和目标任务提示词；支持自定义基准用例、实时过程、基线/候选逐用例评测、Markdown 进化成果、人工批准和旧版本保留。
 - 用户与感知：本地用户注册/登录、每日/每周/每月 Token 用量、使用明细、对话记忆、用户画像以及全局 AI 回复风格预设和自定义。
-- Windows 桌面端：Tauri 自动启动 Python sidecar，提供 NSIS 和 MSI 安装包。
+- Windows 桌面端：Tauri 自动启动 Python sidecar，提供 NSIS 和 MSI 安装包；安装包同时携带经过 SHA-256 校验的 Tectonic 0.17.0，本机已有 TeX Live 时优先使用系统引擎，否则使用内置引擎完成 LaTeX PDF 编译。
+- LaTeX 项目：使用原生 Windows 文件/文件夹选择器导入 ZIP、完整目录、多文件、图片和 `.bib`；可向当前论文补充资源并保留相对路径，缺失资源会在预览和编译前明确阻断提示。
+- 科研协作：科研空间提供“使用邀请码加入”入口；项目内可生成带角色、有效期和次数限制的邀请码，支持在线状态、版本防冲突、行级批注，并以 SHA-256 前后哈希链记录关键协作动作。该链用于本地可验证溯源，不宣称公有区块链共识。
 
 ## 安装包
 
 构建后的安装包位于：
 
 ```text
-frontend/.tmp/tauri-target-1.0.0/release/bundle/nsis/EvoAgent_1.0.0_x64-setup.exe
-frontend/.tmp/tauri-target-1.0.0/release/bundle/msi/EvoAgent_1.0.0_x64_en-US.msi
+.tmp/tauri-target-2.0.0-portable/release/bundle/nsis/EvoAgent_2.0.0_x64-setup.exe
+.tmp/tauri-target-2.0.0-portable/release/bundle/msi/EvoAgent_2.0.0_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -93,7 +106,12 @@ frontend/.tmp/tauri-target-1.0.0/release/bundle/msi/EvoAgent_1.0.0_x64_en-US.msi
 ```powershell
 ./scripts/setup.ps1
 ./scripts/dev.ps1
+
+# 可信局域网内的多人科研协作（先完成前端构建）
+./scripts/research_collaboration_server.ps1
 ```
+
+局域网协作脚本会监听 `0.0.0.0:8000` 并输出其他成员可访问的本机 IPv4 地址。它不提供公网 TLS，仅适合可信校园网或实验室局域网；应通过 Windows 防火墙限制来源范围。每位成员需使用自己的 EvoAgent 账户登录，由项目负责人按角色加入项目。普通桌面单机模式仍只监听 `127.0.0.1`。
 
 浏览器开发地址：`http://127.0.0.1:5173`<br>
 API 文档：`http://127.0.0.1:8000/docs`
@@ -141,6 +159,12 @@ cargo check
 ./scripts/build_desktop.ps1
 ```
 
+安装包会携带后端 sidecar 与 Tectonic 0.17.0，不要求目标电脑预装 Python 或 TeX Live。内置 Tectonic 在首次 PDF 编译时需要联网下载 LaTeX 宏包并写入 `%LOCALAPPDATA%\EvoAgent\latex-cache`；完成首次缓存后，常用宏包可离线复用。发布前可用隔离用户目录模拟一台全新电脑并检查首次启动：
+
+```powershell
+./scripts/smoke_portable_install.ps1
+```
+
 ## 模型 API 配置
 
 在“扩展与模型 → 模型 API → 添加模型接口”中填写：
@@ -178,9 +202,15 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **V1.0.0**。源码构建后，主程序和安装包位于 `frontend/.tmp/tauri-target-1.0.0/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **V2.0.0**。源码构建后，主程序和安装包位于 `.tmp/tauri-target-2.0.0-portable/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
 
-V1.0.0 是首个正式版本：在 v0.4.2 的 Agent 工厂、RAG、工作流、联网研究和成果交付基础上，新增可信 Skill 上传与验证门禁、运行级 Skill 选择、C/Python 学科辅导技能、模型 Endpoint 完整编辑与安全删除，并补齐可复现的 Windows 构建流程、PowerShell 执行保护和 Ruff 持续集成基线。V1 的版本号已在 Python 包、后端 API、前端界面、Tauri 配置、Rust 包和安装包中保持一致。
+V2.0.0 在 V1 的 Agent 工厂、RAG、工作流和可信 Skill 基础上，新增完整科研应用层、LaTeX 多文件写作与内置渲染、参考文献关系图谱、科研专家 Agent、实时模拟审稿、多人协作和自动更新发布链路。V2 的版本号已在 Python 包、后端 API、前端界面、Tauri 配置、Rust 包和安装包中保持一致。
+
+### 签名更新发布
+
+客户端只接受由项目更新私钥签名、并与 `tauri.conf.json` 内置公钥匹配的安装包。首次发布前，需要在 GitHub 仓库的 Actions secrets 中配置 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；私钥不得提交到仓库。推送 `v*` 标签或手动运行 `Release EvoAgent Desktop` 工作流后，流水线会测试前后端、构建 Windows 安装包与签名文件，并创建包含 `latest.json` 的正式 Release。
+
+发布工作流中的 Release notes 应写清新增功能、修复内容、兼容性变化和必要操作。客户端会把这些说明作为“本次更新内容”完整展示；用户确认“立即更新并重启”后才会下载、验签和安装。设置页允许关闭启动检查，弹窗也支持稍后提醒或忽略当前版本。
 
 v0.4.2 引入面向任意主题的自适应检索扩展：自动清理“给我、创建工作流、撰写综述”等指令词，为中英文主题生成核心、综述/进展、方法、评估和应用等检索视角；专业约束用于相关性加权，不再因标题未写明某个维度而直接漏掉有效资料。
 

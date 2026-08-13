@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EvoAgent"
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     debug: bool = True
     database_url: str = f"sqlite+aiosqlite:///{(DATA_ROOT / 'evoagent.db').as_posix()}"
     workspace_root: Path = DATA_ROOT / "workspace"
@@ -77,6 +77,11 @@ class Settings(BaseSettings):
             "http://tauri.localhost",
             "https://tauri.localhost",
         ]
+    )
+    cors_origin_regex: str = (
+        r"^https?://(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})"
+        r"(?::\d+)?$"
     )
     llm_provider: str = "demo"
     llm_base_url: str = "https://api.openai.com/v1"

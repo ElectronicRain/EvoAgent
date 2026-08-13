@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $binaryDir = Join-Path $projectRoot 'frontend\src-tauri\binaries'
+$tectonicSource = Join-Path $projectRoot '.tmp\tectonic-0.17.0-windows\tectonic.exe'
+$tectonicTarget = Join-Path $binaryDir 'tectonic.exe'
 $buildRuntimeRoot = Join-Path $projectRoot '.tmp\desktop-build'
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -13,6 +15,10 @@ $env:PYTHONUSERBASE = Join-Path $buildRuntimeRoot 'python-user'
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $buildRuntimeRoot 'pyinstaller'
 New-Item -ItemType Directory -Force -Path (Join-Path $env:PYTHONUSERBASE 'Python312\site-packages') | Out-Null
 New-Item -ItemType Directory -Force -Path $binaryDir | Out-Null
+if (-not (Test-Path -LiteralPath $tectonicSource)) {
+    throw 'Bundled Tectonic runtime not found. Run scripts\prepare_tectonic.ps1 first.'
+}
+Copy-Item -LiteralPath $tectonicSource -Destination $tectonicTarget -Force
 & $python -m PyInstaller `
     --noconfirm `
     --clean `
@@ -31,3 +37,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Backend sidecar created at $binaryDir" -ForegroundColor Green
+Write-Host "Bundled LaTeX runtime copied to $tectonicTarget" -ForegroundColor Green

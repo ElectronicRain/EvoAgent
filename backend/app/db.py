@@ -110,6 +110,25 @@ async def init_db() -> None:
                 "iteration_count": "INTEGER NOT NULL DEFAULT 0",
                 "current_node_id": "VARCHAR(120)",
             },
+            "research_manuscripts": {
+                "main_file": "VARCHAR(500) NOT NULL DEFAULT 'main.tex'",
+                "files_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "research_manuscript_versions": {
+                "main_file": "VARCHAR(500) NOT NULL DEFAULT 'main.tex'",
+                "files_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "research_comments": {
+                "file_path": "VARCHAR(500) NOT NULL DEFAULT 'main.tex'",
+                "anchored_version": "INTEGER",
+            },
+            "research_reviews": {
+                "report_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "research_review_items": {
+                "reviewer_role": "VARCHAR(40) NOT NULL DEFAULT 'committee'",
+                "confidence": "FLOAT NOT NULL DEFAULT 0.7",
+            },
         }
         for table_name, columns in migrations.items():
             existing = {

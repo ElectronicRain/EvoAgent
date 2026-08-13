@@ -370,11 +370,11 @@ def test_360_search_parser_prefers_direct_result_url():
 def test_health_and_seeded_overview(client):
     assert client.get("/health").json()["status"] == "healthy"
     overview = client.get("/api/overview").json()
-    assert overview["counts"]["agents"] == 9
+    assert overview["counts"]["agents"] == 14
     assert overview["counts"]["workflows"] == 1
     assert overview["counts"]["knowledge_bases"] == 1
     agents = client.get("/api/agents").json()
-    assert sum(agent["status"] == "active" for agent in agents) == 5
+    assert sum(agent["status"] == "active" for agent in agents) == 10
     assert sum(agent["status"] == "candidate" for agent in agents) == 2
     assert sum(agent["status"] == "archived" for agent in agents) == 2
     catalog = {

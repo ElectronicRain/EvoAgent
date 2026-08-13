@@ -1,4 +1,10 @@
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000/api'
+const API_BASE = import.meta.env.VITE_API_BASE || (
+  '__TAURI_INTERNALS__' in window
+    ? 'http://127.0.0.1:8000/api'
+    : ['5173', '5174'].includes(window.location.port)
+      ? `${window.location.protocol}//${window.location.hostname}:8000/api`
+      : `${window.location.origin}/api`
+)
 export const API_ORIGIN = API_BASE.replace(/\/api\/?$/, '')
 const AUTH_TOKEN_KEY = 'evoagent-auth-token'
 
@@ -101,6 +107,36 @@ async function stream(
   if (!receivedDone) throw new ApiError(0, 'Agent 执行流意外中断，请重试')
 }
 
+async function streamEvents(
+  path: string,
+  data: unknown,
+  onEvent: (event: any) => void,
+): Promise<void> {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  attachAuth(headers)
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST', headers, body: JSON.stringify(data),
+  })
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => ({}))
+    throw new ApiError(response.status, errorMessage(body.detail, response.status))
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() || ''
+    for (const chunk of chunks) {
+      const dataLine = chunk.split('\n').find(line => line.startsWith('data: '))
+      if (dataLine) onEvent(JSON.parse(dataLine.slice(6)))
+    }
+    if (done) break
+  }
+}
+
 async function blob(path: string, data: unknown): Promise<Blob> {
   const headers = new Headers({ 'Content-Type': 'application/json' })
   attachAuth(headers)
@@ -126,10 +162,23 @@ export const api = {
   patch: <T = any>(path: string, data: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: <T = any>(path: string) => request<T>(path, { method: 'DELETE' }),
   stream,
+  streamEvents,
   blob,
   upload: <T = any>(path: string, file: File, fields: Record<string, string> = {}) => {
     const form = new FormData()
     form.append('file', file)
+    for (const [key, value] of Object.entries(fields)) form.append(key, value)
+    return request<T>(path, { method: 'POST', body: form })
+  },
+  uploadFiles: <T = any>(
+    path: string,
+    files: File[],
+    fields: Record<string, string> = {},
+    relativePaths: string[] = [],
+  ) => {
+    const form = new FormData()
+    files.forEach(file => form.append('files', file, file.name))
+    if (relativePaths.length) form.append('paths_json', JSON.stringify(relativePaths))
     for (const [key, value] of Object.entries(fields)) form.append(key, value)
     return request<T>(path, { method: 'POST', body: form })
   },

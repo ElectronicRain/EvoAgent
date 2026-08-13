@@ -8,6 +8,8 @@
     "core:window:allow-create",
     "core:webview:allow-create-webview-window",
     "shell:allow-spawn",
-    "shell:allow-kill"
+    "shell:allow-kill",
+    "updater:default",
+    "process:default"
   ]
 }

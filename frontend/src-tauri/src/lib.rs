@@ -1,4 +1,6 @@
 use std::sync::Mutex;
+use std::path::Path;
+use base64::Engine;
 use serde::Serialize;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::CommandChild;
@@ -12,6 +14,75 @@ struct ResearchBrowserCookie {
     value: String,
     domain: Option<String>,
     path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SelectedLatexFile {
+    name: String,
+    relative_path: String,
+    content_base64: String,
+}
+
+fn is_latex_project_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase().as_str(),
+        "zip" | "tex" | "bib" | "cls" | "sty" | "bst" | "bbx" | "cbx" | "cfg" |
+        "def" | "clo" | "txt" | "md" | "csv" | "tsv" | "png" | "jpg" | "jpeg" |
+        "pdf" | "eps" | "svg"
+    )
+}
+
+fn selected_file(path: &Path, relative_path: String) -> Result<SelectedLatexFile, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > 25_000_000 {
+        return Err(format!("文件过大（上限 25 MB）：{}", path.display()));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok(SelectedLatexFile {
+        name: path.file_name().and_then(|value| value.to_str()).unwrap_or("file").to_string(),
+        relative_path: relative_path.replace('\\', "/"),
+        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+fn collect_project_files(root: &Path, folder: &Path, output: &mut Vec<SelectedLatexFile>) -> Result<(), String> {
+    for entry in std::fs::read_dir(folder).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.is_dir() {
+            collect_project_files(root, &path, output)?;
+        } else if is_latex_project_file(&path) {
+            if output.len() >= 300 {
+                return Err("项目文件数超过 300 个，请先整理后再导入".to_string());
+            }
+            let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
+            output.push(selected_file(&path, relative.to_string_lossy().to_string())?);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn select_latex_files() -> Result<Vec<SelectedLatexFile>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let paths = rfd::FileDialog::new()
+            .add_filter("LaTeX 项目", &["zip", "tex", "bib", "cls", "sty", "bst", "png", "jpg", "jpeg", "pdf", "eps", "svg"])
+            .pick_files()
+            .unwrap_or_default();
+        paths.into_iter().filter(|path| is_latex_project_file(path)).map(|path| {
+            let relative = path.file_name().and_then(|value| value.to_str()).unwrap_or("file").to_string();
+            selected_file(&path, relative)
+        }).collect()
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn select_latex_folder() -> Result<Vec<SelectedLatexFile>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(root) = rfd::FileDialog::new().pick_folder() else { return Ok(Vec::new()); };
+        let mut files = Vec::new();
+        collect_project_files(&root, &root, &mut files)?;
+        Ok(files)
+    }).await.map_err(|error| error.to_string())?
 }
 
 fn public_web_url(raw_url: &str) -> Result<tauri::Url, String> {
@@ -89,10 +160,14 @@ async fn research_browser_cookies(
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(BackendProcess(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             open_research_browser,
-            research_browser_cookies
+            research_browser_cookies,
+            select_latex_files,
+            select_latex_folder
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -110,7 +185,21 @@ pub fn run() {
             };
 
             #[cfg(not(debug_assertions))]
-            let command = app.shell().sidecar("evoagent-backend")?;
+            let command = {
+                let resource_dir = app.path().resource_dir()?;
+                let bundled_tectonic = [
+                    resource_dir.join("tectonic.exe"),
+                    resource_dir.join("binaries").join("tectonic.exe"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file());
+                let command = app.shell().sidecar("evoagent-backend")?;
+                if let Some(path) = bundled_tectonic {
+                    command.env("EVO_BUNDLED_TECTONIC", path)
+                } else {
+                    command
+                }
+            };
 
             let (_events, child) = command.spawn()?;
             *app.state::<BackendProcess>().0.lock().expect("backend process lock") = Some(child);

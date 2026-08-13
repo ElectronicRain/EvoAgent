@@ -9,7 +9,8 @@ defineProps<{ title: string; description: string; eyebrow?: string }>()
       <h1>{{ title }}</h1>
       <p>{{ description }}</p>
     </div>
-    <div class="page-actions"><slot /></div>
+    <div v-if="$slots.actions || $slots.default" class="page-actions">
+      <slot name="actions"><slot /></slot>
+    </div>
   </header>
 </template>
-

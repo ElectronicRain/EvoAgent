@@ -1,0 +1,71 @@
+name: Release EvoAgent Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish-windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install backend
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+      - name: Install frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Test frontend
+        working-directory: frontend
+        run: pnpm build
+      - name: Test backend
+        run: .\.venv\Scripts\python.exe -m pytest -q
+      - name: Prepare bundled LaTeX runtime
+        run: .\scripts\prepare_tectonic.ps1
+      - name: Build backend sidecar
+        run: .\scripts\build_backend.ps1
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: frontend
+          tagName: v__VERSION__
+          releaseName: "EvoAgent v__VERSION__"
+          releaseBody: |
+            ## EvoAgent V2.0.0
+
+            - 新增完整科研应用层：文献研究、参考文献关联图谱、Idea 实验室、科研记忆与实验承接、LaTeX 协作写作和多角色模拟审稿。
+            - 支持 LaTeX 项目文件夹、图片与 BibTeX 导入，内置 Tectonic 渲染引擎，提供缩放、全屏、图片放大和版本管理。
+            - 为科研模块配置默认及自选专家 Agent，并与 Agent 工厂、现有工作流联动。
+            - 模拟审稿委员会新增独立委员实时进度、量化评分、置信度与委员会汇总。
+            - 完善多人协作、邀请码加入、行级批注和哈希链可信记录。
+            - 修复科研项目总览同步、新建科研方向、知识库执行和桌面更新检查问题。
+            - 左侧工作台分为上层应用层与底部调用层，便于区分业务应用和基础能力。
+
+            V1 用户启动软件后会自动检查此正式版本；更新包经既有 EvoAgent 发布公钥验证后才会安装，本地数据库和项目文件不会被覆盖。
+          releaseDraft: false
+          prerelease: false

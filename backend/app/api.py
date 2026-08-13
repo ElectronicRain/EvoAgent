@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
+import re
+import secrets
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -38,6 +42,22 @@ from .models import (
     KnowledgeProviderConfig,
     KnowledgeSource,
     ModelEndpoint,
+    ResearchComment,
+    ResearchArtifact,
+    ResearchExperiment,
+    ResearchIdea,
+    ResearchLiterature,
+    ResearchManuscript,
+    ResearchManuscriptVersion,
+    ResearchMemory,
+    ResearchPresence,
+    ResearchProject,
+    ResearchProjectInvite,
+    ResearchProjectLedger,
+    ResearchProjectMember,
+    ResearchProjectResource,
+    ResearchReview,
+    ResearchReviewItem,
     ResearchSourceReview,
     Skill,
     UserAccount,
@@ -82,6 +102,30 @@ from .schemas import (
     ModelEndpointUpdate,
     ResearchVerificationComplete,
     ResearchSourceReviewCreate,
+    ResearchCommentCreate,
+    ResearchCommentUpdate,
+    ResearchExperimentCreate,
+    ResearchExperimentUpdate,
+    ResearchIdeaChat,
+    ResearchIdeaCreate,
+    ResearchIdeaUpdate,
+    ResearchLiteratureCreate,
+    ResearchLiteratureSearch,
+    ResearchManuscriptCreate,
+    ResearchManuscriptAssist,
+    ResearchManuscriptRestore,
+    ResearchManuscriptUpdate,
+    ResearchMemberCreate,
+    ResearchInviteCreate,
+    ResearchInviteJoin,
+    ResearchMemoryCreate,
+    ResearchPresenceUpdate,
+    ResearchProjectCreate,
+    ResearchProjectUpdate,
+    ResearchReviewCreate,
+    ResearchReviewItemUpdate,
+    ResearchResourceCreate,
+    ResearchSkillDraft,
     RuntimeSecurityConfigUpdate,
     TeachingPlanRequest,
     SkillCreate,
@@ -128,6 +172,7 @@ from .services.skill_security import SkillPackageError, skill_security_service
 from .services.teaching import teaching_service
 from .services.tools import tool_runtime
 from .services.users import REPLY_STYLES, user_service
+from .services.research_projects import research_project_service
 from .services.document_exports import (
     content_disposition,
     markdown_to_docx,
@@ -139,6 +184,55 @@ from .services.workflow_expert import workflow_expert
 
 
 router = APIRouter(prefix="/api")
+
+
+async def append_research_ledger(
+    db: AsyncSession,
+    project_id: str,
+    action: str,
+    actor: str,
+    resource_type: str = "research_project",
+    resource_id: str = "",
+    detail: dict[str, Any] | None = None,
+) -> ResearchProjectLedger:
+    previous = await db.scalar(
+        select(ResearchProjectLedger)
+        .where(ResearchProjectLedger.project_id == project_id)
+        .order_by(desc(ResearchProjectLedger.sequence))
+        .limit(1)
+    )
+    sequence = (previous.sequence if previous else 0) + 1
+    previous_hash = previous.entry_hash if previous else "0" * 64
+    detail_json = dumps(detail or {})
+    canonical = json.dumps(
+        {
+            "project_id": project_id,
+            "sequence": sequence,
+            "actor": actor,
+            "action": action,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "detail": loads(detail_json, {}),
+            "previous_hash": previous_hash,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    entry = ResearchProjectLedger(
+        project_id=project_id,
+        sequence=sequence,
+        actor=actor,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        detail_json=detail_json,
+        previous_hash=previous_hash,
+        entry_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
 active_conversation_tasks: set[asyncio.Task] = set()
 active_workflow_tasks: set[asyncio.Task] = set()
 active_evolution_tasks: set[asyncio.Task] = set()
@@ -149,13 +243,37 @@ def row(model: Any) -> dict[str, Any]:
     return {column.name: getattr(model, column.name) for column in model.__table__.columns}
 
 
-async def require_user(
-    db: AsyncSession, authorization: str | None
-) -> UserAccount:
+async def require_user(db: AsyncSession, authorization: str | None) -> UserAccount:
     user = await user_service.resolve(db, authorization)
     if user is None:
         raise HTTPException(status_code=401, detail="请先登录")
     return user
+
+
+def research_row(model: Any) -> dict[str, Any]:
+    data = row(model)
+    for key in (
+        "settings_json",
+        "tags_json",
+        "metadata_json",
+        "evidence_json",
+        "scores_json",
+        "design_json",
+        "result_json",
+        "roles_json",
+        "cursor_json",
+        "source_ids_json",
+        "files_json",
+        "report_json",
+    ):
+        if key in data:
+            data[key.removesuffix("_json")] = loads(
+                data[key],
+                []
+                if key in {"tags_json", "evidence_json", "roles_json", "source_ids_json"}
+                else {},
+            )
+    return data
 
 
 @router.get("/auth/status")
@@ -204,13 +322,9 @@ async def register_user(
 
 
 @router.post("/auth/login")
-async def login_user(
-    payload: UserLogin, db: AsyncSession = Depends(get_db)
-) -> dict[str, Any]:
+async def login_user(payload: UserLogin, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     try:
-        result = await user_service.login(
-            db, username=payload.username, password=payload.password
-        )
+        result = await user_service.login(db, username=payload.username, password=payload.password)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     await audit(
@@ -350,8 +464,7 @@ async def describe_agent_run_persistence(
         "artifact_count": len(artifacts),
         "content_characters": len(assistant_message.content or ""),
         "storage": "business_database",
-        "tables": ["agent_runs", "agent_messages"]
-        + (["agent_artifacts"] if artifacts else []),
+        "tables": ["agent_runs", "agent_messages"] + (["agent_artifacts"] if artifacts else []),
         "knowledge_base_updated": False,
     }
 
@@ -460,9 +573,7 @@ async def _agent_group_row(db: AsyncSession, group: AgentGroup) -> dict[str, Any
 @router.get("/agent-groups")
 async def list_agent_groups(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     groups = (
-        await db.scalars(
-            select(AgentGroup).order_by(AgentGroup.sort_order, AgentGroup.name)
-        )
+        await db.scalars(select(AgentGroup).order_by(AgentGroup.sort_order, AgentGroup.name))
     ).all()
     return [await _agent_group_row(db, group) for group in groups]
 
@@ -472,9 +583,7 @@ async def create_agent_group(
     payload: AgentGroupCreate, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     name = payload.name.strip()
-    exists = await db.scalar(
-        select(AgentGroup).where(func.lower(AgentGroup.name) == name.lower())
-    )
+    exists = await db.scalar(select(AgentGroup).where(func.lower(AgentGroup.name) == name.lower()))
     if exists:
         raise HTTPException(status_code=409, detail="Agent 分组名称已存在")
     group = AgentGroup(
@@ -518,16 +627,12 @@ async def update_agent_group(
 
 
 @router.delete("/agent-groups/{group_id}", status_code=204)
-async def delete_agent_group(
-    group_id: str, db: AsyncSession = Depends(get_db)
-) -> Response:
+async def delete_agent_group(group_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     group = await db.get(AgentGroup, group_id)
     if not group:
         raise not_found("Agent 分组")
     await db.execute(
-        update(AgentDefinition)
-        .where(AgentDefinition.group_id == group_id)
-        .values(group_id=None)
+        update(AgentDefinition).where(AgentDefinition.group_id == group_id).values(group_id=None)
     )
     await db.delete(group)
     await audit(db, "agent.group_deleted", "agent_group", group_id)
@@ -540,9 +645,7 @@ async def list_agents(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]
     return [row(item) for item in items]
 
 
-async def verified_agent_skill_ids(
-    db: AsyncSession, skill_ids: list[str]
-) -> list[str]:
+async def verified_agent_skill_ids(db: AsyncSession, skill_ids: list[str]) -> list[str]:
     requested = list(dict.fromkeys(skill_ids))
     if not requested:
         return []
@@ -578,11 +681,7 @@ async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db))
     endpoint = (
         await db.get(ModelEndpoint, endpoint_id)
         if endpoint_id
-        else (
-            await latest_chat_endpoint(db)
-            if settings.require_online_agents
-            else None
-        )
+        else (await latest_chat_endpoint(db) if settings.require_online_agents else None)
     )
     if endpoint_id:
         try:
@@ -675,11 +774,7 @@ async def update_agent(
                     status_code=422,
                     detail=f"该字段必须选择{label}模型接口",
                 )
-            if (
-                key == "model_endpoint_id"
-                and endpoint
-                and not endpoint.enabled
-            ):
+            if key == "model_endpoint_id" and endpoint and not endpoint.enabled:
                 raise HTTPException(status_code=422, detail="选择的对话模型接口已停用")
             setattr(item, key, endpoint_id)
         elif key == "group_id":
@@ -749,16 +844,13 @@ async def evaluate_agent_rag(
             for index, chunk in enumerate(chunks, 1)
             if not expected
             or any(
-                keyword.lower() in str(chunk.get("context") or "").lower()
-                for keyword in expected
+                keyword.lower() in str(chunk.get("context") or "").lower() for keyword in expected
             )
         ]
         reciprocal_rank = 1 / relevant_ranks[0] if relevant_ranks else 0.0
         dcg = sum(1 / math.log2(rank + 1) for rank in relevant_ranks)
         ideal_count = min(len(relevant_ranks), len(chunks))
-        ideal_dcg = sum(
-            1 / math.log2(rank + 1) for rank in range(1, ideal_count + 1)
-        )
+        ideal_dcg = sum(1 / math.log2(rank + 1) for rank in range(1, ideal_count + 1))
         ndcg = dcg / ideal_dcg if ideal_dcg else 0.0
         weight = float(case.weight or 1)
         total_weight += weight
@@ -831,11 +923,7 @@ async def list_agent_conversations(
     query = select(AgentConversation).where(AgentConversation.agent_id == agent_id)
     if user is not None:
         query = query.where(AgentConversation.user_id == user.id)
-    items = (
-        await db.scalars(
-            query.order_by(desc(AgentConversation.updated_at))
-        )
-    ).all()
+    items = (await db.scalars(query.order_by(desc(AgentConversation.updated_at)))).all()
     result = []
     for item in items:
         data = row(item)
@@ -891,12 +979,14 @@ async def list_conversation_messages(
         )
     ).all()
     run_ids = {item.run_id for item in items if item.run_id}
-    runs = {
-        item.id: item
-        for item in (
-            await db.scalars(select(AgentRun).where(AgentRun.id.in_(run_ids)))
-        ).all()
-    } if run_ids else {}
+    runs = (
+        {
+            item.id: item
+            for item in (await db.scalars(select(AgentRun).where(AgentRun.id.in_(run_ids)))).all()
+        }
+        if run_ids
+        else {}
+    )
     result = []
     for item in items:
         data = row(item)
@@ -947,9 +1037,7 @@ async def create_teaching_plan(
     if not agent:
         raise not_found("Agent")
     bound_endpoint = (
-        await db.get(ModelEndpoint, agent.model_endpoint_id)
-        if agent.model_endpoint_id
-        else None
+        await db.get(ModelEndpoint, agent.model_endpoint_id) if agent.model_endpoint_id else None
     )
     endpoint = bound_endpoint
     if not endpoint:
@@ -970,9 +1058,7 @@ async def create_teaching_plan(
         endpoint.default_model if endpoint else agent.model,
     )
     result["model_endpoint"] = endpoint.name if endpoint else None
-    result["cloud_tts_available"] = bool(
-        endpoint and "siliconflow.cn" in endpoint.base_url.lower()
-    )
+    result["cloud_tts_available"] = bool(endpoint and "siliconflow.cn" in endpoint.base_url.lower())
     await audit(
         db,
         "classroom.plan.generated",
@@ -1016,9 +1102,7 @@ async def create_classroom_speech(
     }
     base_url = endpoint.base_url.rstrip("/")
     speech_url = (
-        f"{base_url}/audio/speech"
-        if base_url.endswith("/v1")
-        else f"{base_url}/v1/audio/speech"
+        f"{base_url}/audio/speech" if base_url.endswith("/v1") else f"{base_url}/v1/audio/speech"
     )
     model = "FunAudioLLM/CosyVoice2-0.5B"
     request_body = {
@@ -1099,6 +1183,1488 @@ async def review_research_source(
         {"url": payload.url, "decision": payload.decision},
     )
     return row(item)
+
+
+@router.get("/research-projects")
+async def list_research_projects(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    member_project_ids = select(ResearchProjectMember.project_id).where(
+        ResearchProjectMember.user_id == user.id,
+        ResearchProjectMember.status == "active",
+    )
+    projects = (
+        await db.scalars(
+            select(ResearchProject)
+            .where(
+                (ResearchProject.owner_id == user.id) | (ResearchProject.id.in_(member_project_ids))
+            )
+            .order_by(desc(ResearchProject.updated_at))
+        )
+    ).all()
+    return [await research_project_service.project_payload(db, item, user) for item in projects]
+
+
+@router.post("/research-projects", status_code=201)
+async def create_research_project(
+    payload: ResearchProjectCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    item = ResearchProject(owner_id=user.id, **payload.model_dump())
+    db.add(item)
+    await db.flush()
+    await audit(db, "research.project.created", "research_project", item.id, actor=user.username)
+    await append_research_ledger(db, item.id, "project.created", user.username, resource_id=item.id, detail={"name": item.name})
+    return await research_project_service.project_payload(db, item, user)
+
+
+@router.get("/research-projects/{project_id}")
+async def get_research_project(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user)
+    data = await research_project_service.project_payload(db, project, user)
+    data["context"] = await research_project_service.context(db, project)
+    return data
+
+
+@router.patch("/research-projects/{project_id}")
+async def update_research_project(
+    project_id: str,
+    payload: ResearchProjectUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    values = payload.model_dump(exclude_unset=True)
+    minimum_role = "editor" if set(values) == {"settings"} else "manager"
+    project, _ = await research_project_service.access(db, project_id, user, minimum_role)
+    if "settings" in values:
+        project.settings_json = dumps(values.pop("settings") or {})
+    for key, value in values.items():
+        setattr(project, key, value)
+    await audit(db, "research.project.updated", "research_project", project.id, actor=user.username)
+    return await research_project_service.project_payload(db, project, user)
+
+
+@router.get("/research-projects/{project_id}/members")
+async def list_research_members(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user)
+    owner = await db.get(UserAccount, project.owner_id)
+    result = [
+        {
+            "id": f"owner:{project.owner_id}",
+            "user_id": project.owner_id,
+            "username": owner.username,
+            "display_name": owner.display_name,
+            "role": "owner",
+            "status": "active",
+        }
+    ]
+    members = (
+        await db.scalars(
+            select(ResearchProjectMember).where(ResearchProjectMember.project_id == project_id)
+        )
+    ).all()
+    for member in members:
+        account = await db.get(UserAccount, member.user_id)
+        result.append(
+            {
+                **row(member),
+                "username": account.username if account else "",
+                "display_name": account.display_name if account else "已删除用户",
+            }
+        )
+    return result
+
+
+@router.post("/research-projects/{project_id}/members", status_code=201)
+async def add_research_member(
+    project_id: str,
+    payload: ResearchMemberCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "manager")
+    account = await db.scalar(select(UserAccount).where(UserAccount.username == payload.username))
+    if not account:
+        raise HTTPException(status_code=404, detail="协作者必须先在本机注册账户")
+    if account.id == project.owner_id:
+        raise HTTPException(status_code=409, detail="项目负责人已经拥有最高权限")
+    member = await db.scalar(
+        select(ResearchProjectMember).where(
+            ResearchProjectMember.project_id == project_id,
+            ResearchProjectMember.user_id == account.id,
+        )
+    )
+    if not member:
+        member = ResearchProjectMember(project_id=project_id, user_id=account.id)
+        db.add(member)
+    member.role, member.status = payload.role, "active"
+    await db.flush()
+    await audit(
+        db,
+        "research.member.added",
+        "research_project",
+        project_id,
+        {"member": account.username, "role": payload.role},
+        actor=user.username,
+    )
+    await append_research_ledger(db, project_id, "member.added", user.username, "member", account.id, {"username": account.username, "role": payload.role})
+    return {**row(member), "username": account.username, "display_name": account.display_name}
+
+
+@router.post("/research-projects/{project_id}/invites", status_code=201)
+async def create_research_invite(
+    project_id: str,
+    payload: ResearchInviteCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "manager")
+    code = f"EVO-{secrets.token_urlsafe(18)}"
+    item = ResearchProjectInvite(
+        project_id=project_id,
+        created_by=user.id,
+        code_hash=hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        code_hint=code[-6:],
+        role=payload.role,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=payload.expires_hours),
+        max_uses=payload.max_uses,
+    )
+    db.add(item)
+    await db.flush()
+    await append_research_ledger(db, project_id, "invite.created", user.username, "invite", item.id, {"role": item.role, "expires_at": item.expires_at.isoformat(), "max_uses": item.max_uses})
+    return {**row(item), "code": code}
+
+
+@router.post("/research-projects/join", status_code=201)
+async def join_research_project(
+    payload: ResearchInviteJoin,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    code_hash = hashlib.sha256(payload.code.strip().encode("utf-8")).hexdigest()
+    item = await db.scalar(select(ResearchProjectInvite).where(ResearchProjectInvite.code_hash == code_hash))
+    now = datetime.now(timezone.utc)
+    expires_at = item.expires_at.replace(tzinfo=timezone.utc) if item and item.expires_at.tzinfo is None else (item.expires_at if item else now)
+    if not item or item.status != "active" or expires_at <= now or item.use_count >= item.max_uses:
+        raise HTTPException(status_code=422, detail="邀请码无效、已过期或使用次数已耗尽")
+    project = await db.get(ResearchProject, item.project_id)
+    if not project:
+        raise not_found("科研项目")
+    if user.id != project.owner_id:
+        member = await db.scalar(select(ResearchProjectMember).where(ResearchProjectMember.project_id == item.project_id, ResearchProjectMember.user_id == user.id))
+        if not member:
+            member = ResearchProjectMember(project_id=item.project_id, user_id=user.id)
+            db.add(member)
+        member.role, member.status = item.role, "active"
+    item.use_count += 1
+    if item.use_count >= item.max_uses:
+        item.status = "consumed"
+    await db.flush()
+    await append_research_ledger(db, item.project_id, "member.joined_by_invite", user.username, "member", user.id, {"role": item.role, "invite_hint": item.code_hint})
+    return await research_project_service.project_payload(db, project, user)
+
+
+@router.get("/research-projects/{project_id}/ledger")
+async def list_research_ledger(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (await db.scalars(select(ResearchProjectLedger).where(ResearchProjectLedger.project_id == project_id).order_by(ResearchProjectLedger.sequence))).all()
+    valid = True
+    previous_hash = "0" * 64
+    result = []
+    for item in items:
+        canonical = json.dumps({"project_id": item.project_id, "sequence": item.sequence, "actor": item.actor, "action": item.action, "resource_type": item.resource_type, "resource_id": item.resource_id, "detail": loads(item.detail_json, {}), "previous_hash": previous_hash}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        valid = valid and item.previous_hash == previous_hash and hashlib.sha256(canonical.encode("utf-8")).hexdigest() == item.entry_hash
+        previous_hash = item.entry_hash
+        result.append({**row(item), "detail": loads(item.detail_json, {})})
+    return {"verified": valid, "head_hash": previous_hash if items else "", "entries": list(reversed(result))}
+
+
+@router.delete("/research-projects/{project_id}/members/{member_id}", status_code=204)
+async def remove_research_member(
+    project_id: str,
+    member_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "manager")
+    member = await db.get(ResearchProjectMember, member_id)
+    if not member or member.project_id != project_id:
+        raise not_found("项目成员")
+    await db.delete(member)
+    await audit(db, "research.member.removed", "research_project", project_id, actor=user.username)
+
+
+@router.get("/research-projects/{project_id}/resources")
+async def list_research_resources(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchProjectResource)
+            .where(ResearchProjectResource.project_id == project_id)
+            .order_by(desc(ResearchProjectResource.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/resources", status_code=201)
+async def add_research_resource(
+    project_id: str,
+    payload: ResearchResourceCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.scalar(
+        select(ResearchProjectResource).where(
+            ResearchProjectResource.project_id == project_id,
+            ResearchProjectResource.resource_type == payload.resource_type,
+            ResearchProjectResource.resource_id == payload.resource_id,
+        )
+    )
+    if not item:
+        item = ResearchProjectResource(
+            project_id=project_id,
+            resource_type=payload.resource_type,
+            resource_id=payload.resource_id,
+        )
+        db.add(item)
+    item.label = payload.label
+    item.metadata_json = dumps(payload.metadata)
+    await db.flush()
+    return research_row(item)
+
+
+@router.get("/research-projects/{project_id}/literature")
+async def list_project_literature(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchLiterature)
+            .where(ResearchLiterature.project_id == project_id)
+            .order_by(desc(ResearchLiterature.credibility), desc(ResearchLiterature.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/literature", status_code=201)
+async def create_project_literature(
+    project_id: str,
+    payload: ResearchLiteratureCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    values = payload.model_dump(exclude={"tags"})
+    item = ResearchLiterature(
+        project_id=project_id, created_by=user.id, tags_json=dumps(payload.tags), **values
+    )
+    db.add(item)
+    await db.flush()
+    return research_row(item)
+
+
+@router.post("/research-projects/{project_id}/literature/search")
+async def search_project_literature(
+    project_id: str,
+    payload: ResearchLiteratureSearch,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    items = await research_project_service.search_literature(
+        db, project, user, payload.query, payload.target_count, payload.year_from, payload.year_to
+    )
+    await audit(
+        db,
+        "research.literature.searched",
+        "research_project",
+        project_id,
+        {"query": payload.query, "count": len(items)},
+        actor=user.username,
+    )
+    return [research_row(item) for item in items]
+
+
+@router.patch("/research-projects/{project_id}/literature/{literature_id}")
+async def update_project_literature(
+    project_id: str,
+    literature_id: str,
+    payload: ResearchLiteratureCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchLiterature, literature_id)
+    if not item or item.project_id != project_id:
+        raise not_found("文献")
+    for key, value in payload.model_dump(exclude={"tags"}).items():
+        setattr(item, key, value)
+    item.tags_json = dumps(payload.tags)
+    return research_row(item)
+
+
+@router.post("/research-projects/{project_id}/literature/synthesize")
+async def synthesize_project_literature(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    items = (
+        await db.scalars(
+            select(ResearchLiterature).where(
+                ResearchLiterature.project_id == project_id,
+                ResearchLiterature.status.in_(["included", "priority"]),
+            )
+        )
+    ).all()
+    if not items:
+        raise HTTPException(status_code=422, detail="请先纳入至少一篇文献")
+    evidence = "\n".join(
+        f"[{index}] {item.title}; {item.authors}; {item.year}; DOI:{item.doi or '无'}; 摘要:{item.abstract[:1600]}"
+        for index, item in enumerate(items, 1)
+    )
+    content = await research_project_service.chat(
+        db,
+        system="你是系统综述助手。只能依据给定文献，正文使用[文献 N]，区分事实、推论和研究空白。",
+        user_message=f"研究问题：{project.research_question or project.description}\n\n文献：\n{evidence}\n\n生成综述、主题脉络、方法脉络、争议、研究空白和参考文献。",
+        max_output_tokens=10000,
+    )
+    return {"content": content, "sources": len(items), "traceable": True}
+
+
+@router.post("/research-projects/{project_id}/literature/figure", status_code=201)
+async def create_research_figure(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    figure = await research_project_service.academic_figure(db, project)
+    item = ResearchArtifact(
+        project_id=project_id,
+        created_by=user.id,
+        kind="academic-graph",
+        title=figure["title"],
+        content=dumps(figure),
+        source_ids_json=dumps(figure["source_ids"]),
+        metadata_json=dumps({"style": "academic", "traceable": True}),
+    )
+    db.add(item)
+    await db.flush()
+    return {**research_row(item), "figure": figure}
+
+
+@router.get("/research-projects/{project_id}/ideas")
+async def list_research_ideas(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchIdea)
+            .where(ResearchIdea.project_id == project_id)
+            .order_by(desc(ResearchIdea.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/ideas", status_code=201)
+async def create_research_idea(
+    project_id: str,
+    payload: ResearchIdeaCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    values = payload.model_dump(exclude={"evidence", "scores"})
+    item = ResearchIdea(
+        project_id=project_id,
+        created_by=user.id,
+        evidence_json=dumps(payload.evidence),
+        scores_json=dumps(payload.scores),
+        **values,
+    )
+    db.add(item)
+    await db.flush()
+    return research_row(item)
+
+
+@router.patch("/research-projects/{project_id}/ideas/{idea_id}")
+async def update_research_idea(
+    project_id: str,
+    idea_id: str,
+    payload: ResearchIdeaUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchIdea, idea_id)
+    if not item or item.project_id != project_id:
+        raise not_found("Idea")
+    values = payload.model_dump(exclude_unset=True, exclude={"evidence", "scores"})
+    for key, value in values.items():
+        setattr(item, key, value)
+    if payload.evidence is not None:
+        item.evidence_json = dumps(payload.evidence)
+    if payload.scores is not None:
+        item.scores_json = dumps(payload.scores)
+    return research_row(item)
+
+
+@router.delete("/research-projects/{project_id}/ideas/{idea_id}", status_code=204)
+async def delete_research_idea(
+    project_id: str,
+    idea_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchIdea, idea_id)
+    if not item or item.project_id != project_id:
+        raise not_found("Idea")
+    linked = await db.scalar(
+        select(func.count(ResearchExperiment.id)).where(ResearchExperiment.idea_id == idea_id)
+    ) or 0
+    if linked:
+        raise HTTPException(status_code=409, detail="该 Idea 已承接实验，请保留其研究溯源或先解除实验关联")
+    await db.delete(item)
+    await append_research_ledger(
+        db, project_id, "idea.deleted", user.username, "research_idea", idea_id,
+        {"title": item.title},
+    )
+    return Response(status_code=204)
+
+
+@router.post("/research-projects/{project_id}/ideas/{idea_id}/experiment", status_code=201)
+async def convert_idea_to_experiment(
+    project_id: str,
+    idea_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    idea = await db.get(ResearchIdea, idea_id)
+    if not idea or idea.project_id != project_id:
+        raise not_found("Idea")
+    idea.status = "adopted"
+    item = ResearchExperiment(
+        project_id=project_id,
+        idea_id=idea.id,
+        created_by=user.id,
+        title=f"验证：{idea.title}",
+        objective=idea.problem,
+        hypothesis=idea.hypothesis,
+        design_json=dumps(
+            {
+                "method": idea.method,
+                "variables": {"independent": "待确认", "dependent": "待确认", "controls": []},
+                "dataset": "待确认",
+                "baselines": [],
+                "metrics": [],
+                "ablations": [],
+                "random_seed": 42,
+                "repetitions": 3,
+                "statistical_test": "待确认",
+                "failure_criteria": "待确认",
+            }
+        ),
+    )
+    db.add(item)
+    await db.flush()
+    return research_row(item)
+
+
+@router.post("/research-projects/{project_id}/ideas/chat")
+async def chat_research_idea(
+    project_id: str,
+    payload: ResearchIdeaChat,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    if payload.agent_id:
+        agent = await db.get(AgentDefinition, payload.agent_id)
+        if not agent or agent.status not in {"active", "candidate"}:
+            raise not_found("Idea 专家 Agent")
+        context = await research_project_service.context(db, project)
+        run = await agent_engine.run(
+            db,
+            agent.id,
+            (
+                "你正在科研项目的 Idea 苏格拉底对话模块工作。先回应用户，再只追问一个最关键的问题；"
+                "检查新颖性、可证伪性、数据可得性、方法匹配和反例，不得虚构结论。\n\n"
+                f"项目上下文：\n{context[:30000]}\n\n用户：{payload.message}"
+            ),
+            {"user_id": user.id},
+            conversation_messages=payload.history,
+        )
+        answer = run.output_text
+    else:
+        answer = await research_project_service.explore_idea(
+            db, project, payload.message, payload.history
+        )
+    return {"answer": answer}
+
+
+@router.get("/research-projects/{project_id}/memories")
+async def list_research_memories(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchMemory)
+            .where(ResearchMemory.project_id == project_id)
+            .order_by(desc(ResearchMemory.locked), desc(ResearchMemory.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/memories", status_code=201)
+async def create_research_memory(
+    project_id: str,
+    payload: ResearchMemoryCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = ResearchMemory(project_id=project_id, created_by=user.id, **payload.model_dump())
+    db.add(item)
+    await db.flush()
+    return research_row(item)
+
+
+@router.delete("/research-projects/{project_id}/memories/{memory_id}", status_code=204)
+async def delete_research_memory(
+    project_id: str,
+    memory_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchMemory, memory_id)
+    if not item or item.project_id != project_id:
+        raise not_found("科研记忆")
+    if item.locked and (await research_project_service.access(db, project_id, user))[1] not in {
+        "owner",
+        "manager",
+    }:
+        raise HTTPException(status_code=403, detail="锁定记忆只能由项目负责人或管理员删除")
+    await db.delete(item)
+
+
+@router.post("/research-projects/{project_id}/skills", status_code=201)
+async def create_project_skill(
+    project_id: str,
+    payload: ResearchSkillDraft,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "manager")
+    memories = (
+        (
+            await db.scalars(
+                select(ResearchMemory).where(
+                    ResearchMemory.project_id == project_id,
+                    ResearchMemory.id.in_(payload.memory_ids),
+                )
+            )
+        ).all()
+        if payload.memory_ids
+        else []
+    )
+    instructions = (
+        "# 项目科研 Skill\n\n"
+        + (payload.description or "依据项目已确认记忆执行任务。")
+        + "\n\n## 已确认规则\n"
+        + "\n".join(f"- [{item.category}] {item.content}" for item in memories)
+    )
+    skill = Skill(
+        name=payload.name,
+        description=payload.description,
+        instructions=instructions,
+        enabled=False,
+        validation_status="pending",
+        risk_level="unknown",
+    )
+    db.add(skill)
+    await db.flush()
+    db.add(
+        ResearchProjectResource(
+            project_id=project_id,
+            resource_type="skill",
+            resource_id=skill.id,
+            label=skill.name,
+            metadata_json=dumps({"status": "pending_validation"}),
+        )
+    )
+    return research_row(skill)
+
+
+@router.get("/research-projects/{project_id}/experiments")
+async def list_research_experiments(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchExperiment)
+            .where(ResearchExperiment.project_id == project_id)
+            .order_by(desc(ResearchExperiment.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/experiments", status_code=201)
+async def create_research_experiment(
+    project_id: str,
+    payload: ResearchExperimentCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    values = payload.model_dump(exclude={"design", "result"})
+    item = ResearchExperiment(
+        project_id=project_id,
+        created_by=user.id,
+        design_json=dumps(payload.design),
+        result_json=dumps(payload.result),
+        **values,
+    )
+    db.add(item)
+    await db.flush()
+    return research_row(item)
+
+
+@router.patch("/research-projects/{project_id}/experiments/{experiment_id}")
+async def update_research_experiment(
+    project_id: str,
+    experiment_id: str,
+    payload: ResearchExperimentUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchExperiment, experiment_id)
+    if not item or item.project_id != project_id:
+        raise not_found("实验")
+    for key, value in payload.model_dump(exclude_unset=True, exclude={"design", "result"}).items():
+        setattr(item, key, value)
+    if payload.design is not None:
+        item.design_json = dumps(payload.design)
+    if payload.result is not None:
+        item.result_json = dumps(payload.result)
+    await audit(
+        db,
+        "research.experiment.updated",
+        "research_experiment",
+        item.id,
+        {"status": item.status},
+        actor=user.username,
+    )
+    return research_row(item)
+
+
+@router.get("/research-projects/{project_id}/manuscripts")
+async def list_research_manuscripts(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchManuscript)
+            .where(ResearchManuscript.project_id == project_id)
+            .order_by(desc(ResearchManuscript.updated_at))
+        )
+    ).all()
+    return [research_row(item) for item in items]
+
+
+@router.post("/research-projects/{project_id}/manuscripts", status_code=201)
+async def create_research_manuscript(
+    project_id: str,
+    payload: ResearchManuscriptCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    content = payload.content or (
+        "\\documentclass[UTF8]{ctexart}\n\\usepackage{amsmath,graphicx,booktabs}\n\\title{"
+        + payload.title
+        + "}\n\\author{"
+        + user.display_name
+        + "}\n\\begin{document}\n\\maketitle\n\\begin{abstract}\n请填写摘要。\n\\end{abstract}\n\\section{引言}\n请填写研究背景、问题与贡献。\n\\section{相关工作}\n\\section{方法}\n\\section{实验}\n\\section{结论}\n\\bibliographystyle{gbt7714-numerical}\n\\bibliography{references}\n\\end{document}\n"
+    )
+    item = ResearchManuscript(
+        project_id=project_id,
+        created_by=user.id,
+        title=payload.title,
+        content=content,
+        bibliography=payload.bibliography,
+        main_file="main.tex",
+    )
+    initial_files = {"main.tex": research_project_service.file_record("main.tex", content.encode("utf-8"))}
+    if payload.bibliography:
+        initial_files["references.bib"] = research_project_service.file_record(
+            "references.bib", payload.bibliography.encode("utf-8")
+        )
+    item.files_json = dumps(initial_files)
+    db.add(item)
+    await db.flush()
+    db.add(
+        ResearchManuscriptVersion(
+            manuscript_id=item.id,
+            author_id=user.id,
+            version=1,
+            content=item.content,
+            bibliography=item.bibliography,
+            main_file=item.main_file,
+            files_json=item.files_json,
+            change_summary="创建论文",
+        )
+    )
+    return research_row(item)
+
+
+@router.post("/research-projects/{project_id}/manuscripts/import", status_code=201)
+async def import_research_manuscript(
+    project_id: str,
+    files: list[UploadFile] = File(...),
+    title: str = Form(default=""),
+    main_file: str = Form(default=""),
+    paths_json: str = Form(default="[]"),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    requested_paths = loads(paths_json, [])
+    if requested_paths and len(requested_paths) != len(files):
+        raise HTTPException(status_code=422, detail="上传文件与相对路径数量不一致")
+    uploads: list[tuple[str, bytes]] = []
+    for index, upload in enumerate(files):
+        raw_path = requested_paths[index] if requested_paths else (upload.filename or f"file-{index}")
+        uploads.append((str(raw_path), await upload.read()))
+    project_files, detected_main = research_project_service.import_latex_uploads(
+        uploads, main_file
+    )
+    main_content = project_files[detected_main]["content"]
+    detected_title = re.search(r"\\title\{([^}]*)\}", main_content)
+    manuscript_title = (title.strip() or (detected_title.group(1).strip() if detected_title else "") or PurePosixPath(detected_main).stem)[:240]
+    bibliography = next(
+        (record["content"] for path, record in project_files.items() if path.lower().endswith(".bib") and record["encoding"] == "utf8"),
+        "",
+    )
+    item = ResearchManuscript(
+        project_id=project_id,
+        created_by=user.id,
+        title=manuscript_title,
+        content=main_content,
+        bibliography=bibliography,
+        main_file=detected_main,
+        files_json=dumps(project_files),
+    )
+    db.add(item)
+    await db.flush()
+    db.add(
+        ResearchManuscriptVersion(
+            manuscript_id=item.id,
+            author_id=user.id,
+            version=1,
+            content=item.content,
+            bibliography=item.bibliography,
+            main_file=item.main_file,
+            files_json=item.files_json,
+            change_summary=f"导入 LaTeX 项目（{len(project_files)} 个文件）",
+        )
+    )
+    await audit(
+        db,
+        "research.manuscript.imported",
+        "research_manuscript",
+        item.id,
+        {"main_file": detected_main, "file_count": len(project_files)},
+        actor=user.username,
+    )
+    await append_research_ledger(db, project_id, "manuscript.imported", user.username, "research_manuscript", item.id, {"main_file": detected_main, "file_count": len(project_files), "version": 1})
+    data = research_row(item)
+    data["files"] = project_files
+    data["preview"] = research_project_service.latex_preview(
+        research_project_service.flatten_latex(project_files, detected_main)
+    )
+    return data
+
+
+@router.get("/research-projects/{project_id}/manuscripts/{manuscript_id}")
+async def get_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    data = research_row(item)
+    files = research_project_service.manuscript_files(item)
+    data["files"] = files
+    data["preview"] = research_project_service.latex_preview(
+        research_project_service.flatten_latex(files, item.main_file)
+    )
+    return data
+
+
+@router.post("/research-projects/{project_id}/manuscripts/{manuscript_id}/export")
+async def export_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    content = research_project_service.export_latex_zip(item)
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="latex-project-v{item.version}.zip"'},
+    )
+
+
+@router.get("/research-projects/{project_id}/manuscripts/{manuscript_id}/versions/{version}/diff")
+async def diff_research_manuscript_version(
+    project_id: str,
+    manuscript_id: str,
+    version: int,
+    file_path: str = "main.tex",
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    manuscript = await db.get(ResearchManuscript, manuscript_id)
+    if not manuscript or manuscript.project_id != project_id:
+        raise not_found("论文")
+    source = await db.scalar(
+        select(ResearchManuscriptVersion).where(
+            ResearchManuscriptVersion.manuscript_id == manuscript_id,
+            ResearchManuscriptVersion.version == version,
+        )
+    )
+    if not source:
+        raise not_found("论文历史版本")
+    safe_path = research_project_service.safe_project_path(file_path)
+    return {
+        "version": version,
+        "current_version": manuscript.version,
+        "file_path": safe_path,
+        "diff": research_project_service.version_diff(source, manuscript, safe_path),
+    }
+
+
+@router.put("/research-projects/{project_id}/manuscripts/{manuscript_id}")
+async def update_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    payload: ResearchManuscriptUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    if item.version != payload.base_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "论文已被其他协作者更新，请合并后重试",
+                "current_version": item.version,
+                "current_content": item.content,
+            },
+        )
+    files = research_project_service.manuscript_files(item)
+    if payload.files is not None:
+        files = research_project_service.normalize_files(payload.files)
+    else:
+        files[item.main_file] = research_project_service.file_record(
+            item.main_file, payload.content.encode("utf-8")
+        )
+        if payload.bibliography:
+            files["references.bib"] = research_project_service.file_record(
+                "references.bib", payload.bibliography.encode("utf-8")
+            )
+    main_file = research_project_service.detect_main_file(files, payload.main_file)
+    main_record = files[main_file]
+    if main_record.get("encoding") != "utf8":
+        raise HTTPException(status_code=422, detail="主文档必须是 UTF-8 文本 .tex 文件")
+    bibliography = next(
+        (record.get("content", "") for path, record in files.items() if path.lower().endswith(".bib") and record.get("encoding") == "utf8"),
+        payload.bibliography,
+    )
+    item.version += 1
+    item.main_file = main_file
+    item.files_json = dumps(files)
+    item.content = main_record["content"]
+    item.bibliography = bibliography
+    db.add(
+        ResearchManuscriptVersion(
+            manuscript_id=item.id,
+            author_id=user.id,
+            version=item.version,
+            content=item.content,
+            bibliography=item.bibliography,
+            main_file=item.main_file,
+            files_json=item.files_json,
+            change_summary=payload.change_summary or f"保存版本 {item.version}",
+        )
+    )
+    await db.flush()
+    await audit(
+        db,
+        "research.manuscript.saved",
+        "research_manuscript",
+        item.id,
+        {"version": item.version},
+        actor=user.username,
+    )
+    await append_research_ledger(db, project_id, "manuscript.version_saved", user.username, "research_manuscript", item.id, {"version": item.version, "summary": payload.change_summary})
+    return research_row(item)
+
+
+@router.get("/research-projects/{project_id}/manuscripts/{manuscript_id}/versions")
+async def list_manuscript_versions(
+    project_id: str,
+    manuscript_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    versions = (
+        await db.scalars(
+            select(ResearchManuscriptVersion)
+            .where(ResearchManuscriptVersion.manuscript_id == manuscript_id)
+            .order_by(desc(ResearchManuscriptVersion.version))
+        )
+    ).all()
+    result = []
+    for version in versions:
+        account = await db.get(UserAccount, version.author_id) if version.author_id else None
+        result.append(
+            {**row(version), "author_name": account.display_name if account else "未知成员"}
+        )
+    return result
+
+
+@router.post("/research-projects/{project_id}/manuscripts/{manuscript_id}/restore")
+async def restore_manuscript_version(
+    project_id: str,
+    manuscript_id: str,
+    payload: ResearchManuscriptRestore,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    manuscript = await db.get(ResearchManuscript, manuscript_id)
+    if not manuscript or manuscript.project_id != project_id:
+        raise not_found("论文")
+    if manuscript.version != payload.base_version:
+        raise HTTPException(status_code=409, detail="论文已被其他成员更新，请重新加载")
+    source = await db.scalar(
+        select(ResearchManuscriptVersion).where(
+            ResearchManuscriptVersion.manuscript_id == manuscript_id,
+            ResearchManuscriptVersion.version == payload.version,
+        )
+    )
+    if not source:
+        raise not_found("论文历史版本")
+    manuscript.version += 1
+    manuscript.content = source.content
+    manuscript.bibliography = source.bibliography
+    manuscript.main_file = source.main_file
+    manuscript.files_json = source.files_json
+    db.add(
+        ResearchManuscriptVersion(
+            manuscript_id=manuscript.id,
+            author_id=user.id,
+            version=manuscript.version,
+            content=manuscript.content,
+            bibliography=manuscript.bibliography,
+            main_file=manuscript.main_file,
+            files_json=manuscript.files_json,
+            change_summary=f"恢复自 v{source.version}",
+        )
+    )
+    await db.flush()
+    return research_row(manuscript)
+
+
+@router.post("/research-projects/{project_id}/manuscripts/{manuscript_id}/assist")
+async def assist_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    payload: ResearchManuscriptAssist,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    manuscript = await db.get(ResearchManuscript, manuscript_id)
+    if not manuscript or manuscript.project_id != project_id:
+        raise not_found("论文")
+    if payload.agent_id:
+        agent = await db.get(AgentDefinition, payload.agent_id)
+        if not agent or agent.status not in {"active", "candidate"}:
+            raise not_found("写作专家 Agent")
+        target = payload.selection.strip() or manuscript.content[:120000]
+        run = await agent_engine.run(
+            db,
+            agent.id,
+            (
+                f"你正在科研项目的 LaTeX 写作模块执行 {payload.task}。保持 LaTeX 命令、公式和引用键，"
+                "不得编造数据、作者、DOI 或实验结论；给出可直接采用的修改和理由。\n\n"
+                f"项目：{project.name}\n要求：{payload.instruction or '遵循学术规范'}\n\n待处理内容：\n{target}"
+            ),
+            {"user_id": user.id},
+        )
+        content = run.output_text
+    else:
+        content = await research_project_service.manuscript_assist(
+            db, project, manuscript, payload.task, payload.selection, payload.instruction
+        )
+    await audit(
+        db,
+        "research.manuscript.assisted",
+        "research_manuscript",
+        manuscript.id,
+        {"task": payload.task},
+        actor=user.username,
+    )
+    return {"content": content, "task": payload.task, "source_version": manuscript.version}
+
+
+@router.post("/research-projects/{project_id}/manuscripts/{manuscript_id}/preview")
+async def preview_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    files = research_project_service.manuscript_files(item)
+    return research_project_service.latex_preview(
+        research_project_service.flatten_latex(files, item.main_file)
+    )
+
+
+@router.post("/research-projects/{project_id}/manuscripts/{manuscript_id}/compile")
+async def compile_research_manuscript(
+    project_id: str,
+    manuscript_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchManuscript, manuscript_id)
+    if not item or item.project_id != project_id:
+        raise not_found("论文")
+    content, engine_name = await research_project_service.compile_latex(item)
+    await audit(
+        db,
+        "research.manuscript.compiled",
+        "research_manuscript",
+        item.id,
+        {"engine": engine_name},
+        actor=user.username,
+    )
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="manuscript-v{item.version}.pdf"',
+            "X-LaTeX-Engine": engine_name,
+        },
+    )
+
+
+@router.get("/research-projects/{project_id}/comments")
+async def list_research_comments(
+    project_id: str,
+    manuscript_id: str | None = None,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    query = select(ResearchComment).where(ResearchComment.project_id == project_id)
+    if manuscript_id:
+        query = query.where(ResearchComment.manuscript_id == manuscript_id)
+    items = (await db.scalars(query.order_by(desc(ResearchComment.created_at)))).all()
+    result = []
+    for item in items:
+        account = await db.get(UserAccount, item.author_id) if item.author_id else None
+        result.append({**row(item), "author_name": account.display_name if account else "未知成员"})
+    return result
+
+
+@router.post("/research-projects/{project_id}/comments", status_code=201)
+async def create_research_comment(
+    project_id: str,
+    payload: ResearchCommentCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "reviewer")
+    if payload.manuscript_id:
+        manuscript = await db.get(ResearchManuscript, payload.manuscript_id)
+        if not manuscript or manuscript.project_id != project_id:
+            raise not_found("论文")
+        files = research_project_service.manuscript_files(manuscript)
+        if payload.file_path not in files:
+            raise HTTPException(status_code=422, detail="批注目标文件不存在")
+        record = files[payload.file_path]
+        if record.get("encoding") != "utf8":
+            raise HTTPException(status_code=422, detail="二进制资源不支持行级批注")
+        lines = record.get("content", "").splitlines()
+        if payload.line_start and payload.line_start > max(1, len(lines)):
+            raise HTTPException(status_code=422, detail="批注起始行超出文件范围")
+        values = payload.model_dump()
+        values["anchored_version"] = payload.anchored_version or manuscript.version
+        if not payload.quote and payload.line_start:
+            end = min(payload.line_end or payload.line_start, len(lines))
+            values["quote"] = "\n".join(lines[payload.line_start - 1 : end])
+    else:
+        values = payload.model_dump()
+    item = ResearchComment(project_id=project_id, author_id=user.id, **values)
+    db.add(item)
+    await db.flush()
+    return {**row(item), "author_name": user.display_name}
+
+
+@router.patch("/research-projects/{project_id}/comments/{comment_id}")
+async def update_research_comment(
+    project_id: str,
+    comment_id: str,
+    payload: ResearchCommentUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchComment, comment_id)
+    if not item or item.project_id != project_id:
+        raise not_found("批注")
+    item.status = payload.status
+    return row(item)
+
+
+@router.get("/research-projects/{project_id}/reviews")
+async def list_research_reviews(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(ResearchReview)
+            .where(ResearchReview.project_id == project_id)
+            .order_by(desc(ResearchReview.created_at))
+        )
+    ).all()
+    result = []
+    for item in items:
+        payload = research_row(item)
+        payload["items"] = [
+            row(entry)
+            for entry in (
+                await db.scalars(
+                    select(ResearchReviewItem).where(ResearchReviewItem.review_id == item.id)
+                )
+            ).all()
+        ]
+        result.append(payload)
+    return result
+
+
+@router.post("/research-projects/{project_id}/reviews", status_code=201)
+async def create_research_review(
+    project_id: str,
+    payload: ResearchReviewCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "reviewer")
+    manuscript = await db.get(ResearchManuscript, payload.manuscript_id)
+    if not manuscript or manuscript.project_id != project_id:
+        raise not_found("论文")
+    prior_rounds = (
+        await db.scalars(
+            select(ResearchReview).where(ResearchReview.manuscript_id == manuscript.id)
+        )
+    ).all()
+    summary, decision, scores, issues, report = await research_project_service.generate_review(
+        db, project, manuscript, payload.roles, payload.venue, payload.rigor, payload.focus
+    )
+    review = ResearchReview(
+        project_id=project_id,
+        manuscript_id=manuscript.id,
+        created_by=user.id,
+        round=len(prior_rounds) + 1,
+        roles_json=dumps(payload.roles),
+        summary=summary,
+        decision=decision,
+        scores_json=dumps(scores),
+        report_json=dumps(report),
+        status="completed",
+    )
+    db.add(review)
+    await db.flush()
+    for issue in issues:
+        db.add(ResearchReviewItem(review_id=review.id, **issue))
+    await db.flush()
+    result = research_row(review)
+    result["items"] = [
+        row(entry)
+        for entry in (
+            await db.scalars(
+                select(ResearchReviewItem).where(ResearchReviewItem.review_id == review.id)
+            )
+        ).all()
+    ]
+    return result
+
+
+@router.post("/research-projects/{project_id}/reviews/stream")
+async def stream_research_review(
+    project_id: str,
+    payload: ResearchReviewCreate,
+    authorization: str | None = Header(default=None),
+) -> StreamingResponse:
+    async def generate():
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def run_committee() -> None:
+            try:
+                async with session_scope() as db:
+                    user = await require_user(db, authorization)
+                    project, _ = await research_project_service.access(db, project_id, user, "reviewer")
+                    manuscript = await db.get(ResearchManuscript, payload.manuscript_id)
+                    if not manuscript or manuscript.project_id != project_id:
+                        raise LookupError("论文不存在")
+                    prior_rounds = (
+                        await db.scalars(
+                            select(ResearchReview).where(ResearchReview.manuscript_id == manuscript.id)
+                        )
+                    ).all()
+
+                    async def progress(event: dict[str, Any]) -> None:
+                        await queue.put(event)
+
+                    await queue.put({"type": "committee_started", "total": len(payload.roles)})
+                    summary, decision, scores, issues, report = await research_project_service.generate_review(
+                        db,
+                        project,
+                        manuscript,
+                        payload.roles,
+                        payload.venue,
+                        payload.rigor,
+                        payload.focus,
+                        on_progress=progress,
+                    )
+                    report["agent_assignments"] = payload.agent_ids
+                    review = ResearchReview(
+                        project_id=project_id,
+                        manuscript_id=manuscript.id,
+                        created_by=user.id,
+                        round=len(prior_rounds) + 1,
+                        roles_json=dumps(payload.roles),
+                        summary=summary,
+                        decision=decision,
+                        scores_json=dumps(scores),
+                        report_json=dumps(report),
+                        status="completed",
+                    )
+                    db.add(review)
+                    await db.flush()
+                    for issue in issues:
+                        db.add(ResearchReviewItem(review_id=review.id, **issue))
+                    await db.flush()
+                    result = research_row(review)
+                    result["items"] = [
+                        row(entry)
+                        for entry in (
+                            await db.scalars(
+                                select(ResearchReviewItem).where(ResearchReviewItem.review_id == review.id)
+                            )
+                        ).all()
+                    ]
+                    await queue.put({"type": "review_result", "review": result})
+            except Exception as exc:
+                await queue.put({"type": "error", "message": str(exc).strip() or "模拟审稿执行失败"})
+            finally:
+                await queue.put({"type": "done"})
+
+        task = asyncio.create_task(run_committee())
+        active_workflow_tasks.add(task)
+        task.add_done_callback(active_workflow_tasks.discard)
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=2)
+            except TimeoutError:
+                event = {"type": "review_waiting"}
+            yield f"data: {dumps(event)}\n\n"
+            if event["type"] == "done":
+                break
+        await task
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.patch("/research-projects/{project_id}/reviews/items/{item_id}")
+async def update_research_review_item(
+    project_id: str,
+    item_id: str,
+    payload: ResearchReviewItemUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchReviewItem, item_id)
+    review = await db.get(ResearchReview, item.review_id) if item else None
+    if not item or not review or review.project_id != project_id:
+        raise not_found("审稿意见")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(item, key, value)
+    return row(item)
+
+
+@router.get("/research-projects/{project_id}/presence")
+async def list_research_presence(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    return await research_project_service.active_presence(db, project_id)
+
+
+@router.put("/research-projects/{project_id}/presence")
+async def update_research_presence(
+    project_id: str,
+    payload: ResearchPresenceUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.scalar(
+        select(ResearchPresence).where(
+            ResearchPresence.project_id == project_id, ResearchPresence.user_id == user.id
+        )
+    )
+    if not item:
+        item = ResearchPresence(project_id=project_id, user_id=user.id)
+        db.add(item)
+    item.page = payload.page
+    item.cursor_json = dumps(payload.cursor)
+    item.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {**row(item), "display_name": user.display_name, "cursor": payload.cursor}
 
 
 @router.get("/research-browser/verifications")
@@ -1253,7 +2819,7 @@ async def stream_conversation_message(
             finally:
                 await queue.put({"type": "done"})
 
-        yield f'data: {dumps({"type": "step", "step": {"type": "stream_connected"}})}\n\n'
+        yield f"data: {dumps({'type': 'step', 'step': {'type': 'stream_connected'}})}\n\n"
         task = asyncio.create_task(run_turn())
         active_conversation_tasks.add(task)
         task.add_done_callback(active_conversation_tasks.discard)
@@ -1297,7 +2863,9 @@ async def list_agent_runs(
     limit: int = 50, db: AsyncSession = Depends(get_db)
 ) -> list[dict[str, Any]]:
     items = (
-        await db.scalars(select(AgentRun).order_by(desc(AgentRun.created_at)).limit(min(limit, 200)))
+        await db.scalars(
+            select(AgentRun).order_by(desc(AgentRun.created_at)).limit(min(limit, 200))
+        )
     ).all()
     return [row(item) for item in items]
 
@@ -1400,15 +2968,14 @@ async def run_workflow(
 
 
 @router.post("/workflows/{workflow_id}/run/stream")
-async def stream_workflow_run(
-    workflow_id: str, payload: WorkflowRunRequest
-) -> StreamingResponse:
+async def stream_workflow_run(workflow_id: str, payload: WorkflowRunRequest) -> StreamingResponse:
     async def generate():
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
         async def run_graph() -> None:
             try:
                 async with session_scope() as db:
+
                     async def publish(event: dict[str, Any]) -> None:
                         await queue.put({"type": "step", "step": event})
 
@@ -1433,7 +3000,7 @@ async def stream_workflow_run(
             finally:
                 await queue.put({"type": "done"})
 
-        yield f'data: {dumps({"type": "step", "step": {"type": "stream_connected"}})}\n\n'
+        yield f"data: {dumps({'type': 'step', 'step': {'type': 'stream_connected'}})}\n\n"
         task = asyncio.create_task(run_graph())
         active_workflow_tasks.add(task)
         task.add_done_callback(active_workflow_tasks.discard)
@@ -1514,9 +3081,7 @@ async def materialize_workflow_expert_proposal(
 
 
 @router.get("/workflow-runs/{run_id}")
-async def get_workflow_run(
-    run_id: str, db: AsyncSession = Depends(get_db)
-) -> dict[str, Any]:
+async def get_workflow_run(run_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     item = await db.get(WorkflowRun, run_id)
     if not item:
         raise not_found("工作流运行")
@@ -1584,9 +3149,7 @@ async def export_workflow_artifact_docx(
 
 
 @router.post("/workflow-runs/{run_id}/export/docx")
-async def export_workflow_run_docx(
-    run_id: str, db: AsyncSession = Depends(get_db)
-) -> Response:
+async def export_workflow_run_docx(run_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     run = await db.get(WorkflowRun, run_id)
     if run is None:
         raise not_found("工作流运行")
@@ -1621,9 +3184,7 @@ async def list_workflow_runs(
     if status:
         statement = statement.where(WorkflowRun.status == status)
     items = (
-        await db.scalars(
-            statement.order_by(desc(WorkflowRun.created_at)).limit(min(limit, 200))
-        )
+        await db.scalars(statement.order_by(desc(WorkflowRun.created_at)).limit(min(limit, 200)))
     ).all()
     return [row(item) for item in items]
 
@@ -1643,7 +3204,9 @@ async def list_tools() -> list[dict[str, Any]]:
 @router.get("/approval-policies")
 async def list_approval_policies(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     items = (
-        await db.scalars(select(ApprovalPolicy).order_by(ApprovalPolicy.priority, ApprovalPolicy.name))
+        await db.scalars(
+            select(ApprovalPolicy).order_by(ApprovalPolicy.priority, ApprovalPolicy.name)
+        )
     ).all()
     return [row(item) for item in items]
 
@@ -1761,11 +3324,7 @@ async def update_model_endpoint(
         item.request_options_json = dumps(values.pop("request_options"))
     for key, value in values.items():
         setattr(item, key, value.rstrip("/") if key == "base_url" else value)
-    if (
-        settings.require_online_agents
-        and item.enabled
-        and item.modality == "chat"
-    ):
+    if settings.require_online_agents and item.enabled and item.modality == "chat":
         await migrate_agents_to_online_endpoint(db, item)
     elif replacement:
         await migrate_agents_to_online_endpoint(db, replacement)
@@ -1774,28 +3333,35 @@ async def update_model_endpoint(
 
 
 @router.delete("/model-endpoints/{endpoint_id}", status_code=204)
-async def delete_model_endpoint(
-    endpoint_id: str, db: AsyncSession = Depends(get_db)
-) -> Response:
+async def delete_model_endpoint(endpoint_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     item = await db.get(ModelEndpoint, endpoint_id)
     if not item:
         raise not_found("模型接口")
 
-    chat_agents = await db.scalar(
-        select(func.count(AgentDefinition.id)).where(
-            AgentDefinition.model_endpoint_id == item.id
+    chat_agents = (
+        await db.scalar(
+            select(func.count(AgentDefinition.id)).where(
+                AgentDefinition.model_endpoint_id == item.id
+            )
         )
-    ) or 0
-    image_agents = await db.scalar(
-        select(func.count(AgentDefinition.id)).where(
-            AgentDefinition.image_model_endpoint_id == item.id
+        or 0
+    )
+    image_agents = (
+        await db.scalar(
+            select(func.count(AgentDefinition.id)).where(
+                AgentDefinition.image_model_endpoint_id == item.id
+            )
         )
-    ) or 0
-    knowledge_configs = await db.scalar(
-        select(func.count(KnowledgeProviderConfig.id)).where(
-            KnowledgeProviderConfig.llm_endpoint_id == item.id
+        or 0
+    )
+    knowledge_configs = (
+        await db.scalar(
+            select(func.count(KnowledgeProviderConfig.id)).where(
+                KnowledgeProviderConfig.llm_endpoint_id == item.id
+            )
         )
-    ) or 0
+        or 0
+    )
     if chat_agents or image_agents or knowledge_configs:
         usages: list[str] = []
         if chat_agents:
@@ -1942,9 +3508,7 @@ async def list_knowledge_bases(db: AsyncSession = Depends(get_db)) -> list[dict[
     return [row(item) for item in (await db.scalars(select(KnowledgeBase))).all()]
 
 
-async def _knowledge_group_row(
-    db: AsyncSession, group: KnowledgeBaseGroup
-) -> dict[str, Any]:
+async def _knowledge_group_row(db: AsyncSession, group: KnowledgeBaseGroup) -> dict[str, Any]:
     base_ids = list(
         (
             await db.scalars(
@@ -1959,9 +3523,7 @@ async def _knowledge_group_row(
 
 @router.get("/knowledge-groups")
 async def list_knowledge_groups(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
-    groups = (
-        await db.scalars(select(KnowledgeBaseGroup).order_by(KnowledgeBaseGroup.name))
-    ).all()
+    groups = (await db.scalars(select(KnowledgeBaseGroup).order_by(KnowledgeBaseGroup.name))).all()
     return [await _knowledge_group_row(db, group) for group in groups]
 
 
@@ -1969,14 +3531,14 @@ async def list_knowledge_groups(db: AsyncSession = Depends(get_db)) -> list[dict
 async def create_knowledge_group(
     payload: KnowledgeBaseGroupCreate, db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
-    if await db.scalar(select(KnowledgeBaseGroup.id).where(KnowledgeBaseGroup.name == payload.name)):
+    if await db.scalar(
+        select(KnowledgeBaseGroup.id).where(KnowledgeBaseGroup.name == payload.name)
+    ):
         raise HTTPException(status_code=409, detail="知识库分组名称已存在")
     base_ids = list(dict.fromkeys(payload.knowledge_base_ids))
     if base_ids:
         existing = set(
-            (
-                await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))
-            ).all()
+            (await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))).all()
         )
         if existing != set(base_ids):
             raise HTTPException(status_code=400, detail="分组中包含不存在的知识库")
@@ -2038,11 +3600,13 @@ async def update_knowledge_group_members(
     if not group:
         raise HTTPException(status_code=404, detail="知识库分组不存在")
     base_ids = list(dict.fromkeys(payload.knowledge_base_ids))
-    existing = set(
-        (
-            await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))
-        ).all()
-    ) if base_ids else set()
+    existing = (
+        set(
+            (await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(base_ids)))).all()
+        )
+        if base_ids
+        else set()
+    )
     if existing != set(base_ids):
         raise HTTPException(status_code=400, detail="分组中包含不存在的知识库")
     await db.execute(
@@ -2064,9 +3628,7 @@ async def update_knowledge_group_members(
 
 
 @router.delete("/knowledge-groups/{group_id}", status_code=204)
-async def delete_knowledge_group(
-    group_id: str, db: AsyncSession = Depends(get_db)
-) -> Response:
+async def delete_knowledge_group(group_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     group = await db.get(KnowledgeBaseGroup, group_id)
     if not group:
         raise HTTPException(status_code=404, detail="知识库分组不存在")
@@ -2203,7 +3765,9 @@ async def knowledge_base_overview(
     ).all()
     source_rows = (
         await db.execute(
-            select(KnowledgeSource.source_type, KnowledgeSource.status, func.count(KnowledgeSource.id))
+            select(
+                KnowledgeSource.source_type, KnowledgeSource.status, func.count(KnowledgeSource.id)
+            )
             .where(KnowledgeSource.knowledge_base_id == knowledge_base_id)
             .group_by(KnowledgeSource.source_type, KnowledgeSource.status)
         )
@@ -2323,9 +3887,7 @@ async def list_knowledge_document_chunks(
     filters = [KnowledgeChunk.document_id == document_id]
     if level != "all":
         filters.append(KnowledgeChunk.level == level)
-    total = int(
-        await db.scalar(select(func.count(KnowledgeChunk.id)).where(*filters)) or 0
-    )
+    total = int(await db.scalar(select(func.count(KnowledgeChunk.id)).where(*filters)) or 0)
     rows = (
         await db.execute(
             select(KnowledgeChunk, KnowledgeEmbedding)
@@ -2515,6 +4077,7 @@ async def stream_knowledge_query(payload: KnowledgeQueryRequest) -> StreamingRes
         async def run_query() -> None:
             try:
                 async with session_scope() as db:
+
                     async def publish(event: dict[str, Any]) -> None:
                         await queue.put({"type": "step", "step": event})
 
@@ -2535,7 +4098,7 @@ async def stream_knowledge_query(payload: KnowledgeQueryRequest) -> StreamingRes
             finally:
                 await queue.put({"type": "done"})
 
-        yield f'data: {dumps({"type": "step", "step": {"type": "stream_connected"}})}\n\n'
+        yield f"data: {dumps({'type': 'step', 'step': {'type': 'stream_connected'}})}\n\n"
         task = asyncio.create_task(run_query())
         active_knowledge_tasks.add(task)
         task.add_done_callback(active_knowledge_tasks.discard)
@@ -2601,9 +4164,7 @@ async def test_knowledge_provider_config(
     try:
         embedder = EmbeddingClient(config)
         vectors = await embedder.embed(["EvoAgent 知识库连接测试"])
-        reranked = await RerankClient(config).rerank(
-            "网格质量", ["天气预报", "网格质量评价"], 1
-        )
+        reranked = await RerankClient(config).rerank("网格质量", ["天气预报", "网格质量评价"], 1)
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
@@ -2684,9 +4245,7 @@ async def delete_knowledge_source(
     if not source:
         raise HTTPException(status_code=404, detail="数据源不存在")
     documents = (
-        await db.scalars(
-            select(KnowledgeDocument).where(KnowledgeDocument.source_id == source_id)
-        )
+        await db.scalars(select(KnowledgeDocument).where(KnowledgeDocument.source_id == source_id))
     ).all()
     if delete_documents:
         for document in documents:
@@ -3245,9 +4804,7 @@ async def update_evaluation_case(
 
 
 @router.delete("/evaluation-cases/{case_id}", status_code=204)
-async def delete_evaluation_case(
-    case_id: str, db: AsyncSession = Depends(get_db)
-) -> Response:
+async def delete_evaluation_case(case_id: str, db: AsyncSession = Depends(get_db)) -> Response:
     item = await db.get(EvaluationCase, case_id)
     if not item:
         raise not_found("评测用例")
@@ -3318,9 +4875,7 @@ async def rollback_evolution_agent(
     if not active or not target:
         raise not_found("Agent 版本")
     try:
-        result = await evolution_service.rollback(
-            db, active, target, payload.reason, payload.actor
-        )
+        result = await evolution_service.rollback(db, active, target, payload.reason, payload.actor)
         await db.commit()
         return result
     except ValueError as exc:
@@ -3399,7 +4954,7 @@ async def stream_evolution_evaluation(proposal_id: str) -> StreamingResponse:
             finally:
                 await queue.put({"type": "done"})
 
-        yield f'data: {dumps({"type": "step", "step": {"type": "stream_connected"}})}\n\n'
+        yield f"data: {dumps({'type': 'step', 'step': {'type': 'stream_connected'}})}\n\n"
         task = asyncio.create_task(run_evaluation())
         active_evolution_tasks.add(task)
         task.add_done_callback(active_evolution_tasks.discard)
@@ -3455,10 +5010,10 @@ async def decide_evolution(
 
 
 @router.get("/audit")
-async def list_audit(
-    limit: int = 100, db: AsyncSession = Depends(get_db)
-) -> list[dict[str, Any]]:
+async def list_audit(limit: int = 100, db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     items = (
-        await db.scalars(select(AuditLog).order_by(desc(AuditLog.created_at)).limit(min(limit, 500)))
+        await db.scalars(
+            select(AuditLog).order_by(desc(AuditLog.created_at)).limit(min(limit, 500))
+        )
     ).all()
     return [row(item) for item in items]

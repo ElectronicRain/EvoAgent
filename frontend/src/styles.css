@@ -25,7 +25,11 @@ button { cursor: pointer; }
 .brand-mark { width: 39px; height: 39px; flex: 0 0 39px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(145deg,#fff,#dceeff); color: var(--navy-2); box-shadow: 0 4px 12px rgba(0,0,0,.14); }
 .brand strong { display: block; font-size: 18px; letter-spacing: .3px; }
 .brand span { display: block; margin-top: 2px; font-size: 11px; color: #a9c8e8; }
-.side-section-label { padding: 22px 11px 8px; font-size: 11px; color: #7da8cf; letter-spacing: .12em; }
+.sidebar-groups { min-height: 0; display: flex; flex-direction: column; gap: 13px; overflow-y: auto; overflow-x: hidden; padding: 14px 0 4px; scrollbar-width: thin; scrollbar-color: rgba(152,198,235,.35) transparent; }
+.sidebar-group + .sidebar-group { padding-top: 12px; border-top: 1px solid rgba(173,211,242,.14); }
+.side-section-label { padding: 0 11px 7px; display: grid; gap: 2px; white-space: nowrap; }
+.side-section-label strong { color: #91bce1; font-size: 10px; letter-spacing: .12em; }
+.side-section-label small { color: #5f8eb5; font-size: 8px; letter-spacing: .02em; }
 .sidebar nav { display: grid; gap: 4px; }
 .nav-link { color: #c6dbed; text-decoration: none; min-height: 43px; display: flex; gap: 11px; align-items: center; border-radius: 8px; padding: 0 11px; font-size: 14px; transition: .18s ease; }
 .nav-link > svg:first-child { flex: 0 0 auto; }

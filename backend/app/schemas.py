@@ -215,9 +215,7 @@ class UserLogin(BaseModel):
 
 class UserProfileUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=80)
-    avatar_color: str | None = Field(
-        default=None, pattern=r"^#[0-9a-fA-F]{6}$"
-    )
+    avatar_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     memory_enabled: bool | None = None
 
 
@@ -258,7 +256,9 @@ class TeachingPlanRequest(BaseModel):
 
 class ClassroomSpeechRequest(BaseModel):
     input: str = Field(min_length=1, max_length=4000)
-    voice: Literal["alex", "benjamin", "charles", "david", "anna", "bella", "claire", "diana"] = "claire"
+    voice: Literal["alex", "benjamin", "charles", "david", "anna", "bella", "claire", "diana"] = (
+        "claire"
+    )
     style: Literal["natural", "lively", "rigorous"] = "natural"
 
 
@@ -482,9 +482,7 @@ class ApprovalPolicyCreate(BaseModel):
 class ModelEndpointCreate(BaseModel):
     name: str
     modality: Literal["chat", "image"] = "chat"
-    provider_type: Literal["openai-compatible", "spark-compatible", "custom"] = (
-        "openai-compatible"
-    )
+    provider_type: Literal["openai-compatible", "spark-compatible", "custom"] = "openai-compatible"
     base_url: str
     api_key: str = ""
     default_model: str
@@ -533,9 +531,9 @@ class EvolutionGoalAnalyze(BaseModel):
 class EvaluationCaseCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     discipline: str = Field(default="通用", max_length=100)
-    category: Literal[
-        "quality", "reliability", "evidence", "safety", "tool_use", "custom"
-    ] = "quality"
+    category: Literal["quality", "reliability", "evidence", "safety", "tool_use", "custom"] = (
+        "quality"
+    )
     input: str = Field(min_length=3, max_length=20_000)
     expected_keywords: list[str] = Field(default_factory=list)
     requires_citation: bool = False
@@ -546,9 +544,9 @@ class EvaluationCaseCreate(BaseModel):
 class EvaluationCaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
     discipline: str | None = Field(default=None, max_length=100)
-    category: Literal[
-        "quality", "reliability", "evidence", "safety", "tool_use", "custom"
-    ] | None = None
+    category: (
+        Literal["quality", "reliability", "evidence", "safety", "tool_use", "custom"] | None
+    ) = None
     input: str | None = Field(default=None, min_length=3, max_length=20_000)
     expected_keywords: list[str] | None = None
     requires_citation: bool | None = None
@@ -567,3 +565,228 @@ class EvolutionRollback(BaseModel):
     target_agent_id: str
     reason: str = Field(default="用户主动回滚", min_length=2, max_length=1000)
     actor: str = Field(default="local-user", max_length=100)
+
+
+class ResearchProjectCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    discipline: str = Field(default="计算机科学", max_length=100)
+    description: str = Field(default="", max_length=20_000)
+    research_question: str = Field(default="", max_length=20_000)
+    expected_outcome: str = Field(default="论文", max_length=1000)
+    citation_style: Literal["GB/T 7714", "APA", "IEEE", "Chicago"] = "GB/T 7714"
+    language: Literal["zh-CN", "en-US", "bilingual"] = "zh-CN"
+
+
+class ResearchProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    discipline: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=20_000)
+    research_question: str | None = Field(default=None, max_length=20_000)
+    expected_outcome: str | None = Field(default=None, max_length=1000)
+    citation_style: Literal["GB/T 7714", "APA", "IEEE", "Chicago"] | None = None
+    language: Literal["zh-CN", "en-US", "bilingual"] | None = None
+    stage: Literal["literature", "idea", "experiment", "writing", "review"] | None = None
+    status: Literal["active", "archived"] | None = None
+    settings: dict[str, Any] | None = None
+
+
+class ResearchMemberCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    role: Literal["manager", "editor", "reviewer", "viewer"] = "editor"
+
+
+class ResearchInviteCreate(BaseModel):
+    role: Literal["manager", "editor", "reviewer", "viewer"] = "editor"
+    expires_hours: int = Field(default=72, ge=1, le=720)
+    max_uses: int = Field(default=20, ge=1, le=200)
+
+
+class ResearchInviteJoin(BaseModel):
+    code: str = Field(min_length=8, max_length=120)
+
+
+class ResearchResourceCreate(BaseModel):
+    resource_type: Literal[
+        "agent",
+        "knowledge_base",
+        "knowledge_group",
+        "workflow",
+        "conversation",
+        "artifact",
+        "skill",
+    ]
+    resource_id: str = Field(min_length=1, max_length=100)
+    label: str = Field(default="", max_length=240)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchLiteratureCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=2000)
+    authors: str = Field(default="", max_length=2000)
+    year: int | None = Field(default=None, ge=1800, le=2200)
+    doi: str = Field(default="", max_length=300)
+    url: str = Field(default="", max_length=4000)
+    source: str = Field(default="手动录入", max_length=120)
+    abstract: str = Field(default="", max_length=50_000)
+    status: Literal["pending", "included", "excluded", "priority", "disputed"] = "pending"
+    credibility: int = Field(default=50, ge=0, le=100)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    notes: str = Field(default="", max_length=20_000)
+
+
+class ResearchLiteratureSearch(BaseModel):
+    query: str = Field(min_length=2, max_length=4000)
+    target_count: int = Field(default=12, ge=3, le=80)
+    year_from: int | None = Field(default=None, ge=1800, le=2200)
+    year_to: int | None = Field(default=None, ge=1800, le=2200)
+
+
+class ResearchIdeaCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=240)
+    problem: str = Field(default="", max_length=20_000)
+    hypothesis: str = Field(default="", max_length=20_000)
+    novelty: str = Field(default="", max_length=20_000)
+    method: str = Field(default="", max_length=20_000)
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    scores: dict[str, float] = Field(default_factory=dict)
+    status: Literal["draft", "exploring", "validation", "adopted", "rejected"] = "exploring"
+
+
+class ResearchIdeaUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=240)
+    problem: str | None = Field(default=None, max_length=20_000)
+    hypothesis: str | None = Field(default=None, max_length=20_000)
+    novelty: str | None = Field(default=None, max_length=20_000)
+    method: str | None = Field(default=None, max_length=20_000)
+    evidence: list[dict[str, Any]] | None = Field(default=None, max_length=100)
+    scores: dict[str, float] | None = None
+    status: Literal["draft", "exploring", "validation", "adopted", "rejected"] | None = None
+
+
+class ResearchIdeaChat(BaseModel):
+    message: str = Field(min_length=2, max_length=12_000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=40)
+    agent_id: str | None = None
+
+
+class ResearchMemoryCreate(BaseModel):
+    category: Literal[
+        "background",
+        "concept",
+        "evidence",
+        "decision",
+        "hypothesis",
+        "method",
+        "constraint",
+        "failure",
+        "writing",
+        "todo",
+    ] = "decision"
+    content: str = Field(min_length=2, max_length=20_000)
+    source_type: str = Field(default="user", max_length=50)
+    source_id: str | None = Field(default=None, max_length=36)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    locked: bool = False
+
+
+class ResearchSkillDraft(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    memory_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ResearchExperimentCreate(BaseModel):
+    idea_id: str | None = None
+    title: str = Field(min_length=2, max_length=240)
+    objective: str = Field(default="", max_length=20_000)
+    hypothesis: str = Field(default="", max_length=20_000)
+    design: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["planned", "running", "completed", "failed"] = "planned"
+
+
+class ResearchExperimentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=240)
+    objective: str | None = Field(default=None, max_length=20_000)
+    hypothesis: str | None = Field(default=None, max_length=20_000)
+    design: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    status: Literal["planned", "running", "completed", "failed"] | None = None
+
+
+class ResearchManuscriptCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=240)
+    content: str = Field(default="", max_length=1_000_000)
+    bibliography: str = Field(default="", max_length=500_000)
+
+
+class ResearchManuscriptFile(BaseModel):
+    content: str = Field(default="", max_length=8_000_000)
+    encoding: Literal["utf8", "base64"] = "utf8"
+    mime: str = Field(default="text/plain", max_length=200)
+    size: int = Field(default=0, ge=0, le=25_000_000)
+
+
+class ResearchManuscriptUpdate(BaseModel):
+    content: str = Field(max_length=1_000_000)
+    bibliography: str = Field(default="", max_length=500_000)
+    main_file: str = Field(default="main.tex", min_length=1, max_length=500)
+    files: dict[str, ResearchManuscriptFile] | None = None
+    base_version: int = Field(ge=1)
+    change_summary: str = Field(default="", max_length=2000)
+
+
+class ResearchManuscriptAssist(BaseModel):
+    task: Literal[
+        "outline",
+        "polish",
+        "logic",
+        "citation_check",
+        "academic_style",
+        "translate",
+        "response_letter",
+    ]
+    selection: str = Field(default="", max_length=120_000)
+    instruction: str = Field(default="", max_length=4000)
+    agent_id: str | None = None
+
+
+class ResearchManuscriptRestore(BaseModel):
+    version: int = Field(ge=1)
+    base_version: int = Field(ge=1)
+
+
+class ResearchCommentCreate(BaseModel):
+    manuscript_id: str | None = None
+    parent_id: str | None = None
+    file_path: str = Field(default="main.tex", min_length=1, max_length=500)
+    anchored_version: int | None = Field(default=None, ge=1)
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    quote: str = Field(default="", max_length=20_000)
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class ResearchCommentUpdate(BaseModel):
+    status: Literal["open", "resolved"]
+
+
+class ResearchReviewCreate(BaseModel):
+    manuscript_id: str
+    roles: list[Literal["domain", "method", "experiment", "statistics", "writing", "strict"]] = (
+        Field(default_factory=lambda: ["domain", "method", "writing"], max_length=6)
+    )
+    venue: str = Field(default="通用学术期刊/会议", max_length=240)
+    rigor: Literal["standard", "strict", "top_venue"] = "strict"
+    focus: str = Field(default="", max_length=4000)
+    agent_ids: dict[str, str] = Field(default_factory=dict)
+
+
+class ResearchReviewItemUpdate(BaseModel):
+    status: Literal["open", "accepted", "resolved", "rejected"] | None = None
+    response: str | None = Field(default=None, max_length=20_000)
+
+
+class ResearchPresenceUpdate(BaseModel):
+    page: str = Field(default="overview", max_length=80)
+    cursor: dict[str, Any] = Field(default_factory=dict)

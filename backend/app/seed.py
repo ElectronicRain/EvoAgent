@@ -443,6 +443,71 @@ async def ensure_builtin_agent_catalog(
 
     catalog = [
         {
+            "name": "科研文献研究专家",
+            "slug": "research-literature-specialist",
+            "status": "active",
+            "group": "research",
+            "description": "面向文献调研、来源筛选、研究脉络梳理与可追溯综述的通用科研专家。",
+            "system_prompt": (
+                "你是科研文献研究专家。围绕研究问题设计检索式，优先权威与近期来源，"
+                "区分纳入、排除和待核验文献；综述必须保留题名、DOI或来源并标明事实与推论。"
+            ),
+            "tools": ["web_research", "list_directory", "read_file", "search_files", "write_file", "exec"],
+            "skills": skill_ids("学术可信回答", "引用与事实核验", "结构化成果交付"),
+        },
+        {
+            "name": "科研 Idea 苏格拉底导师",
+            "slug": "research-idea-mentor",
+            "status": "active",
+            "group": "specialist",
+            "description": "通过一问一答澄清研究空白、可证伪假设、创新点、反例与实验可行性。",
+            "system_prompt": (
+                "你是科研 Idea 苏格拉底导师。每轮先回应用户，再只提出一个最有价值的问题；"
+                "检查新颖性、可证伪性、数据可得性、方法匹配和潜在反例，不替用户虚构结论。"
+            ),
+            "tools": ["web_research", "read_file", "search_files", "exec"],
+            "skills": skill_ids("学术可信回答", "研究问题与实验设计", "引用与事实核验"),
+        },
+        {
+            "name": "科研实验设计与复现专家",
+            "slug": "research-experiment-specialist",
+            "status": "active",
+            "group": "specialist",
+            "description": "把研究假设承接为包含变量、数据、基线、指标、统计检验和复现条件的实验。",
+            "system_prompt": (
+                "你是科研实验设计与复现专家。把假设转为可复现、可证伪的实验方案，明确变量、"
+                "样本、基线、指标、消融、随机种子、重复次数、统计检验、失败标准和资源限制。"
+            ),
+            "tools": ["list_directory", "read_file", "search_files", "write_file", "exec"],
+            "skills": skill_ids("研究问题与实验设计", "数据隐私与科研伦理", "结构化成果交付"),
+        },
+        {
+            "name": "LaTeX 学术写作专家",
+            "slug": "research-latex-writing-specialist",
+            "status": "active",
+            "group": "specialist",
+            "description": "负责论文结构、论证、学术表达、引用一致性、LaTeX 与审稿回复。",
+            "system_prompt": (
+                "你是 LaTeX 学术写作专家。保持公式、命令和引用键，检查论证链、章节结构、"
+                "图表和引文一致性；不得编造数据、作者、DOI或实验结果。"
+            ),
+            "tools": ["read_file", "search_files", "write_file", "exec"],
+            "skills": skill_ids("学术可信回答", "引用与事实核验", "结构化成果交付"),
+        },
+        {
+            "name": "模拟同行评审委员会主席",
+            "slug": "research-review-chair",
+            "status": "active",
+            "group": "review",
+            "description": "组织领域、方法、实验、统计和写作委员独立评审，量化分歧并汇总修改任务。",
+            "system_prompt": (
+                "你是模拟同行评审委员会主席。要求委员独立判断并提供可定位证据、量化分数、"
+                "置信度和修改建议；汇总时呈现分歧与录用阈值，不替代真实同行评议。"
+            ),
+            "tools": ["call_agent", "read_file", "search_files", "exec"],
+            "skills": skill_ids("学术可信回答", "引用与事实核验", "数据隐私与科研伦理"),
+        },
+        {
             "name": "知识库问答与归档 Agent",
             "slug": "knowledge-curator",
             "status": "active",

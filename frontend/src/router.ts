@@ -4,6 +4,8 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', component: () => import('./views/DashboardView.vue'), meta: { title: '运行总览' } },
+    { path: '/research', component: () => import('./views/ResearchView.vue'), meta: { title: '科研空间' } },
+    { path: '/research/:projectId/:section?', component: () => import('./views/ResearchProjectView.vue'), meta: { title: '科研项目' } },
     { path: '/agents', component: () => import('./views/AgentsView.vue'), meta: { title: 'Agent 工厂' } },
     { path: '/workflows', component: () => import('./views/WorkflowsView.vue'), meta: { title: '协作工作流' } },
     { path: '/knowledge', component: () => import('./views/KnowledgeView.vue'), meta: { title: '学科知识库' } },
