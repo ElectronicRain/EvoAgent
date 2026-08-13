@@ -24,10 +24,10 @@ jobs:
           .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
       - uses: pnpm/action-setup@v4
         with:
-          version: 11.9.0
+          version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
