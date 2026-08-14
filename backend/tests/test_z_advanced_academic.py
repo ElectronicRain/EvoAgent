@@ -59,7 +59,8 @@ def test_personalized_diagnostic_path_companion_and_traceable_qa(client):
     assert path["target_depth"] == 5
     assert 1 <= path["active_depth"] <= path["target_depth"]
     assert path["next_checkpoint"]
-    assert {item["granularity"] for item in path["nodes"]} == {"micro"}
+    assert {item["granularity"] for item in path["nodes"]} == {"knowledge_unit"}
+    assert {item["ontology_version"] for item in path["nodes"]} == {"cs2023-v1"}
     assert all(item["depth_level"] >= 1 for item in path["nodes"])
     assert all(0 <= item["goal_alignment"] <= 100 for item in path["nodes"])
     assert all(item["adaptation_reason"] for item in path["nodes"])

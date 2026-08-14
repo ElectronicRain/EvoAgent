@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.app.services.computer_science_ontology import CS2023_UNITS, curriculum_nodes
+
 
 def register(client, username: str) -> dict:
     response = client.post(
@@ -16,6 +18,33 @@ def register(client, username: str) -> dict:
 
 def headers(result: dict) -> dict[str, str]:
     return {"Authorization": f"Bearer {result['token']}"}
+
+
+def test_cs2023_ontology_covers_all_areas_and_keeps_subjects_isolated():
+    assert len(CS2023_UNITS) == 17
+    assert sum(len(items) for items in CS2023_UNITS.values()) == 166
+    expected_areas = {
+        "network": {"NC"},
+        "operating_system": {"OS"},
+        "architecture": {"AR"},
+        "database": {"DM"},
+        "distributed": {"PDC"},
+        "security": {"SEC"},
+        "algorithms": {"SDF", "AL"},
+        "software_engineering": {"SDF", "SE"},
+        "rag_agents": {"MSF", "AI"},
+        "computer_vision": {"MSF", "AI", "GIT"},
+        "graphics_hci": {"GIT", "HCI"},
+        "data_science": {"MSF", "DM", "AI"},
+    }
+    for focus, expected in expected_areas.items():
+        nodes = curriculum_nodes([focus], "计算机基础")
+        codes = {item["code"] for item in nodes}
+        assert {item["knowledge_area"] for item in nodes} == expected
+        assert len(codes) == len(nodes)
+        assert all(set(item["prerequisites"]) <= codes for item in nodes)
+        assert all(item["source_refs"] and item["source_refs"][0]["url"].startswith("https://") for item in nodes)
+        assert not any("目标场景迁移" in item["title"] or "综合优化与开放问题" in item["title"] for item in nodes)
 
 
 def test_computer_subject_pack_and_complete_learning_loop(client):
@@ -201,15 +230,17 @@ def test_each_learning_direction_generates_distinct_content_and_can_rebuild(clie
     systems_space = client.get(f"/api/learning-projects/{systems['id']}/workspace", headers=auth).json()
     web_codes = {item["code"] for item in web_space["nodes"]}
     systems_codes = {item["code"] for item in systems_space["nodes"]}
-    assert {"web-frontend", "backend-service", "auth-security"} <= web_codes
-    assert {"operating-systems", "concurrency", "architecture"} <= systems_codes
+    assert {"spd-web", "se-requirements", "se-validation", "hci-design"} <= web_codes
+    assert {"os-purpose", "os-concurrency", "os-process", "os-memory", "os-files"} <= systems_codes
+    assert all(code.startswith(("sdf-", "se-", "hci-", "spd-")) for code in web_codes)
+    assert all(code.startswith("os-") for code in systems_codes)
     assert len(web_codes ^ systems_codes) >= 6
     assert web_space["project"]["settings"]["personalized"] is True
-    assert web_space["project"]["settings"]["content_version"] == 3
-    assert web_space["project"]["settings"]["path_granularity"] == "micro_knowledge_point"
+    assert web_space["project"]["settings"]["content_version"] == 4
+    assert web_space["project"]["settings"]["path_granularity"] == "authoritative_knowledge_unit_or_leaf"
     assert web_space["project"]["settings"]["direction_profile"]["signature"] != systems_space["project"]["settings"]["direction_profile"]["signature"]
     assert all("Web 全栈电商系统开发" in item["description"] for item in web_space["nodes"])
-    assert all(any(ref.get("granularity") == "micro" for ref in item["source_refs"]) for item in web_space["nodes"])
+    assert all(any(ref.get("granularity") == "knowledge_unit" for ref in item["source_refs"]) for item in web_space["nodes"])
     assert all("Web 全栈电商系统开发" in item["prompt"] for item in web_space["questions"])
     assert all("操作系统与并发编程备考" in item["prompt"] for item in systems_space["questions"])
 
@@ -244,7 +275,58 @@ def test_each_learning_direction_generates_distinct_content_and_can_rebuild(clie
     assert rebuilt.json()["memories_preserved"] is True
     rebuilt_space = client.get(f"/api/learning-projects/{web['id']}/workspace", headers=auth).json()
     assert rebuilt_space["project"]["settings"]["direction_profile"]["signature"] != old_signature
-    assert "rag-agents" in {item["code"] for item in rebuilt_space["nodes"]}
+    assert {"ai-agents", "ai-nlp", "ai-search"} <= {item["code"] for item in rebuilt_space["nodes"]}
     assert len(rebuilt_space["memories"]) == 1
     assert rebuilt_space["tasks"]
     assert not rebuilt_space["attempts"]
+
+
+def test_network_direction_uses_complete_network_ontology_without_cross_subject_nodes(client):
+    learner = register(client, "network_ontology_learner")
+    auth = headers(learner)
+    created = client.post(
+        "/api/learning-projects",
+        headers=auth,
+        json={
+            "name": "计算机网络系统学习",
+            "project_type": "course",
+            "description": "从 TCP/IP 分层到路由、可靠传输、网络安全和移动网络。",
+            "target": "掌握计算机网络全部核心知识，并能完成协议分析与抓包验证。",
+            "current_level": "beginner",
+            "target_level": "advanced",
+            "weekly_hours": 8,
+            "track": "计算机基础",
+        },
+    )
+    assert created.status_code == 201, created.text
+    workspace = client.get(
+        f"/api/learning-projects/{created.json()['id']}/workspace", headers=auth
+    ).json()
+    nodes = workspace["nodes"]
+    titles = {item["title"] for item in nodes}
+    assert len(nodes) == 47
+    assert all(item["code"].startswith("nc-") for item in nodes)
+    assert all(item["domain"] == "网络与通信" for item in nodes)
+    assert {
+        "TCP/IP 分层与各层职责",
+        "HTTP 等应用层协议",
+        "TCP 状态、可靠传输与性能",
+        "BGP 与自治系统间路由",
+        "IEEE 802.11 Wi-Fi",
+        "TLS 与安全信道",
+        "蜂窝网络与 4G/5G 基本机制",
+        "软件定义网络与网络虚拟化",
+    } <= titles
+    assert not any("操作系统" in title or "程序的装入" in title or "目标场景迁移" in title for title in titles)
+    metadata = [
+        next(ref for ref in item["source_refs"] if ref.get("type") == "learning_path_metadata")
+        for item in nodes
+    ]
+    assert {item["knowledge_area"] for item in metadata} == {"NC"}
+    assert len({item["knowledge_unit"] for item in metadata}) == 8
+    assert {item["ontology_version"] for item in metadata} == {"cs2023-v1"}
+    assert {item["granularity"] for item in metadata} == {"authoritative_leaf"}
+    ontology = workspace["project"]["settings"]["ontology"]
+    assert ontology["knowledge_area_count"] == 1
+    assert ontology["knowledge_unit_count"] == 8
+    assert ontology["node_count"] == 47

@@ -87,7 +87,7 @@ onMounted(load)
       <div class="form-grid">
         <div class="field full"><label>学习方向名称 *</label><input v-model="form.name" class="input" maxlength="160" autofocus placeholder="例如：计算机基础系统学习"></div>
         <div class="field"><label>学习类型</label><select v-model="form.project_type" class="select"><option value="course">课程学习</option><option value="exam">考试备考</option><option value="skill">技能提升</option><option value="topic">专题学习</option><option value="project">项目实践</option></select></div>
-        <div class="field"><label>计算机方向</label><select v-model="form.track" class="select"><option>计算机基础</option><option>程序设计</option><option>人工智能</option></select></div>
+        <div class="field"><label>计算机方向</label><select v-model="form.track" class="select"><option>计算机基础</option><option>程序设计</option><option>算法与数据结构</option><option>计算机组成与体系结构</option><option>操作系统</option><option>计算机网络</option><option>数据库系统</option><option>软件工程</option><option>程序设计语言与编译</option><option>并行与分布式计算</option><option>网络安全</option><option>人工智能</option><option>大模型、RAG 与智能体</option><option>计算机视觉</option><option>计算机图形学与人机交互</option><option>数据科学</option><option>Web 全栈开发</option></select></div>
         <div class="field full"><label>期望达到的目标</label><textarea v-model="form.target" class="textarea" placeholder="说明希望能独立完成什么任务，或达到什么可量化结果"></textarea></div>
         <div class="field full"><label>已有基础与补充说明</label><textarea v-model="form.description" class="textarea" placeholder="可填写已学课程、薄弱环节和偏好的学习方式"></textarea></div>
         <div class="field"><label>当前水平</label><select v-model="form.current_level" class="select"><option value="beginner">入门</option><option value="foundation">有基础</option><option value="intermediate">中级</option><option value="advanced">高级</option></select></div>

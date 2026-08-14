@@ -29,6 +29,12 @@ from ..models import (
 )
 from .agents import agent_engine
 from .common import dumps, loads
+from .computer_science_ontology import (
+    ONTOLOGY_SOURCES,
+    ONTOLOGY_VERSION,
+    curriculum_nodes,
+    ontology_summary,
+)
 
 
 COMPUTER_PACK_GROUP = "计算机科学学科包"
@@ -106,7 +112,9 @@ SPECIALIZED_NODES: list[dict[str, Any]] = [
 
 DIRECTION_RULES: dict[str, dict[str, Any]] = {
     "web_fullstack": {"label": "Web 全栈与应用开发", "markers": ("web", "网站", "前端", "后端", "全栈", "vue", "react", "api", "电商", "管理系统"), "codes": ("programming", "debugging", "databases", "software-engineering", "web-frontend", "backend-service", "auth-security", "deployment", "project-delivery")},
-    "systems": {"label": "系统与并发", "markers": ("操作系统", "并发", "线程", "进程", "组成原理", "系统编程", "内核", "408"), "codes": ("cs-foundation", "architecture", "data-structures", "operating-systems", "concurrency", "networks", "software-engineering", "exam-synthesis")},
+    "operating_system": {"label": "操作系统", "markers": ("操作系统", "进程", "线程", "调度", "虚拟内存", "文件系统", "内核"), "codes": ()},
+    "architecture": {"label": "计算机体系结构与组成", "markers": ("组成原理", "体系结构", "指令", "流水线", "cache", "缓存", "处理器"), "codes": ()},
+    "systems": {"label": "计算机系统", "markers": ("计算机系统", "系统编程", "系统基础", "408"), "codes": ()},
     "algorithms": {"label": "算法与数据结构", "markers": ("算法", "数据结构", "leetcode", "竞赛", "复杂度", "acm"), "codes": ("programming", "data-structures", "algorithms", "coding-interview", "software-engineering", "exam-synthesis")},
     "database": {"label": "数据库与数据工程", "markers": ("数据库", "sql", "数据建模", "数据仓库", "事务", "索引"), "codes": ("programming", "data-structures", "databases", "advanced-database", "backend-service", "software-engineering", "project-delivery")},
     "network": {"label": "计算机网络", "markers": ("计算机网络", "tcp", "udp", "http", "协议", "网络工程"), "codes": ("cs-foundation", "networks", "network-practice", "operating-systems", "security", "distributed-systems", "exam-synthesis")},
@@ -114,6 +122,10 @@ DIRECTION_RULES: dict[str, dict[str, Any]] = {
     "rag_agents": {"label": "大模型、RAG 与智能体", "markers": ("大模型", "llm", "rag", "智能体", "agent", "transformer", "知识库", "自然语言"), "codes": ("python-data", "math-ai", "ml", "deep-learning", "nlp", "evaluation", "rag-agents", "trustworthy-ai", "project-delivery")},
     "computer_vision": {"label": "计算机视觉", "markers": ("计算机视觉", "图像", "视觉", "cv", "目标检测", "分割"), "codes": ("python-data", "math-ai", "ml", "deep-learning", "computer-vision", "evaluation", "trustworthy-ai", "project-delivery")},
     "data_science": {"label": "数据科学", "markers": ("数据分析", "数据科学", "统计", "可视化", "预测分析"), "codes": ("python-data", "math-ai", "ml", "data-science", "databases", "evaluation", "project-delivery")},
+    "distributed": {"label": "并行与分布式计算", "markers": ("并行计算", "分布式计算", "分布式系统", "一致性", "复制", "共识"), "codes": ()},
+    "programming_languages": {"label": "程序设计语言", "markers": ("程序设计语言", "编译原理", "编译器", "类型系统", "函数式", "面向对象"), "codes": ()},
+    "software_engineering": {"label": "软件工程", "markers": ("软件工程", "需求工程", "软件测试", "代码审查", "重构", "形式化方法"), "codes": ()},
+    "graphics_hci": {"label": "计算机图形学与人机交互", "markers": ("计算机图形学", "图形学", "人机交互", "hci", "渲染", "交互设计"), "codes": ()},
 }
 
 FOCUS_ANCHORS = {
@@ -131,11 +143,11 @@ FOCUS_ANCHORS = {
 TARGET_DEPTH = {"foundation": 2, "intermediate": 3, "proficient": 4, "advanced": 5}
 CURRENT_DEPTH = {"beginner": 0, "foundation": 1, "intermediate": 2, "advanced": 3}
 DEPTH_LABELS = {
-    1: "目标必备概念",
-    2: "核心机制拆解",
-    3: "方法与最小验证",
-    4: "目标场景迁移",
-    5: "综合优化与开放问题",
+    1: "基础概念与术语",
+    2: "结构、协议与核心机制",
+    3: "分析、设计与实现",
+    4: "安全、规模与综合应用",
+    5: "前沿专题与研究拓展",
 }
 
 # These overrides keep high-frequency computer-science routes genuinely atomic.
@@ -227,12 +239,26 @@ class LearningSpaceService:
             filter(None, [project.name, project.description, project.target, project.discipline, track])
         ).lower()
         scored: list[tuple[int, str, dict[str, Any]]] = []
+        name_text = project.name.lower()
+        target_text = project.target.lower()
+        description_text = project.description.lower()
+        track_text = track.lower()
         for key, rule in DIRECTION_RULES.items():
-            score = sum(2 if marker.lower() in project.name.lower() else 1 for marker in rule["markers"] if marker.lower() in source_text)
+            score = sum(
+                (5 if marker.lower() in target_text else 0)
+                + (4 if marker.lower() in track_text else 0)
+                + (3 if marker.lower() in name_text else 0)
+                + (1 if marker.lower() in description_text else 0)
+                for marker in rule["markers"]
+                if marker.lower() in source_text
+            )
             if score:
                 scored.append((score, key, rule))
         scored.sort(key=lambda item: (-item[0], item[1]))
-        selected_rules = scored[:2]
+        # A learning direction is intentionally bound to one discipline
+        # ontology.  Cross-area links live in the ontology; keyword overlap
+        # must never mix unrelated course catalogues into the same graph.
+        selected_rules = scored[:1]
         focus_domains = [item[2]["label"] for item in selected_rules]
         keywords = [marker for _, _, rule in selected_rules for marker in rule["markers"] if marker.lower() in source_text][:10]
         type_outcome = {
@@ -262,43 +288,7 @@ class LearningSpaceService:
 
     @staticmethod
     def select_direction_nodes(track: str, profile: dict[str, Any]) -> list[dict[str, Any]]:
-        catalogue: dict[str, dict[str, Any]] = {}
-        for group in TRACK_NODES.values():
-            for node in group:
-                catalogue.setdefault(node["code"], node)
-        for node in SPECIALIZED_NODES:
-            catalogue[node["code"]] = node
-
-        focus_keys = profile.get("focus_keys", [])
-        if focus_keys:
-            codes: list[str] = []
-            for key in focus_keys:
-                for code in DIRECTION_RULES[key]["codes"]:
-                    if code not in codes:
-                        codes.append(code)
-            # Every focused direction retains a fundamentals anchor and a
-            # verifiable final outcome, without expanding back into a generic curriculum.
-            anchor = "python-basics" if track == "程序设计" else ("math-ai" if track == "人工智能" else "cs-foundation")
-            if anchor in catalogue and anchor not in codes:
-                codes.insert(0, anchor)
-            if "project-delivery" not in codes and "exam-synthesis" not in codes:
-                codes.append("project-delivery")
-            codes = codes[:12]
-            for key in focus_keys:
-                anchor_code = FOCUS_ANCHORS.get(key)
-                if anchor_code and anchor_code not in codes:
-                    codes[-1] = anchor_code
-        else:
-            codes = [node["code"] for node in (TRACK_NODES.get(track) or TRACK_NODES["计算机基础"])]
-
-        selected_codes = set(codes)
-        selected: list[dict[str, Any]] = []
-        for code in codes:
-            source = catalogue.get(code)
-            if not source:
-                continue
-            selected.append({**source, "prerequisites": [item for item in source["prerequisites"] if item in selected_codes]})
-        return selected
+        return curriculum_nodes(profile.get("focus_keys", []), track)
 
     @staticmethod
     def learning_meta(node: LearningKnowledgeNode | dict[str, Any]) -> dict[str, Any]:
@@ -315,73 +305,10 @@ class LearningSpaceService:
 
     @classmethod
     def build_micro_nodes(cls, macros: list[dict[str, Any]], profile: dict[str, Any], target_level: str) -> list[dict[str, Any]]:
-        target = (profile.get("target_outcomes") or ["形成可验证成果"])[0]
-        max_depth = TARGET_DEPTH.get(target_level, 4)
-        terminal_codes: dict[str, str] = {}
-        by_parent: dict[str, list[dict[str, Any]]] = {}
-
-        for macro in macros:
-            concepts = MICRO_CONCEPT_OVERRIDES.get(macro["code"]) or cls._fallback_concepts(macro["description"])
-            steps: list[tuple[str, str, int, str]] = [
-                (
-                    f"{macro['title']}：对象、术语与边界",
-                    f"准确区分{macro['title']}中的研究对象、输入输出、核心术语和成立边界。",
-                    1,
-                    "用自己的话给出定义，并写出一个反例或不适用情形",
-                )
-            ]
-            for index, concept in enumerate(concepts[:4]):
-                depth = 2 if index < 2 else 3
-                steps.append((
-                    concept,
-                    f"只聚焦小知识点“{concept}”：说明它的输入、状态变化、输出和判断依据。",
-                    depth,
-                    f"完成一个只检验“{concept}”的最小例题、代码片段或推导步骤",
-                ))
-            steps.append((
-                f"{macro['title']}：最小验证",
-                f"把前述小知识点组合成一个最小可运行、可计算或可判分的验证样例。",
-                3,
-                "提交输入、过程、输出、期望结果和失败样例",
-            ))
-            steps.append((
-                f"{macro['title']}：目标场景迁移",
-                f"把已验证机制迁移到当前目标“{target}”，比较直接套用与调整后的差异。",
-                4,
-                "完成一个直接服务当前目标的变式任务并说明迁移边界",
-            ))
-            steps.append((
-                f"{macro['title']}：综合优化与开放问题",
-                f"围绕目标“{target}”分析性能、可靠性、复杂度或可解释性取舍，并提出可验证改进。",
-                5,
-                "给出基线、改进假设、评价指标和反证条件",
-            ))
-            steps = [item for item in steps if item[2] <= max_depth]
-            children: list[dict[str, Any]] = []
-            for index, (title, description, depth, evidence) in enumerate(steps):
-                code = macro["code"] if index == 0 else f"{macro['code']}--{index + 1:02d}"
-                children.append({
-                    "code": code,
-                    "parent_code": macro["code"],
-                    "title": title,
-                    "domain": macro["domain"],
-                    "description": description,
-                    "depth_level": depth,
-                    "depth_label": DEPTH_LABELS[depth],
-                    "evidence": evidence,
-                    "prerequisites": [],
-                })
-            by_parent[macro["code"]] = children
-            terminal_codes[macro["code"]] = children[-1]["code"]
-
-        result: list[dict[str, Any]] = []
-        for macro in macros:
-            children = by_parent[macro["code"]]
-            external = [terminal_codes[code] for code in macro["prerequisites"] if code in terminal_codes]
-            for index, child in enumerate(children):
-                child["prerequisites"] = external if index == 0 else [children[index - 1]["code"]]
-                result.append(child)
-        return result
+        # The ontology already contains real leaf/unit nodes and explicit
+        # prerequisite edges.  Target level controls unlocking in
+        # AdvancedAcademicService; it must not create or rename knowledge.
+        return [{**item, "depth_label": DEPTH_LABELS[item["depth_level"]]} for item in macros]
 
     async def scaffold(
         self,
@@ -393,8 +320,9 @@ class LearningSpaceService:
         profile = self.direction_profile(project, track)
         macros = self.select_direction_nodes(track, profile)
         nodes = self.build_micro_nodes(macros, profile, project.target_level)
+        ontology = ontology_summary(nodes)
         refs = [
-            {"title": "ACM/IEEE-CS Computing Curricula 2023", "source": "ACM/IEEE-CS", "url": "https://csed.acm.org/"},
+            *ONTOLOGY_SOURCES,
             {"title": "计算机科学学科包", "source": "EvoAgent 本地知识库", "knowledge_group": COMPUTER_PACK_GROUP},
         ]
         target = profile["target_outcomes"][0]
@@ -408,12 +336,15 @@ class LearningSpaceService:
             state = "mastered" if mastery >= 80 else "learning" if mastery > 0 else "not_started"
             metadata = {
                 "type": "learning_path_metadata",
-                "granularity": "micro",
+                "granularity": "authoritative_leaf" if item["knowledge_area"] == "NC" and item["parent_code"] != "nc" else "knowledge_unit",
                 "parent_code": item["parent_code"],
                 "depth_level": item["depth_level"],
                 "depth_label": item["depth_label"],
                 "evidence_requirement": item["evidence"],
                 "goal": target,
+                "knowledge_area": item["knowledge_area"],
+                "knowledge_unit": item["knowledge_unit"],
+                "ontology_version": ONTOLOGY_VERSION,
             }
             db.add(LearningKnowledgeNode(
                 project_id=project.id,
@@ -422,7 +353,7 @@ class LearningSpaceService:
                 domain=item["domain"],
                 description=f"面向“{project.name}”的当前目标“{target}”：{item['description']} 达标证据：{item['evidence']}。",
                 prerequisites_json=dumps(item["prerequisites"]),
-                source_refs_json=dumps([*refs, metadata]),
+                source_refs_json=dumps([*item.get("source_refs", refs), metadata]),
                 order_index=index,
                 mastery=mastery,
                 status=state,
@@ -431,9 +362,10 @@ class LearningSpaceService:
         project.settings_json = dumps({
             **previous,
             "track": track,
-            "plan_version": 3,
-            "content_version": 3,
-            "path_granularity": "micro_knowledge_point",
+            "plan_version": 4,
+            "content_version": 4,
+            "path_granularity": "authoritative_knowledge_unit_or_leaf",
+            "ontology": ontology,
             "target_depth": TARGET_DEPTH.get(project.target_level, 4),
             "personalized": True,
             "direction_profile_stale": False,
@@ -523,7 +455,7 @@ class LearningSpaceService:
 
     async def workspace(self, db: AsyncSession, project: LearningProject) -> dict[str, Any]:
         settings = loads(project.settings_json, {})
-        if int(settings.get("content_version", 0) or 0) < 3 or settings.get("direction_profile_stale"):
+        if int(settings.get("content_version", 0) or 0) < 4 or settings.get("direction_profile_stale"):
             # One-time migration for directions created by the former generic
             # scaffold. User-authored memories and prior mastery evidence are
             # retained; broad-node mastery is conservatively capped when it is

@@ -20,18 +20,26 @@ const layout = computed(() => {
   return { nodes: positioned, map, width: Math.max(780, 250 + stages.length * 290), height: Math.max(340, 165 + Math.max(1, ...stages.map((stage: Entity) => stage.node_ids.length)) * 98) }
 })
 const selected = computed(() => props.path?.nodes?.find((item: Entity) => item.id === selectedId.value))
+const ontology = computed(() => {
+  const nodes = props.path?.nodes || []
+  return {
+    version: nodes[0]?.ontology_version || '待建立',
+    areas: new Set(nodes.map((item: Entity) => item.knowledge_area).filter(Boolean)).size,
+    units: new Set(nodes.map((item: Entity) => item.knowledge_unit).filter(Boolean)).size,
+  }
+})
 function choose(id:string){ selectedId.value=id; emit('select',id) }
 </script>
 
 <template>
   <div class="path-graph">
-    <section class="goal-trace"><div><span>当前目标</span><strong>{{ path.goal }}</strong></div><div><span>自适应深度</span><strong>{{ path.active_depth }}/{{ path.target_depth }}</strong><small>{{ path.adaptive_summary }}</small></div><div><span>下一达标证据</span><strong>{{ path.next_checkpoint }}</strong></div></section>
+    <section class="goal-trace"><div><span>当前目标</span><strong>{{ path.goal }}</strong></div><div><span>权威知识本体</span><strong>{{ ontology.version }}</strong><small>{{ ontology.areas }} 个知识领域 · {{ ontology.units }} 个知识单元 · {{ path.nodes?.length || 0 }} 个节点</small></div><div><span>自适应深度</span><strong>{{ path.active_depth }}/{{ path.target_depth }}</strong><small>{{ path.adaptive_summary }}</small></div><div><span>下一达标证据</span><strong>{{ path.next_checkpoint }}</strong></div></section>
     <div class="legend"><span v-for="(label,key) in stateLabel" :key="key"><i :style="{background:stateColor[key]}"/>{{ label }}</span></div>
     <div class="canvas">
       <svg :viewBox="`0 0 ${layout.width} ${layout.height}`" role="img" :aria-label="path.title">
         <defs><marker id="path-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#91a8b7"/></marker></defs>
         <g v-for="(stage,index) in path.stages || []" :key="stage.name">
-          <text :x="125+index*290" y="30" text-anchor="middle" class="stage-title">{{ stage.name }}</text>
+          <text :x="125+index*290" y="30" text-anchor="middle" class="stage-title">{{ stage.name }}（{{ stage.node_ids.length }}）</text>
           <line :x1="270+index*290" y1="42" :x2="270+index*290" :y2="layout.height-32" stroke="#edf1f4" />
         </g>
         <g v-for="edge in path.edges || []" :key="`${edge.source}-${edge.target}`">
@@ -46,7 +54,7 @@ function choose(id:string){ selectedId.value=id; emit('select',id) }
       </svg>
     </div>
     <article v-if="selected" class="node-detail">
-      <div><strong>{{ selected.label }}</strong><span>{{ selected.depth_label }} · {{ stateLabel[selected.state] }} · 目标匹配 {{ selected.goal_alignment }}%</span></div>
+      <div><strong>{{ selected.label }}</strong><span>{{ selected.knowledge_unit }} · {{ selected.depth_label }} · {{ stateLabel[selected.state] }} · 目标匹配 {{ selected.goal_alignment }}%</span></div>
       <p>{{ selected.description }}<br><b>动态调整依据：</b>{{ selected.adaptation_reason }}</p>
       <small>达标证据：{{ selected.evidence_requirement }}<br>来源：{{ selected.resources?.[0]?.source || '计算机科学学科包' }}</small>
       <button type="button" @click="emit('select',selected.id)">进入针对性学习</button>
@@ -55,5 +63,5 @@ function choose(id:string){ selectedId.value=id; emit('select',id) }
 </template>
 
 <style scoped>
-.path-graph{padding:12px}.goal-trace{margin-bottom:10px;display:grid;grid-template-columns:1.25fr .8fr 1fr;gap:8px}.goal-trace>div{padding:9px 11px;border:1px solid #dce5eb;border-radius:7px;background:#fafcfd;display:grid;gap:3px}.goal-trace span{color:#718795;font-size:7px}.goal-trace strong{color:#315b77;font-size:9px;line-height:1.45}.goal-trace small{color:#718795;font-size:7px;line-height:1.4}.legend{display:flex;gap:14px;flex-wrap:wrap;color:#5d7484;font-size:8px}.legend span{display:flex;align-items:center;gap:5px}.legend i{width:8px;height:8px;border-radius:50%}.canvas{margin-top:9px;max-height:640px;overflow:auto;border:1px solid #dce5eb;border-radius:8px;background:#fff}.canvas svg{min-width:760px;display:block}.stage-title{fill:#34576e;font:600 11px Arial,'Microsoft YaHei'}.node{cursor:pointer}.node:focus{outline:none}.node-title{fill:#294a62;font:600 9px Arial,'Microsoft YaHei'}.node-meta{fill:#718593;font:7px Arial,'Microsoft YaHei'}.node-detail{margin-top:9px;padding:11px;display:grid;grid-template-columns:minmax(160px,.65fr) minmax(260px,1.2fr) minmax(230px,1fr) auto;align-items:center;gap:10px;border:1px solid #dce5eb;border-radius:8px;background:#fbfcfd}.node-detail strong,.node-detail span{display:block}.node-detail strong{color:#294a62;font-size:10px}.node-detail span,.node-detail small{margin-top:3px;color:#768a98;font-size:8px}.node-detail p{margin:0;color:#4f687a;font-size:8px;line-height:1.55}.node-detail p b{color:#315b77}.node-detail button{padding:7px 10px;border:1px solid #87b6d3;border-radius:6px;color:#1769c2;background:#fff;font-size:8px}@media(max-width:900px){.goal-trace,.node-detail{grid-template-columns:1fr}.node-detail button{justify-self:start}}
+.path-graph{padding:12px}.goal-trace{margin-bottom:10px;display:grid;grid-template-columns:1.15fr .8fr .75fr 1fr;gap:8px}.goal-trace>div{padding:9px 11px;border:1px solid #dce5eb;border-radius:7px;background:#fafcfd;display:grid;gap:3px}.goal-trace span{color:#718795;font-size:7px}.goal-trace strong{color:#315b77;font-size:9px;line-height:1.45}.goal-trace small{color:#718795;font-size:7px;line-height:1.4}.legend{display:flex;gap:14px;flex-wrap:wrap;color:#5d7484;font-size:8px}.legend span{display:flex;align-items:center;gap:5px}.legend i{width:8px;height:8px;border-radius:50%}.canvas{margin-top:9px;max-height:640px;overflow:auto;border:1px solid #dce5eb;border-radius:8px;background:#fff}.canvas svg{min-width:760px;display:block}.stage-title{fill:#34576e;font:600 11px Arial,'Microsoft YaHei'}.node{cursor:pointer}.node:focus{outline:none}.node-title{fill:#294a62;font:600 9px Arial,'Microsoft YaHei'}.node-meta{fill:#718593;font:7px Arial,'Microsoft YaHei'}.node-detail{margin-top:9px;padding:11px;display:grid;grid-template-columns:minmax(160px,.65fr) minmax(260px,1.2fr) minmax(230px,1fr) auto;align-items:center;gap:10px;border:1px solid #dce5eb;border-radius:8px;background:#fbfcfd}.node-detail strong,.node-detail span{display:block}.node-detail strong{color:#294a62;font-size:10px}.node-detail span,.node-detail small{margin-top:3px;color:#768a98;font-size:8px}.node-detail p{margin:0;color:#4f687a;font-size:8px;line-height:1.55}.node-detail p b{color:#315b77}.node-detail button{padding:7px 10px;border:1px solid #87b6d3;border-radius:6px;color:#1769c2;background:#fff;font-size:8px}@media(max-width:900px){.goal-trace,.node-detail{grid-template-columns:1fr}.node-detail button{justify-self:start}}
 </style>

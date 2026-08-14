@@ -43,11 +43,11 @@ class AdvancedAcademicService:
     TARGET_DEPTH = {"foundation": 2, "intermediate": 3, "proficient": 4, "advanced": 5}
     CURRENT_DEPTH = {"beginner": 0, "foundation": 1, "intermediate": 2, "advanced": 3}
     DEPTH_LABELS = {
-        1: "目标必备概念",
-        2: "核心机制拆解",
-        3: "方法与最小验证",
-        4: "目标场景迁移",
-        5: "综合优化与开放问题",
+        1: "基础概念与术语",
+        2: "结构、协议与核心机制",
+        3: "分析、设计与实现",
+        4: "安全、规模与综合应用",
+        5: "前沿专题与研究拓展",
     }
 
     @staticmethod
@@ -180,6 +180,9 @@ class AdvancedAcademicService:
                 "description": item.description, "mastery": item.mastery, "state": state,
                 "order": item.order_index, "resources": loads(item.source_refs_json, []),
                 "parent_code": metadata.get("parent_code", item.code),
+                "knowledge_area": metadata.get("knowledge_area", ""),
+                "knowledge_unit": metadata.get("knowledge_unit", ""),
+                "ontology_version": metadata.get("ontology_version", ""),
                 "granularity": metadata.get("granularity", "micro"),
                 "depth_level": depth,
                 "depth_label": metadata.get("depth_label", self.DEPTH_LABELS.get(depth, "目标知识点")),
