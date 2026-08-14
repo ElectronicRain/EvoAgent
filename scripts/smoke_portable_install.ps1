@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $ReleaseRoot) {
-    $ReleaseRoot = Join-Path $projectRoot ".tmp\tauri-target-2.1.0-portable\release"
+    $ReleaseRoot = Join-Path $projectRoot ".tmp\tauri-target-2.1.1-portable\release"
 }
 if (-not $SmokeRoot) {
     $SmokeRoot = Join-Path $projectRoot ".tmp\portable-install-smoke"

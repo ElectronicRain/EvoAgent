@@ -33,7 +33,7 @@ from .common import dumps, loads
 OKABE_ITO = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#000000"]
 FIGURE_SKILL = {
     "name": "scipilot-figure-skill",
-    "version": "2.1.0",
+    "version": "2.1.1",
     "source": "https://github.com/Haojae/scipilot-figure-skill",
     "principle": "先剖析数据与论证目标，再选择图型、绘制、自检并导出",
 }

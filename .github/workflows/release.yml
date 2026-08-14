@@ -56,25 +56,58 @@ jobs:
           tagName: v__VERSION__
           releaseName: "EvoAgent v__VERSION__"
           releaseBody: |
-            ## EvoAgent V2.1.0
+            ## EvoAgent V2.1.1
 
-            - 修复部分 Windows 代理环境中“检查更新”长时间无结果或误报为最新版本的问题。
-            - 自动读取 Windows 系统代理，代理通道失败后自动尝试直连。
-            - 更新源不可达时显示明确错误和重新检查入口，不再把网络失败解释为已是最新版本。
-
-            - 新增完整科研应用层：文献研究、参考文献关联图谱、Idea 实验室、科研记忆与实验承接、LaTeX 协作写作和多角色模拟审稿。
-            - 支持 LaTeX 项目文件夹、图片与 BibTeX 导入，内置 Tectonic 渲染引擎，提供缩放、全屏、图片放大和版本管理。
-            - 为科研模块配置默认及自选专家 Agent，并与 Agent 工厂、现有工作流联动。
-            - 模拟审稿委员会新增独立委员实时进度、量化评分、置信度与委员会汇总。
-            - 完善多人协作、邀请码加入、行级批注和哈希链可信记录。
-            - 修复科研项目总览同步、新建科研方向、知识库执行和桌面更新检查问题。
-            - 左侧工作台分为上层应用层与底部调用层，便于区分业务应用和基础能力。
-
-            - 新增完整学习空间与计算机科学学科包：方向独立画像、五维诊断、动态可视化学习路径、公式/代码/概念可追溯讲解、导师学伴陪伴、练习错题闭环与个性化空间。
-            - 新增科研领域前沿追踪：自动更新近期题录，生成热点主题、增长趋势、时间线和参考文献—主题关联，并保留 DOI、原文链接、来源与可信度。
-            - 新增科研数据与论文图表工作台：支持 CSV、TSV、JSON 数据画像、缺失与相关分析、结论边界，以及白底、色觉友好、SVG 矢量论文图表。
-            - 新增领域前沿追踪专家与科研数据图表专家，可与 Agent 工厂、专业知识库和现有工作流配套使用。
-
-            V1 用户启动软件后会自动检查此正式版本；更新包经既有 EvoAgent 发布公钥验证后才会安装，本地数据库和项目文件不会被覆盖。
+            - 完整发布学习空间与计算机科学学科包，支持方向独立画像、五维诊断、动态学习路径、可追溯问答、导师学伴、错题闭环与个性化空间。
+            - 完整发布科研应用层，覆盖文献研究、参考文献关联图谱、Idea 实验室、科研记忆与实验承接、LaTeX 协作写作、多角色模拟审稿、领域前沿追踪和科研数据图表。
+            - 科研与学习模块均可调用 Agent 工厂、专业知识库、RAG、工作流、Skill 和智能评测等底层能力。
+            - 修复 Windows“检查更新”无响应与 API 地址易受限流影响的问题，更新清单改用 GitHub Release 稳定直链。
+            - 安装包与更新清单均带发布签名；升级不会覆盖本地数据库、密钥、工作区、Skills 和插件。
           releaseDraft: false
           prerelease: false
+      - name: Publish rate-limit-free updater manifest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content "frontend/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          $downloadBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag"
+          $manifestPath = Join-Path $env:RUNNER_TEMP "latest.json"
+          $manifestUrl = "$downloadBase/latest.json"
+
+          for ($attempt = 1; $attempt -le 12; $attempt++) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri $manifestUrl -OutFile $manifestPath -TimeoutSec 30
+              break
+            } catch {
+              if ($attempt -eq 12) { throw }
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          $msiUrl = "$downloadBase/EvoAgent_${version}_x64_en-US.msi"
+          $nsisUrl = "$downloadBase/EvoAgent_${version}_x64-setup.exe"
+          $manifest.platforms.'windows-x86_64'.url = $msiUrl
+          $manifest.platforms.'windows-x86_64-msi'.url = $msiUrl
+          $manifest.platforms.'windows-x86_64-nsis'.url = $nsisUrl
+          $json = $manifest | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText($manifestPath, $json, [System.Text.UTF8Encoding]::new($false))
+
+          gh release upload $tag $manifestPath --clobber --repo $env:GITHUB_REPOSITORY
+
+          $cacheKey = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $published = Invoke-RestMethod -Uri "$manifestUrl?cache=$cacheKey" -TimeoutSec 30
+          foreach ($platform in $published.platforms.PSObject.Properties) {
+            if ($platform.Value.url -like 'https://api.github.com/*') {
+              throw "Updater manifest still contains a rate-limited API URL for $($platform.Name)."
+            }
+            if ([string]::IsNullOrWhiteSpace($platform.Value.signature)) {
+              throw "Updater manifest is missing a signature for $($platform.Name)."
+            }
+            $asset = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $platform.Value.url -MaximumRedirection 5 -TimeoutSec 30
+            if ($asset.StatusCode -ne 200) {
+              throw "Updater asset is unavailable for $($platform.Name): HTTP $($asset.StatusCode)."
+            }
+          }
