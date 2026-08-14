@@ -1,10 +1,18 @@
+param(
+    [string]$TargetRelease = ''
+)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $tauriConfigPath = Join-Path $projectRoot 'frontend\src-tauri\tauri.conf.json'
 $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = [string]$tauriConfig.version
 $sourceRelease = Join-Path $projectRoot "frontend\.tmp\tauri-target-$version\release"
-$targetRelease = Join-Path $projectRoot 'frontend\src-tauri\target\release'
+if ([string]::IsNullOrWhiteSpace($TargetRelease)) {
+    $TargetRelease = Join-Path $projectRoot 'frontend\src-tauri\target\release'
+}
+$targetRelease = [System.IO.Path]::GetFullPath($TargetRelease)
+$null = New-Item -ItemType Directory -Path $targetRelease -Force
 $logPath = Join-Path $projectRoot ".tmp\desktop-update-$version.log"
 
 $sourceDesktop = Join-Path $sourceRelease 'evoagent-desktop.exe'
