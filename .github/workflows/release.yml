@@ -98,7 +98,7 @@ jobs:
           gh release upload $tag $manifestPath --clobber --repo $env:GITHUB_REPOSITORY
 
           $cacheKey = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $published = Invoke-RestMethod -Uri "$manifestUrl?cache=$cacheKey" -TimeoutSec 30
+          $published = Invoke-RestMethod -Uri "${manifestUrl}?cache=$cacheKey" -TimeoutSec 30
           foreach ($platform in $published.platforms.PSObject.Properties) {
             if ($platform.Value.url -like 'https://api.github.com/*') {
               throw "Updater manifest still contains a rate-limited API URL for $($platform.Name)."
