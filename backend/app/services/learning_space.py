@@ -128,6 +128,55 @@ FOCUS_ANCHORS = {
     "data_science": "data-science",
 }
 
+TARGET_DEPTH = {"foundation": 2, "intermediate": 3, "proficient": 4, "advanced": 5}
+CURRENT_DEPTH = {"beginner": 0, "foundation": 1, "intermediate": 2, "advanced": 3}
+DEPTH_LABELS = {
+    1: "目标必备概念",
+    2: "核心机制拆解",
+    3: "方法与最小验证",
+    4: "目标场景迁移",
+    5: "综合优化与开放问题",
+}
+
+# These overrides keep high-frequency computer-science routes genuinely atomic.
+# Other catalogue entries are decomposed from their structured descriptions.
+MICRO_CONCEPT_OVERRIDES: dict[str, list[str]] = {
+    "cs-foundation": ["二进制信息表示", "程序的装入与执行", "软硬件接口分层"],
+    "programming": ["变量与值的状态变化", "分支和循环控制流", "函数参数与返回值"],
+    "python-basics": ["Python 对象与基本类型", "控制流执行顺序", "函数作用域与模块导入"],
+    "debugging": ["最小可复现样例", "异常栈与断点定位", "边界条件与回归测试"],
+    "oop": ["对象状态与职责", "组合和继承的取舍", "接口契约与多态"],
+    "data-structures": ["线性表的操作代价", "树的层次与遍历", "图的表示与搜索", "散列冲突处理"],
+    "algorithms": ["渐近复杂度与增长率", "分治递归式", "动态规划状态转移", "贪心选择性质"],
+    "coding-interview": ["题意到数据结构映射", "算法不变量", "复杂度证明", "限时编码与测试"],
+    "architecture": ["指令周期", "流水线数据冒险", "缓存局部性", "存储层次性能"],
+    "operating-systems": ["进程与线程状态", "临界区与互斥", "虚拟地址转换", "文件系统一致性"],
+    "concurrency": ["竞态条件识别", "互斥量与条件变量", "死锁四条件", "并发正确性验证"],
+    "networks": ["分层封装与解封装", "TCP 可靠传输", "拥塞控制窗口", "路由与应用层协议"],
+    "network-practice": ["TCP/IP 抓包字段", "HTTP 请求响应链", "网络故障分层定位", "时延吞吐测量"],
+    "databases": ["关系与函数依赖", "SQL 查询语义", "B+树索引", "事务隔离与恢复"],
+    "advanced-database": ["执行计划解读", "复合索引选择", "并发控制异常", "缓存与容量边界"],
+    "software-engineering": ["可验收需求", "模块边界与依赖", "测试层次", "版本与发布策略"],
+    "web-frontend": ["DOM 与组件状态", "响应式数据流", "路由和表单交互", "可访问性反馈"],
+    "backend-service": ["API 资源建模", "输入校验", "错误语义", "服务分层与可观测性"],
+    "auth-security": ["身份认证状态", "授权策略", "会话与令牌", "常见 Web 攻击面"],
+    "deployment": ["环境配置隔离", "容器镜像", "持续交付门禁", "监控与回滚"],
+    "security": ["资产与威胁建模", "认证和授权边界", "密码学安全目标", "安全开发生命周期"],
+    "cybersecurity": ["攻击面枚举", "漏洞成因", "安全测试证据", "修复验证与合规记录"],
+    "math-ai": ["向量矩阵运算", "概率变量与分布", "梯度与链式法则", "优化目标与约束"],
+    "python-data": ["数组形状与广播", "缺失值和异常值", "数据划分", "可复现实验环境"],
+    "ml": ["任务与标签定义", "经验风险与泛化", "训练验证测试划分", "偏差方差诊断"],
+    "deep-learning": ["神经元与前向传播", "反向传播梯度", "正则化", "训练稳定性诊断"],
+    "nlp": ["文本表示", "注意力计算", "Transformer 信息流", "提示与检索增强"],
+    "rag-agents": ["知识切分粒度", "召回与重排", "上下文组装", "引用约束", "工具调用评测"],
+    "computer-vision": ["图像张量表示", "卷积感受野", "检测与分割输出", "视觉指标与误差"],
+    "evaluation": ["指标与任务对齐", "基线和消融", "统计不确定性", "误差分层分析"],
+    "trustworthy-ai": ["可靠性失效模式", "公平性度量", "隐私边界", "透明度与治理记录"],
+    "data-science": ["变量类型与数据质量", "分布和异常值", "相关与因果边界", "可视化论证"],
+    "project-delivery": ["成果验收条件", "可复现运行步骤", "测试证据", "演示与复盘"],
+    "exam-synthesis": ["考点映射", "限时作答策略", "错因分类", "间隔复习"],
+}
+
 
 def model_row(model: Any) -> dict[str, Any]:
     data = {column.name: getattr(model, column.name) for column in model.__table__.columns}
@@ -251,32 +300,143 @@ class LearningSpaceService:
             selected.append({**source, "prerequisites": [item for item in source["prerequisites"] if item in selected_codes]})
         return selected
 
-    async def scaffold(self, db: AsyncSession, project: LearningProject, track: str) -> None:
+    @staticmethod
+    def learning_meta(node: LearningKnowledgeNode | dict[str, Any]) -> dict[str, Any]:
+        refs = loads(node.source_refs_json, []) if isinstance(node, LearningKnowledgeNode) else node.get("source_refs", [])
+        return next((item for item in refs if item.get("type") == "learning_path_metadata"), {})
+
+    @staticmethod
+    def _fallback_concepts(description: str) -> list[str]:
+        parts = [
+            re.sub(r"^(以及|并且|及|与)", "", item).strip(" 。")
+            for item in re.split(r"[、，；;/]|(?:以及|并且)", description)
+        ]
+        return [item for item in parts if 2 <= len(item) <= 24][:4] or ["核心对象", "工作机制", "适用条件"]
+
+    @classmethod
+    def build_micro_nodes(cls, macros: list[dict[str, Any]], profile: dict[str, Any], target_level: str) -> list[dict[str, Any]]:
+        target = (profile.get("target_outcomes") or ["形成可验证成果"])[0]
+        max_depth = TARGET_DEPTH.get(target_level, 4)
+        terminal_codes: dict[str, str] = {}
+        by_parent: dict[str, list[dict[str, Any]]] = {}
+
+        for macro in macros:
+            concepts = MICRO_CONCEPT_OVERRIDES.get(macro["code"]) or cls._fallback_concepts(macro["description"])
+            steps: list[tuple[str, str, int, str]] = [
+                (
+                    f"{macro['title']}：对象、术语与边界",
+                    f"准确区分{macro['title']}中的研究对象、输入输出、核心术语和成立边界。",
+                    1,
+                    "用自己的话给出定义，并写出一个反例或不适用情形",
+                )
+            ]
+            for index, concept in enumerate(concepts[:4]):
+                depth = 2 if index < 2 else 3
+                steps.append((
+                    concept,
+                    f"只聚焦小知识点“{concept}”：说明它的输入、状态变化、输出和判断依据。",
+                    depth,
+                    f"完成一个只检验“{concept}”的最小例题、代码片段或推导步骤",
+                ))
+            steps.append((
+                f"{macro['title']}：最小验证",
+                f"把前述小知识点组合成一个最小可运行、可计算或可判分的验证样例。",
+                3,
+                "提交输入、过程、输出、期望结果和失败样例",
+            ))
+            steps.append((
+                f"{macro['title']}：目标场景迁移",
+                f"把已验证机制迁移到当前目标“{target}”，比较直接套用与调整后的差异。",
+                4,
+                "完成一个直接服务当前目标的变式任务并说明迁移边界",
+            ))
+            steps.append((
+                f"{macro['title']}：综合优化与开放问题",
+                f"围绕目标“{target}”分析性能、可靠性、复杂度或可解释性取舍，并提出可验证改进。",
+                5,
+                "给出基线、改进假设、评价指标和反证条件",
+            ))
+            steps = [item for item in steps if item[2] <= max_depth]
+            children: list[dict[str, Any]] = []
+            for index, (title, description, depth, evidence) in enumerate(steps):
+                code = macro["code"] if index == 0 else f"{macro['code']}--{index + 1:02d}"
+                children.append({
+                    "code": code,
+                    "parent_code": macro["code"],
+                    "title": title,
+                    "domain": macro["domain"],
+                    "description": description,
+                    "depth_level": depth,
+                    "depth_label": DEPTH_LABELS[depth],
+                    "evidence": evidence,
+                    "prerequisites": [],
+                })
+            by_parent[macro["code"]] = children
+            terminal_codes[macro["code"]] = children[-1]["code"]
+
+        result: list[dict[str, Any]] = []
+        for macro in macros:
+            children = by_parent[macro["code"]]
+            external = [terminal_codes[code] for code in macro["prerequisites"] if code in terminal_codes]
+            for index, child in enumerate(children):
+                child["prerequisites"] = external if index == 0 else [children[index - 1]["code"]]
+                result.append(child)
+        return result
+
+    async def scaffold(
+        self,
+        db: AsyncSession,
+        project: LearningProject,
+        track: str,
+        preserved_mastery: dict[str, tuple[float, str]] | None = None,
+    ) -> None:
         profile = self.direction_profile(project, track)
-        nodes = self.select_direction_nodes(track, profile)
+        macros = self.select_direction_nodes(track, profile)
+        nodes = self.build_micro_nodes(macros, profile, project.target_level)
         refs = [
             {"title": "ACM/IEEE-CS Computing Curricula 2023", "source": "ACM/IEEE-CS", "url": "https://csed.acm.org/"},
             {"title": "计算机科学学科包", "source": "EvoAgent 本地知识库", "knowledge_group": COMPUTER_PACK_GROUP},
         ]
         target = profile["target_outcomes"][0]
         for index, item in enumerate(nodes):
+            mastery_map = preserved_mastery or {}
+            if item["code"] in mastery_map:
+                mastery = round(float(mastery_map[item["code"]][0]), 1)
+            else:
+                parent_mastery = mastery_map.get(item["parent_code"], (0.0, "not_started"))
+                mastery = round(min(float(parent_mastery[0]), 70.0), 1)
+            state = "mastered" if mastery >= 80 else "learning" if mastery > 0 else "not_started"
+            metadata = {
+                "type": "learning_path_metadata",
+                "granularity": "micro",
+                "parent_code": item["parent_code"],
+                "depth_level": item["depth_level"],
+                "depth_label": item["depth_label"],
+                "evidence_requirement": item["evidence"],
+                "goal": target,
+            }
             db.add(LearningKnowledgeNode(
                 project_id=project.id,
                 code=item["code"],
                 title=item["title"],
                 domain=item["domain"],
-                description=f"面向“{project.name}”方向：{item['description']} 本节点用于支撑目标“{target}”，并产出可检查的学习或实践证据。",
+                description=f"面向“{project.name}”的当前目标“{target}”：{item['description']} 达标证据：{item['evidence']}。",
                 prerequisites_json=dumps(item["prerequisites"]),
-                source_refs_json=dumps(refs),
+                source_refs_json=dumps([*refs, metadata]),
                 order_index=index,
+                mastery=mastery,
+                status=state,
             ))
         previous = loads(project.settings_json, {})
         project.settings_json = dumps({
             **previous,
             "track": track,
-            "plan_version": 2,
-            "content_version": 2,
+            "plan_version": 3,
+            "content_version": 3,
+            "path_granularity": "micro_knowledge_point",
+            "target_depth": TARGET_DEPTH.get(project.target_level, 4),
             "personalized": True,
+            "direction_profile_stale": False,
             "usability_mode": "focused",
             "direction_profile": profile,
             "last_regenerated_at": datetime.now(timezone.utc).isoformat(),
@@ -318,13 +478,26 @@ class LearningSpaceService:
 
     async def rebuild_direction(self, db: AsyncSession, project: LearningProject, *, track: str | None, keep_memories: bool) -> dict[str, Any]:
         current_track = track or loads(project.settings_json, {}).get("track") or "计算机基础"
+        old_nodes = (await db.scalars(select(LearningKnowledgeNode).where(LearningKnowledgeNode.project_id == project.id))).all()
+        preserved_mastery: dict[str, tuple[float, str]] = {}
+        parent_buckets: dict[str, list[LearningKnowledgeNode]] = {}
+        for node in old_nodes:
+            preserved_mastery[node.code] = (node.mastery, node.status)
+            parent = self.learning_meta(node).get("parent_code")
+            if parent:
+                parent_buckets.setdefault(parent, []).append(node)
+        for parent, children in parent_buckets.items():
+            preserved_mastery[parent] = (
+                sum(item.mastery for item in children) / max(1, len(children)),
+                "learning" if any(item.mastery > 0 for item in children) else "not_started",
+            )
         # Explicit order is portable across SQLite and packaged desktop builds.
         for model in (LearningMistake, LearningAttempt, LearningQuestion, LearningTutorTurn, LearningTask, LearningAssessment, LearningKnowledgeNode):
             await db.execute(delete(model).where(model.project_id == project.id))
         if not keep_memories:
             await db.execute(delete(LearningMemory).where(LearningMemory.project_id == project.id))
         await db.flush()
-        await self.scaffold(db, project, current_track)
+        await self.scaffold(db, project, current_track, preserved_mastery=preserved_mastery)
         tasks = await self.generate_plan(db, project, regenerate=False, start_at=None, focus=[])
         return {"project": await self.project_payload(db, project), "tasks_generated": len(tasks), "memories_preserved": keep_memories}
 
@@ -350,10 +523,11 @@ class LearningSpaceService:
 
     async def workspace(self, db: AsyncSession, project: LearningProject) -> dict[str, Any]:
         settings = loads(project.settings_json, {})
-        if int(settings.get("content_version", 0) or 0) < 2:
+        if int(settings.get("content_version", 0) or 0) < 3 or settings.get("direction_profile_stale"):
             # One-time migration for directions created by the former generic
-            # scaffold.  User-authored memories are retained and immediately
-            # become part of the new direction workspace.
+            # scaffold. User-authored memories and prior mastery evidence are
+            # retained; broad-node mastery is conservatively capped when it is
+            # projected onto newly created micro knowledge points.
             await self.rebuild_direction(
                 db,
                 project,
@@ -386,6 +560,19 @@ class LearningSpaceService:
         if focus:
             selected = [node for node in nodes if node.id in focus or node.code in focus or node.domain in focus]
             nodes = selected or nodes
+        else:
+            initial_depth = min(
+                TARGET_DEPTH.get(project.target_level, 4),
+                max(1, CURRENT_DEPTH.get(project.current_level, 0) + 1),
+            )
+            active_nodes = [
+                node for node in nodes
+                if int(self.learning_meta(node).get("depth_level", 1)) <= initial_depth and node.mastery < 80
+            ]
+            # The plan is a rolling window over atomic points, not a dump of
+            # the entire curriculum. Replanning advances this window as the
+            # learner demonstrates mastery and deeper points unlock.
+            nodes = (active_nodes or nodes)[:12]
         start = start_at or datetime.now(timezone.utc)
         sessions_per_week = max(2, min(10, round(project.weekly_hours * 60 / 45)))
         profile = loads(project.settings_json, {}).get("direction_profile", {})

@@ -40,6 +40,42 @@ FIGURE_SKILL = {
 
 
 class AdvancedAcademicService:
+    TARGET_DEPTH = {"foundation": 2, "intermediate": 3, "proficient": 4, "advanced": 5}
+    CURRENT_DEPTH = {"beginner": 0, "foundation": 1, "intermediate": 2, "advanced": 3}
+    DEPTH_LABELS = {
+        1: "目标必备概念",
+        2: "核心机制拆解",
+        3: "方法与最小验证",
+        4: "目标场景迁移",
+        5: "综合优化与开放问题",
+    }
+
+    @staticmethod
+    def _learning_meta(node: LearningKnowledgeNode) -> dict[str, Any]:
+        return next(
+            (item for item in loads(node.source_refs_json, []) if item.get("type") == "learning_path_metadata"),
+            {},
+        )
+
+    @staticmethod
+    def _text_features(text: str) -> set[str]:
+        lowered = text.lower()
+        features = set(re.findall(r"[a-z0-9_+.#-]{2,}", lowered))
+        chinese = "".join(re.findall(r"[\u3400-\u9fff]", lowered))
+        features.update(chinese[index:index + 2] for index in range(max(0, len(chinese) - 1)))
+        return features - {"当前", "目标", "学习", "完成", "知识", "方向", "能够", "一个"}
+
+    @classmethod
+    def _goal_alignment(cls, project: LearningProject, node: LearningKnowledgeNode) -> int:
+        goal = cls._text_features(" ".join(filter(None, [project.target, project.name, project.description])))
+        candidate = cls._text_features(f"{node.title} {node.domain} {cls._learning_meta(node).get('parent_code', '')}")
+        if not goal or not candidate:
+            return 30
+        overlap = len(goal & candidate)
+        coverage = overlap / max(1, min(len(goal), len(candidate)))
+        direct = 1.0 if any(term in node.title.lower() for term in re.findall(r"[a-z0-9_+.#-]{2,}", project.target.lower())) else 0.0
+        return min(100, round(25 + 65 * coverage + 10 * direct))
+
     async def learning_diagnostic(self, db: AsyncSession, project: LearningProject) -> dict[str, Any]:
         nodes = (await db.scalars(select(LearningKnowledgeNode).where(LearningKnowledgeNode.project_id == project.id))).all()
         tasks = (await db.scalars(select(LearningTask).where(LearningTask.project_id == project.id))).all()
@@ -53,7 +89,7 @@ class AdvancedAcademicService:
         engagement = min(100.0, 12 * len(attempts) + 5 * len(memories) + completion * 0.45)
         overall = round(0.34 * mastery + 0.28 * accuracy + 0.20 * completion + 0.10 * correction + 0.08 * engagement, 1)
         level = "起步" if overall < 25 else "基础" if overall < 50 else "进阶" if overall < 75 else "熟练"
-        weak = sorted(nodes, key=lambda item: (item.mastery, item.order_index))[:5]
+        weak = sorted(nodes, key=lambda item: (item.mastery, -self._goal_alignment(project, item), item.order_index))[:5]
         now = datetime.now(timezone.utc)
         overdue = []
         for item in tasks:
@@ -65,7 +101,7 @@ class AdvancedAcademicService:
         profile = loads(project.settings_json, {}).get("direction_profile", {})
         actions = []
         if weak:
-            actions.append(f"优先巩固 {'、'.join(item.title for item in weak[:3])}，每个节点完成一次复述和一次方向变式练习。")
+            actions.append(f"优先巩固 {'、'.join(item.title for item in weak[:3])}，每个小知识点完成一次复述和一次目标变式练习。")
         if accuracy < 80:
             actions.append("练习正确率尚未达到 80%，先做错因归类，再按 1/3/7 天安排间隔复习。")
         if overdue:
@@ -86,27 +122,71 @@ class AdvancedAcademicService:
                 "learning_engagement": round(engagement, 1),
             },
             "evidence_counts": {"nodes": len(nodes), "tasks": len(tasks), "attempts": len(attempts), "mistakes": len(mistakes), "memories": len(memories)},
-            "gaps": [{"id": item.id, "code": item.code, "title": item.title, "domain": item.domain, "mastery": item.mastery} for item in weak],
+            "gaps": [{
+                "id": item.id,
+                "code": item.code,
+                "title": item.title,
+                "domain": item.domain,
+                "mastery": item.mastery,
+                "depth_level": int(self._learning_meta(item).get("depth_level", 1)),
+                "goal_alignment": self._goal_alignment(project, item),
+            } for item in weak],
             "pace": {"weekly_hours": project.weekly_hours, "overdue_tasks": len(overdue), "deadline": project.deadline, "status": "需要重排" if overdue else "正常"},
             "recommended_actions": actions,
-            "limitations": "诊断依据当前任务、作答、错题和节点掌握度计算；没有作答时分数主要反映学习过程覆盖，不替代教师评价。",
+            "limitations": "诊断按原子知识点计算，并依据当前目标、任务、作答、错题和掌握度更新；没有作答时仅是初始估计，不替代教师评价。",
         }
 
     async def learning_path(self, db: AsyncSession, project: LearningProject) -> dict[str, Any]:
         diagnostic = await self.learning_diagnostic(db, project)
         nodes = (await db.scalars(select(LearningKnowledgeNode).where(LearningKnowledgeNode.project_id == project.id).order_by(LearningKnowledgeNode.order_index))).all()
         code_map = {item.code: item for item in nodes}
-        current_id = next((item.id for item in nodes if item.mastery < 80 and all(code_map.get(code) is None or code_map[code].mastery >= 60 for code in loads(item.prerequisites_json, []))), nodes[0].id if nodes else "")
+        target_depth = self.TARGET_DEPTH.get(project.target_level, 4)
+        baseline_depth = max(1, self.CURRENT_DEPTH.get(project.current_level, 0) + 1)
+        overall = float(diagnostic["overall_score"])
+        evidence_depth = 1 if overall < 25 else 2 if overall < 50 else 3 if overall < 75 else 4 if overall < 90 else 5
+        active_depth = min(target_depth, max(baseline_depth, evidence_depth))
+
+        candidates: list[tuple[int, float, int, LearningKnowledgeNode]] = []
+        for item in nodes:
+            metadata = self._learning_meta(item)
+            depth = int(metadata.get("depth_level", 1))
+            unlocked = all(code_map.get(code) is None or code_map[code].mastery >= 60 for code in loads(item.prerequisites_json, []))
+            if item.mastery < 80 and unlocked and depth <= active_depth:
+                candidates.append((-self._goal_alignment(project, item), item.mastery, item.order_index, item))
+        candidates.sort(key=lambda entry: entry[:3])
+        current_id = candidates[0][3].id if candidates else (nodes[0].id if nodes else "")
         visual_nodes = []
         for item in nodes:
             prerequisites = loads(item.prerequisites_json, [])
             unlocked = all(code_map.get(code) is None or code_map[code].mastery >= 60 for code in prerequisites)
-            state = "mastered" if item.mastery >= 80 else "current" if item.id == current_id else "ready" if unlocked else "locked"
+            metadata = self._learning_meta(item)
+            depth = int(metadata.get("depth_level", 1))
+            depth_open = depth <= active_depth
+            state = "mastered" if item.mastery >= 80 else "current" if item.id == current_id else "ready" if unlocked and depth_open else "locked"
+            alignment = self._goal_alignment(project, item)
+            reason = (
+                "掌握度已达到 80%，保留为后续小知识点的先修证据"
+                if state == "mastered" else
+                f"与当前目标匹配度 {alignment}%，且先修证据已满足，作为本轮最优先知识点"
+                if state == "current" else
+                f"当前学习深度为 {active_depth} 级，本知识点属于 {depth} 级，需先用新证据解锁"
+                if not depth_open else
+                "先修小知识点尚未达到 60% 掌握度"
+                if not unlocked else
+                f"已解锁；目标匹配度 {alignment}%，可在当前重点后学习"
+            )
             visual_nodes.append({
                 "id": item.id, "code": item.code, "label": item.title, "domain": item.domain,
                 "description": item.description, "mastery": item.mastery, "state": state,
                 "order": item.order_index, "resources": loads(item.source_refs_json, []),
-                "recommended_action": "完成方向综合任务" if state == "current" else "先完成前置节点" if state == "locked" else "复习并完成变式题" if state == "mastered" else "进入学习与练习",
+                "parent_code": metadata.get("parent_code", item.code),
+                "granularity": metadata.get("granularity", "micro"),
+                "depth_level": depth,
+                "depth_label": metadata.get("depth_label", self.DEPTH_LABELS.get(depth, "目标知识点")),
+                "goal_alignment": alignment,
+                "adaptation_reason": reason,
+                "evidence_requirement": metadata.get("evidence_requirement", "完成一次可检查练习"),
+                "recommended_action": metadata.get("evidence_requirement", "完成一次可检查练习") if state == "current" else "先完成前置小知识点" if state == "locked" else "用变式题复核" if state == "mastered" else "进入讲解和最小练习",
             })
         edges = []
         for item in nodes:
@@ -114,17 +194,25 @@ class AdvancedAcademicService:
                 source = code_map.get(prerequisite)
                 if source:
                     edges.append({"source": source.id, "target": item.id, "type": "prerequisite", "label": "先修"})
-        domains: dict[str, list[str]] = defaultdict(list)
+        depth_stages: dict[int, list[str]] = defaultdict(list)
         for item in visual_nodes:
-            domains[item["domain"]].append(item["id"])
+            depth_stages[item["depth_level"]].append(item["id"])
+        current_node = next((item for item in visual_nodes if item["id"] == current_id), None)
         return {
-            "title": f"{project.name}个性化学习路径",
-            "subtitle": "路径由方向画像、先修关系、实时掌握度、作答证据和学习进度共同决定",
+            "title": f"{project.name}目标驱动学习路径",
+            "subtitle": "路径细化到可讲解、可练习、可测量的原子知识点，并随学习证据自动调整",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "diagnostic": diagnostic,
+            "goal": project.target or project.name,
+            "target_level": project.target_level,
+            "target_depth": target_depth,
+            "active_depth": active_depth,
+            "depth_progress": round(100 * active_depth / max(1, target_depth)),
+            "adaptive_summary": f"当前开放到第 {active_depth}/{target_depth} 层；优先选择目标匹配度高、先修已满足且掌握度不足的原子知识点。",
+            "next_checkpoint": current_node["evidence_requirement"] if current_node else "完成一次诊断练习以刷新路径",
             "nodes": visual_nodes,
             "edges": edges,
-            "stages": [{"name": name, "node_ids": ids} for name, ids in domains.items()],
+            "stages": [{"name": self.DEPTH_LABELS.get(depth, f"第 {depth} 层"), "depth_level": depth, "node_ids": depth_stages[depth]} for depth in sorted(depth_stages)],
             "current_node_id": current_id,
             "resource_policy": "资源优先来自当前计算机学科包；每个节点保留来源名称和链接。",
         }

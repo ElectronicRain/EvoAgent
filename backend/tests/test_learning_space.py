@@ -51,8 +51,8 @@ def test_computer_subject_pack_and_complete_learning_loop(client):
     assert created.status_code == 201, created.text
     project = created.json()
     project_id = project["id"]
-    assert project["counts"]["nodes"] == 12
-    assert project["counts"]["questions"] == 12
+    assert project["counts"]["nodes"] >= 36
+    assert project["counts"]["questions"] == project["counts"]["nodes"]
     assert len(project["agent_bindings"]) == 6
     assert len(project["workflow_bindings"]) == 2
     assert len(project["knowledge_base_ids"]) == 3
@@ -205,9 +205,11 @@ def test_each_learning_direction_generates_distinct_content_and_can_rebuild(clie
     assert {"operating-systems", "concurrency", "architecture"} <= systems_codes
     assert len(web_codes ^ systems_codes) >= 6
     assert web_space["project"]["settings"]["personalized"] is True
-    assert web_space["project"]["settings"]["content_version"] == 2
+    assert web_space["project"]["settings"]["content_version"] == 3
+    assert web_space["project"]["settings"]["path_granularity"] == "micro_knowledge_point"
     assert web_space["project"]["settings"]["direction_profile"]["signature"] != systems_space["project"]["settings"]["direction_profile"]["signature"]
     assert all("Web 全栈电商系统开发" in item["description"] for item in web_space["nodes"])
+    assert all(any(ref.get("granularity") == "micro" for ref in item["source_refs"]) for item in web_space["nodes"])
     assert all("Web 全栈电商系统开发" in item["prompt"] for item in web_space["questions"])
     assert all("操作系统与并发编程备考" in item["prompt"] for item in systems_space["questions"])
 

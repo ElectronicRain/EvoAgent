@@ -1287,10 +1287,13 @@ async def update_learning_project(
     project = await learning_space_service.access(db, project_id, user)
     updates = payload.model_dump(exclude_unset=True)
     settings_update = updates.pop("settings", None)
+    path_inputs_changed = bool({"name", "project_type", "description", "target", "current_level", "target_level", "weekly_hours", "deadline"} & set(updates))
     for key, value in updates.items():
         setattr(project, key, value)
-    if settings_update is not None:
-        project.settings_json = dumps({**loads(project.settings_json, {}), **settings_update})
+    settings = {**loads(project.settings_json, {}), **(settings_update or {})}
+    if path_inputs_changed:
+        settings["direction_profile_stale"] = True
+    project.settings_json = dumps(settings)
     await audit(db, "learning_project.updated", "learning_project", project.id, {"fields": list(payload.model_fields_set)}, actor=user.username)
     return await learning_space_service.project_payload(db, project)
 

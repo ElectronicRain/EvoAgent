@@ -55,6 +55,15 @@ def test_personalized_diagnostic_path_companion_and_traceable_qa(client):
     assert path_response.status_code == 200, path_response.text
     path = path_response.json()
     assert len(path["nodes"]) == diagnosis["evidence_counts"]["nodes"]
+    assert path["goal"] == "能推导复杂度、调试实现并解释算法适用边界。"
+    assert path["target_depth"] == 5
+    assert 1 <= path["active_depth"] <= path["target_depth"]
+    assert path["next_checkpoint"]
+    assert {item["granularity"] for item in path["nodes"]} == {"micro"}
+    assert all(item["depth_level"] >= 1 for item in path["nodes"])
+    assert all(0 <= item["goal_alignment"] <= 100 for item in path["nodes"])
+    assert all(item["adaptation_reason"] for item in path["nodes"])
+    assert all("depth_level" in stage for stage in path["stages"])
     assert path["current_node_id"]
     assert {item["state"] for item in path["nodes"]} <= {
         "mastered", "current", "ready", "locked"
