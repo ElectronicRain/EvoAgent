@@ -7,6 +7,7 @@ import math
 import re
 import secrets
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -41,6 +42,15 @@ from .models import (
     KnowledgeIngestionJob,
     KnowledgeProviderConfig,
     KnowledgeSource,
+    LearningAssessment,
+    LearningAttempt,
+    LearningKnowledgeNode,
+    LearningMemory,
+    LearningMistake,
+    LearningProject,
+    LearningQuestion,
+    LearningTask,
+    LearningTutorTurn,
     ModelEndpoint,
     ResearchComment,
     ResearchArtifact,
@@ -95,6 +105,21 @@ from .schemas import (
     KnowledgeSearchRequest,
     KnowledgeDocumentUpdate,
     KnowledgeSourceUpdate,
+    LearningAssessmentGenerate,
+    LearningAttemptCreate,
+    LearningBindingsUpdate,
+    LearningCompanionRequest,
+    LearningDirectionRegenerate,
+    LearningMemoryCreate,
+    LearningMistakeUpdate,
+    LearningPathReplan,
+    LearningPlanGenerate,
+    LearningProjectCreate,
+    LearningProjectUpdate,
+    LearningQuestionCreate,
+    LearningTaskCreate,
+    LearningTaskUpdate,
+    LearningTutorChat,
     WebKnowledgeSourceCreate,
     DatabaseKnowledgeSourceCreate,
     APIKnowledgeSourceCreate,
@@ -106,6 +131,8 @@ from .schemas import (
     ResearchCommentUpdate,
     ResearchExperimentCreate,
     ResearchExperimentUpdate,
+    ResearchFigureGenerate,
+    ResearchFrontierTrack,
     ResearchIdeaChat,
     ResearchIdeaCreate,
     ResearchIdeaUpdate,
@@ -147,6 +174,8 @@ from .services.common import audit, dumps, loads
 from .services.evolution import evolution_service
 from .services.extensions import extension_service
 from .services.knowledge import knowledge_service
+from .services.learning_space import learning_space_service
+from .services.advanced_academic import advanced_academic_service
 from .services.knowledge_processing import extract_sections
 from .services.knowledge_sources import knowledge_source_service
 from .services.knowledge_vector import EmbeddingClient, RerankClient, get_knowledge_config
@@ -1185,6 +1214,494 @@ async def review_research_source(
     return row(item)
 
 
+@router.get("/learning-subject-packs/computer-science")
+async def get_computer_learning_subject_pack(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await require_user(db, authorization)
+    return await learning_space_service.subject_pack(db)
+
+
+@router.get("/learning-projects")
+async def list_learning_projects(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    projects = (
+        await db.scalars(
+            select(LearningProject)
+            .where(LearningProject.owner_id == user.id)
+            .order_by(desc(LearningProject.updated_at))
+        )
+    ).all()
+    return [await learning_space_service.project_payload(db, item) for item in projects]
+
+
+@router.post("/learning-projects", status_code=201)
+async def create_learning_project(
+    payload: LearningProjectCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    pack = await learning_space_service.subject_pack(db)
+    agent_bindings, workflow_bindings = learning_space_service.default_bindings(pack)
+    data = payload.model_dump()
+    track = data.pop("track")
+    item = LearningProject(
+        owner_id=user.id,
+        **data,
+        knowledge_group_id=pack["group"]["id"],
+        knowledge_base_ids_json=dumps([base["id"] for base in pack["knowledge_bases"]]),
+        agent_bindings_json=dumps(agent_bindings),
+        workflow_bindings_json=dumps(workflow_bindings),
+    )
+    db.add(item)
+    await db.flush()
+    await learning_space_service.scaffold(db, item, track)
+    await audit(db, "learning_project.created", "learning_project", item.id, {"track": track}, actor=user.username)
+    return await learning_space_service.project_payload(db, item)
+
+
+@router.get("/learning-projects/{project_id}")
+async def get_learning_project(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    return await learning_space_service.project_payload(db, project)
+
+
+@router.patch("/learning-projects/{project_id}")
+async def update_learning_project(
+    project_id: str,
+    payload: LearningProjectUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    updates = payload.model_dump(exclude_unset=True)
+    settings_update = updates.pop("settings", None)
+    for key, value in updates.items():
+        setattr(project, key, value)
+    if settings_update is not None:
+        project.settings_json = dumps({**loads(project.settings_json, {}), **settings_update})
+    await audit(db, "learning_project.updated", "learning_project", project.id, {"fields": list(payload.model_fields_set)}, actor=user.username)
+    return await learning_space_service.project_payload(db, project)
+
+
+@router.delete("/learning-projects/{project_id}", status_code=204)
+async def delete_learning_project(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    await db.delete(project)
+    await audit(db, "learning_project.deleted", "learning_project", project_id, actor=user.username)
+    return Response(status_code=204)
+
+
+@router.get("/learning-projects/{project_id}/workspace")
+async def get_learning_workspace(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    return await learning_space_service.workspace(db, project)
+
+
+@router.get("/learning-projects/{project_id}/diagnostic")
+async def get_learning_diagnostic(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    return await advanced_academic_service.learning_diagnostic(db, project)
+
+
+@router.get("/learning-projects/{project_id}/personalized-path")
+async def get_personalized_learning_path(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    return await advanced_academic_service.learning_path(db, project)
+
+
+@router.post("/learning-projects/{project_id}/personalized-path/replan")
+async def replan_personalized_learning_path(
+    project_id: str,
+    payload: LearningPathReplan,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    tasks = await learning_space_service.generate_plan(
+        db,
+        project,
+        regenerate=payload.regenerate_plan,
+        start_at=payload.start_at,
+        focus=payload.focus,
+    )
+    path = await advanced_academic_service.learning_path(db, project)
+    await audit(
+        db,
+        "learning_path.replanned",
+        "learning_project",
+        project.id,
+        {"tasks": len(tasks), "focus": payload.focus, "diagnostic": path["diagnostic"]["overall_score"]},
+        actor=user.username,
+    )
+    return {
+        "path": path,
+        "tasks": [learning_space_service.model_row(item) for item in tasks],
+    }
+
+
+@router.get("/learning-projects/{project_id}/personal-space")
+async def get_learning_personal_space(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    settings_data = loads(project.settings_json, {})
+    memories = (
+        await db.scalars(
+            select(LearningMemory)
+            .where(LearningMemory.project_id == project.id)
+            .order_by(desc(LearningMemory.updated_at))
+        )
+    ).all()
+    diagnostic = await advanced_academic_service.learning_diagnostic(db, project)
+    return {
+        "project": await learning_space_service.project_payload(db, project),
+        "direction_profile": settings_data.get("direction_profile", {}),
+        "preferences": settings_data.get("learning_preferences", {
+            "explanation_depth": "step_by_step",
+            "mentor_style": "socratic",
+            "session_minutes": 45,
+            "resource_format": "mixed",
+        }),
+        "diagnostic": diagnostic,
+        "memory_summary": {
+            "total": len(memories),
+            "locked": sum(item.locked for item in memories),
+            "categories": dict(Counter(item.category for item in memories)),
+            "recent": [row(item) for item in memories[:6]],
+        },
+    }
+
+
+@router.post("/learning-projects/{project_id}/companion/session")
+async def create_learning_companion_session(
+    project_id: str,
+    payload: LearningCompanionRequest,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    result = await advanced_academic_service.companion_session(
+        db, project, payload.minutes, payload.mood, payload.goal
+    )
+    await audit(
+        db,
+        "learning_companion.session_created",
+        "learning_project",
+        project.id,
+        {"minutes": payload.minutes, "mood": payload.mood},
+        actor=user.username,
+    )
+    return result
+
+
+@router.post("/learning-projects/{project_id}/direction/regenerate")
+async def regenerate_learning_direction(
+    project_id: str,
+    payload: LearningDirectionRegenerate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    result = await learning_space_service.rebuild_direction(
+        db, project, track=payload.track, keep_memories=payload.keep_memories
+    )
+    await audit(
+        db,
+        "learning_direction.regenerated",
+        "learning_project",
+        project.id,
+        {
+            "track": payload.track or loads(project.settings_json, {}).get("track"),
+            "keep_memories": payload.keep_memories,
+            "direction_signature": loads(project.settings_json, {}).get("direction_profile", {}).get("signature"),
+        },
+        actor=user.username,
+    )
+    return result
+
+
+@router.put("/learning-projects/{project_id}/bindings")
+async def update_learning_bindings(
+    project_id: str,
+    payload: LearningBindingsUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    for agent_id in payload.agents.values():
+        if agent_id and not await db.get(AgentDefinition, agent_id):
+            raise HTTPException(status_code=422, detail=f"Agent 不存在：{agent_id}")
+    for workflow_id in payload.workflows.values():
+        if workflow_id and not await db.get(Workflow, workflow_id):
+            raise HTTPException(status_code=422, detail=f"工作流不存在：{workflow_id}")
+    project.agent_bindings_json = dumps({**loads(project.agent_bindings_json, {}), **payload.agents})
+    project.workflow_bindings_json = dumps({**loads(project.workflow_bindings_json, {}), **payload.workflows})
+    if payload.knowledge_base_ids is not None:
+        known = set((await db.scalars(select(KnowledgeBase.id).where(KnowledgeBase.id.in_(payload.knowledge_base_ids)))).all())
+        if known != set(payload.knowledge_base_ids):
+            raise HTTPException(status_code=422, detail="绑定中包含不存在的知识库")
+        project.knowledge_base_ids_json = dumps(payload.knowledge_base_ids)
+    if payload.knowledge_group_id is not None:
+        if payload.knowledge_group_id and not await db.get(KnowledgeBaseGroup, payload.knowledge_group_id):
+            raise HTTPException(status_code=422, detail="知识库分组不存在")
+        project.knowledge_group_id = payload.knowledge_group_id or None
+    await audit(db, "learning_project.bindings_updated", "learning_project", project.id, actor=user.username)
+    return await learning_space_service.project_payload(db, project)
+
+
+@router.post("/learning-projects/{project_id}/plan/generate")
+async def generate_learning_plan(
+    project_id: str,
+    payload: LearningPlanGenerate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    items = await learning_space_service.generate_plan(db, project, regenerate=payload.regenerate, start_at=payload.start_at, focus=payload.focus)
+    await audit(db, "learning_plan.generated", "learning_project", project.id, {"tasks": len(items)}, actor=user.username)
+    return [learning_space_service.model_row(item) if hasattr(learning_space_service, "model_row") else row(item) for item in items]
+
+
+@router.post("/learning-projects/{project_id}/tasks", status_code=201)
+async def create_learning_task(
+    project_id: str,
+    payload: LearningTaskCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    if payload.knowledge_node_id:
+        node = await db.get(LearningKnowledgeNode, payload.knowledge_node_id)
+        if not node or node.project_id != project.id:
+            raise HTTPException(status_code=422, detail="知识节点不属于当前学习方向")
+    item = LearningTask(project_id=project.id, source="user", **payload.model_dump())
+    db.add(item)
+    await db.flush()
+    return row(item)
+
+
+@router.patch("/learning-projects/{project_id}/tasks/{task_id}")
+async def update_learning_task(
+    project_id: str,
+    task_id: str,
+    payload: LearningTaskUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    item = await db.get(LearningTask, task_id)
+    if not item or item.project_id != project_id:
+        raise not_found("学习任务")
+    updates = payload.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        setattr(item, key, value)
+    if updates.get("status") == "completed" and "progress" not in updates:
+        item.progress = 100
+    await audit(db, "learning_task.updated", "learning_task", item.id, {"status": item.status}, actor=user.username)
+    return row(item)
+
+
+@router.post("/learning-projects/{project_id}/tutor")
+async def chat_learning_tutor(
+    project_id: str,
+    payload: LearningTutorChat,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    if payload.knowledge_node_id:
+        node = await db.get(LearningKnowledgeNode, payload.knowledge_node_id)
+        if not node or node.project_id != project.id:
+            raise HTTPException(status_code=422, detail="知识节点不属于当前学习方向")
+    item = await learning_space_service.tutor(db, project, user, **payload.model_dump())
+    await audit(db, "learning_tutor.replied", "learning_project", project.id, {"mode": payload.mode, "citations": len(loads(item.citations_json, []))}, actor=user.username)
+    return learning_space_service.model_row(item) if hasattr(learning_space_service, "model_row") else research_row(item)
+
+
+@router.post("/learning-projects/{project_id}/questions", status_code=201)
+async def create_learning_question(
+    project_id: str,
+    payload: LearningQuestionCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    if payload.knowledge_node_id:
+        node = await db.get(LearningKnowledgeNode, payload.knowledge_node_id)
+        if not node or node.project_id != project.id:
+            raise HTTPException(status_code=422, detail="知识节点不属于当前学习方向")
+    data = payload.model_dump()
+    item = LearningQuestion(
+        project_id=project.id,
+        knowledge_node_id=data.pop("knowledge_node_id"),
+        question_type=data.pop("question_type"),
+        prompt=data.pop("prompt"),
+        difficulty=data.pop("difficulty"),
+        options_json=dumps(data.pop("options")),
+        answer_json=dumps(data.pop("answer")),
+        rubric_json=dumps(data.pop("rubric")),
+        source_refs_json=dumps(data.pop("source_refs")),
+        generated_by_agent_id=loads(project.agent_bindings_json, {}).get("practice") or None,
+    )
+    db.add(item)
+    await db.flush()
+    return learning_space_service.model_row(item) if hasattr(learning_space_service, "model_row") else row(item)
+
+
+@router.post("/learning-projects/{project_id}/attempts", status_code=201)
+async def submit_learning_attempt(
+    project_id: str,
+    payload: LearningAttemptCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    question = await db.get(LearningQuestion, payload.question_id)
+    if not question or question.project_id != project.id:
+        raise not_found("练习题")
+    attempt, mistake = await learning_space_service.submit_attempt(db, project, question, payload.answer, payload.agent_id or loads(project.agent_bindings_json, {}).get("review"))
+    await audit(db, "learning_attempt.graded", "learning_attempt", attempt.id, {"score": attempt.score, "correct": attempt.is_correct}, actor=user.username)
+    return {"attempt": learning_space_service.model_row(attempt) if hasattr(learning_space_service, "model_row") else row(attempt), "mistake": row(mistake) if mistake else None, "question": learning_space_service.model_row(question) if hasattr(learning_space_service, "model_row") else row(question)}
+
+
+@router.patch("/learning-projects/{project_id}/mistakes/{mistake_id}")
+async def update_learning_mistake(
+    project_id: str,
+    mistake_id: str,
+    payload: LearningMistakeUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    item = await db.get(LearningMistake, mistake_id)
+    if not item or item.project_id != project_id:
+        raise not_found("错题记录")
+    if payload.correction is not None:
+        item.correction = payload.correction
+    if payload.status is not None:
+        item.status = payload.status
+    if payload.reviewed:
+        item.review_count += 1
+        delays = [1, 3, 7, 14, 30]
+        item.next_review_at = datetime.now(timezone.utc) + timedelta(days=delays[min(item.review_count, len(delays)) - 1])
+        if item.review_count >= 3 and item.status == "reviewing":
+            item.status = "mastered"
+    await audit(db, "learning_mistake.updated", "learning_mistake", item.id, {"status": item.status, "reviews": item.review_count}, actor=user.username)
+    return row(item)
+
+
+@router.post("/learning-projects/{project_id}/memories", status_code=201)
+async def create_learning_memory(
+    project_id: str,
+    payload: LearningMemoryCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    item = LearningMemory(project_id=project_id, **payload.model_dump())
+    db.add(item)
+    await db.flush()
+    return row(item)
+
+
+@router.delete("/learning-projects/{project_id}/memories/{memory_id}", status_code=204)
+async def delete_learning_memory(
+    project_id: str,
+    memory_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    item = await db.get(LearningMemory, memory_id)
+    if not item or item.project_id != project_id:
+        raise not_found("学习记忆")
+    await db.delete(item)
+    return Response(status_code=204)
+
+
+@router.post("/learning-projects/{project_id}/assessments", status_code=201)
+async def generate_learning_assessment(
+    project_id: str,
+    payload: LearningAssessmentGenerate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    item = await learning_space_service.assess(db, project, payload.period)
+    await audit(db, "learning_assessment.generated", "learning_assessment", item.id, {"score": item.overall_score}, actor=user.username)
+    return learning_space_service.model_row(item) if hasattr(learning_space_service, "model_row") else row(item)
+
+
+@router.post("/learning-projects/{project_id}/workflow/run")
+async def run_learning_workflow(
+    project_id: str,
+    payload: WorkflowRunRequest,
+    module: str = Query(default="learning_loop"),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    workflow_id = loads(project.workflow_bindings_json, {}).get(module)
+    if not workflow_id:
+        raise HTTPException(status_code=422, detail="当前模块未绑定工作流")
+    try:
+        item = await workflow_engine.run(db, workflow_id, {**payload.input, "learning_project_id": project.id, "learning_target": project.target})
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit(db, "learning_workflow.started", "workflow_run", item.id, {"module": module}, actor=user.username)
+    return row(item)
+
+
 @router.get("/research-projects")
 async def list_research_projects(
     authorization: str | None = Header(default=None),
@@ -1595,6 +2112,170 @@ async def create_research_figure(
     db.add(item)
     await db.flush()
     return {**research_row(item), "figure": figure}
+
+
+@router.get("/research-projects/{project_id}/frontier")
+async def list_research_frontier_snapshots(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    return await advanced_academic_service.list_artifacts(db, project_id, ["frontier-snapshot"])
+
+
+@router.post("/research-projects/{project_id}/frontier/track", status_code=201)
+async def track_research_frontier(
+    project_id: str,
+    payload: ResearchFrontierTrack,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    query = payload.query.strip() or project.research_question or project.description or project.name
+    refresh_error = ""
+    if payload.refresh:
+        current_year = datetime.now(timezone.utc).year
+        try:
+            await research_project_service.search_literature(
+                db,
+                project,
+                user,
+                query,
+                payload.target_count,
+                current_year - payload.recent_years + 1,
+                current_year,
+            )
+        except Exception as exc:  # 保留本地题录降级能力，错误在结果中明确呈现。
+            refresh_error = str(exc)
+    result = await advanced_academic_service.frontier_snapshot(
+        db, project, user, query, payload.recent_years
+    )
+    result["refresh"] = {
+        "requested": payload.refresh,
+        "succeeded": not refresh_error,
+        "error": refresh_error,
+    }
+    await audit(
+        db,
+        "research.frontier.tracked",
+        "research_project",
+        project.id,
+        {"query": query, "sources": len(result["sources"]), "refresh_error": refresh_error},
+        actor=user.username,
+    )
+    return result
+
+
+@router.get("/research-projects/{project_id}/data-assets")
+async def list_research_data_assets(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    items = await advanced_academic_service.list_artifacts(
+        db, project_id, ["research-dataset", "publication-figure"]
+    )
+    for item in items:
+        payload_data = item.get("payload", {})
+        records = payload_data.pop("records", None)
+        if records is not None:
+            payload_data["sample"] = records[:20]
+            payload_data["stored_record_count"] = len(records)
+    return items
+
+
+@router.post("/research-projects/{project_id}/data-assets/upload", status_code=201)
+async def upload_research_dataset(
+    project_id: str,
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    filename = PurePosixPath((file.filename or "dataset.csv").replace("\\", "/")).name
+    suffix = filename.lower().rsplit(".", 1)[-1]
+    if suffix not in {"csv", "tsv", "json"}:
+        raise HTTPException(status_code=422, detail="科研数据仅支持 CSV、TSV 和 JSON")
+    data = await file.read(8_000_001)
+    result = await advanced_academic_service.store_dataset(db, project, user, filename, data)
+    await audit(
+        db,
+        "research.dataset.uploaded",
+        "research_project",
+        project.id,
+        {"filename": filename, "rows": result["profile"]["rows"], "fields": len(result["fields"])},
+        actor=user.username,
+    )
+    return result
+
+
+@router.post("/research-projects/{project_id}/figures", status_code=201)
+async def generate_research_publication_figure(
+    project_id: str,
+    payload: ResearchFigureGenerate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project, _ = await research_project_service.access(db, project_id, user, "editor")
+    dataset = await db.get(ResearchArtifact, payload.dataset_id)
+    if not dataset or dataset.project_id != project_id or dataset.kind != "research-dataset":
+        raise not_found("科研数据集")
+    result = await advanced_academic_service.create_publication_figure(
+        db, project, user, dataset, payload.model_dump()
+    )
+    await audit(
+        db,
+        "research.figure.generated",
+        "research_project",
+        project.id,
+        {"dataset_id": dataset.id, "chart_type": result["spec"]["chart_type"]},
+        actor=user.username,
+    )
+    return result
+
+
+@router.get("/research-projects/{project_id}/figures/{artifact_id}/svg")
+async def get_research_publication_figure_svg(
+    project_id: str,
+    artifact_id: str,
+    download: bool = Query(default=False),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user)
+    item = await db.get(ResearchArtifact, artifact_id)
+    if not item or item.project_id != project_id or item.kind != "publication-figure":
+        raise not_found("论文图表")
+    payload_data = loads(item.content, {})
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="figure-{item.id}.svg"'
+    return Response(content=payload_data.get("svg", ""), media_type="image/svg+xml", headers=headers)
+
+
+@router.delete("/research-projects/{project_id}/data-assets/{artifact_id}", status_code=204)
+async def delete_research_data_asset(
+    project_id: str,
+    artifact_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    user = await require_user(db, authorization)
+    await research_project_service.access(db, project_id, user, "editor")
+    item = await db.get(ResearchArtifact, artifact_id)
+    if not item or item.project_id != project_id or item.kind not in {"research-dataset", "publication-figure"}:
+        raise not_found("科研数据资产")
+    await db.delete(item)
+    await audit(db, "research.data_asset.deleted", "research_project", project_id, {"kind": item.kind}, actor=user.username)
+    return Response(status_code=204)
 
 
 @router.get("/research-projects/{project_id}/ideas")

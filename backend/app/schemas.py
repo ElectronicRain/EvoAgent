@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -641,6 +642,29 @@ class ResearchLiteratureSearch(BaseModel):
     year_to: int | None = Field(default=None, ge=1800, le=2200)
 
 
+class ResearchFrontierTrack(BaseModel):
+    query: str = Field(default="", max_length=4000)
+    recent_years: int = Field(default=3, ge=1, le=15)
+    target_count: int = Field(default=20, ge=3, le=80)
+    refresh: bool = True
+
+
+class ResearchFigureGenerate(BaseModel):
+    dataset_id: str
+    argument: str = Field(min_length=2, max_length=4000)
+    chart_type: Literal[
+        "auto", "strip", "scatter", "correlation", "histogram", "bar",
+        "pie", "3d", "dual_y", "jet",
+    ] = "auto"
+    x: str = Field(default="", max_length=240)
+    y: str = Field(default="", max_length=240)
+    group: str = Field(default="", max_length=240)
+    title: str = Field(default="", max_length=500)
+    journal: Literal[
+        "general", "nature", "science", "ieee", "elsevier", "pnas", "chinese_core"
+    ] = "general"
+
+
 class ResearchIdeaCreate(BaseModel):
     title: str = Field(min_length=2, max_length=240)
     problem: str = Field(default="", max_length=20_000)
@@ -790,3 +814,125 @@ class ResearchReviewItemUpdate(BaseModel):
 class ResearchPresenceUpdate(BaseModel):
     page: str = Field(default="overview", max_length=80)
     cursor: dict[str, Any] = Field(default_factory=dict)
+
+
+class LearningProjectCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    project_type: Literal["course", "exam", "skill", "topic", "project"] = "course"
+    discipline: str = Field(default="计算机科学", max_length=100)
+    description: str = Field(default="", max_length=20_000)
+    target: str = Field(default="", max_length=20_000)
+    current_level: Literal["beginner", "foundation", "intermediate", "advanced"] = "beginner"
+    target_level: Literal["foundation", "intermediate", "proficient", "advanced"] = "proficient"
+    weekly_hours: float = Field(default=6, ge=1, le=80)
+    deadline: datetime | None = None
+    track: str = Field(default="计算机基础", max_length=100)
+
+
+class LearningProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    project_type: Literal["course", "exam", "skill", "topic", "project"] | None = None
+    description: str | None = Field(default=None, max_length=20_000)
+    target: str | None = Field(default=None, max_length=20_000)
+    current_level: Literal["beginner", "foundation", "intermediate", "advanced"] | None = None
+    target_level: Literal["foundation", "intermediate", "proficient", "advanced"] | None = None
+    weekly_hours: float | None = Field(default=None, ge=1, le=80)
+    deadline: datetime | None = None
+    stage: Literal["planning", "learning", "practice", "review", "completed"] | None = None
+    status: Literal["active", "archived"] | None = None
+    settings: dict[str, Any] | None = None
+
+
+class LearningBindingsUpdate(BaseModel):
+    agents: dict[str, str] = Field(default_factory=dict)
+    workflows: dict[str, str] = Field(default_factory=dict)
+    knowledge_base_ids: list[str] | None = None
+    knowledge_group_id: str | None = None
+
+
+class LearningPlanGenerate(BaseModel):
+    regenerate: bool = False
+    start_at: datetime | None = None
+    focus: list[str] = Field(default_factory=list, max_length=30)
+
+
+class LearningPathReplan(BaseModel):
+    regenerate_plan: bool = True
+    start_at: datetime | None = None
+    focus: list[str] = Field(default_factory=list, max_length=30)
+
+
+class LearningCompanionRequest(BaseModel):
+    minutes: int = Field(default=45, ge=10, le=180)
+    mood: Literal["focused", "normal", "tired", "stressed"] = "normal"
+    goal: str = Field(default="", max_length=2000)
+
+
+class LearningDirectionRegenerate(BaseModel):
+    track: str | None = Field(default=None, max_length=100)
+    keep_memories: bool = True
+
+
+class LearningTaskCreate(BaseModel):
+    knowledge_node_id: str | None = None
+    module: Literal["learn", "practice", "review", "assessment", "project"] = "learn"
+    title: str = Field(min_length=2, max_length=240)
+    description: str = Field(default="", max_length=10_000)
+    scheduled_for: datetime | None = None
+    duration_minutes: int = Field(default=45, ge=5, le=480)
+    priority: int = Field(default=3, ge=1, le=5)
+
+
+class LearningTaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=240)
+    description: str | None = Field(default=None, max_length=10_000)
+    scheduled_for: datetime | None = None
+    duration_minutes: int | None = Field(default=None, ge=5, le=480)
+    priority: int | None = Field(default=None, ge=1, le=5)
+    progress: int | None = Field(default=None, ge=0, le=100)
+    status: Literal["pending", "in_progress", "completed", "skipped"] | None = None
+
+
+class LearningTutorChat(BaseModel):
+    message: str = Field(min_length=1, max_length=12_000)
+    mode: Literal["socratic", "explain", "examiner", "debug", "feynman", "sprint"] = "socratic"
+    knowledge_node_id: str | None = None
+    agent_id: str | None = None
+
+
+class LearningQuestionCreate(BaseModel):
+    knowledge_node_id: str | None = None
+    question_type: Literal[
+        "single_choice", "multiple_choice", "true_false", "fill", "short_answer", "code"
+    ] = "single_choice"
+    prompt: str = Field(min_length=2, max_length=20_000)
+    options: list[str] = Field(default_factory=list, max_length=20)
+    answer: dict[str, Any] = Field(default_factory=dict)
+    rubric: dict[str, Any] = Field(default_factory=dict)
+    difficulty: int = Field(default=2, ge=1, le=5)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+
+
+class LearningAttemptCreate(BaseModel):
+    question_id: str
+    answer: Any
+    agent_id: str | None = None
+
+
+class LearningMistakeUpdate(BaseModel):
+    correction: str | None = Field(default=None, max_length=20_000)
+    status: Literal["open", "reviewing", "mastered"] | None = None
+    reviewed: bool = False
+
+
+class LearningMemoryCreate(BaseModel):
+    category: Literal["concept", "misconception", "method", "note", "question", "preference"] = "note"
+    content: str = Field(min_length=2, max_length=20_000)
+    source_type: str = Field(default="user", max_length=50)
+    source_id: str | None = Field(default=None, max_length=36)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    locked: bool = False
+
+
+class LearningAssessmentGenerate(BaseModel):
+    period: Literal["current", "weekly", "stage", "final"] = "current"

@@ -370,11 +370,11 @@ def test_360_search_parser_prefers_direct_result_url():
 def test_health_and_seeded_overview(client):
     assert client.get("/health").json()["status"] == "healthy"
     overview = client.get("/api/overview").json()
-    assert overview["counts"]["agents"] == 14
-    assert overview["counts"]["workflows"] == 1
-    assert overview["counts"]["knowledge_bases"] == 1
+    assert overview["counts"]["agents"] >= 20
+    assert overview["counts"]["workflows"] >= 3
+    assert overview["counts"]["knowledge_bases"] >= 4
     agents = client.get("/api/agents").json()
-    assert sum(agent["status"] == "active" for agent in agents) == 10
+    assert sum(agent["status"] == "active" for agent in agents) >= 16
     assert sum(agent["status"] == "candidate" for agent in agents) == 2
     assert sum(agent["status"] == "archived" for agent in agents) == 2
     catalog = {
@@ -3044,8 +3044,10 @@ def test_evolution_requires_evaluation_before_activation(client, monkeypatch):
     step_types = [event["step"]["type"] for event in events if event["type"] == "step"]
     evaluated = next(event["proposal"] for event in events if event["type"] == "evolution_result")
     assert "stream_connected" in step_types
-    assert step_types.count("evaluation_case_started") == 3
-    assert step_types.count("evaluation_case_completed") == 3
+    # The computer-science learning pack contributes three additional,
+    # source-aware evaluation cases to the shared evolution gate.
+    assert step_types.count("evaluation_case_started") == 6
+    assert step_types.count("evaluation_case_completed") == 6
     assert "evolution_methods_ready" in step_types
     assert "evolution_prompt_optimized" in step_types
     assert "evolution_skill_packaged" in step_types

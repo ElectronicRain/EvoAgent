@@ -510,6 +510,186 @@ class ResearchPresence(TimestampMixin, Base):
     cursor_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class LearningProject(TimestampMixin, Base):
+    __tablename__ = "learning_projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    project_type: Mapped[str] = mapped_column(String(40), default="course", index=True)
+    discipline: Mapped[str] = mapped_column(String(100), default="计算机科学")
+    description: Mapped[str] = mapped_column(Text, default="")
+    target: Mapped[str] = mapped_column(Text, default="")
+    current_level: Mapped[str] = mapped_column(String(30), default="beginner")
+    target_level: Mapped[str] = mapped_column(String(30), default="proficient")
+    weekly_hours: Mapped[float] = mapped_column(Float, default=6.0)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stage: Mapped[str] = mapped_column(String(30), default="planning", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    knowledge_group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_base_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    knowledge_base_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    agent_bindings_json: Mapped[str] = mapped_column(Text, default="{}")
+    workflow_bindings_json: Mapped[str] = mapped_column(Text, default="{}")
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class LearningKnowledgeNode(TimestampMixin, Base):
+    __tablename__ = "learning_knowledge_nodes"
+    __table_args__ = (UniqueConstraint("project_id", "code"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    code: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    domain: Mapped[str] = mapped_column(String(100), default="计算机基础", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    prerequisites_json: Mapped[str] = mapped_column(Text, default="[]")
+    source_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+    mastery: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(30), default="not_started", index=True)
+
+
+class LearningTask(TimestampMixin, Base):
+    __tablename__ = "learning_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    knowledge_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_knowledge_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    module: Mapped[str] = mapped_column(String(40), default="learn", index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=45)
+    priority: Mapped[int] = mapped_column(Integer, default=3)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    source: Mapped[str] = mapped_column(String(40), default="learning_plan")
+
+
+class LearningTutorTurn(TimestampMixin, Base):
+    __tablename__ = "learning_tutor_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    knowledge_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_knowledge_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), default="user", index=True)
+    mode: Mapped[str] = mapped_column(String(30), default="socratic")
+    content: Mapped[str] = mapped_column(Text)
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class LearningQuestion(TimestampMixin, Base):
+    __tablename__ = "learning_questions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    knowledge_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_knowledge_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    generated_by_agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    question_type: Mapped[str] = mapped_column(String(30), default="single_choice", index=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    options_json: Mapped[str] = mapped_column(Text, default="[]")
+    answer_json: Mapped[str] = mapped_column(Text, default="{}")
+    rubric_json: Mapped[str] = mapped_column(Text, default="{}")
+    difficulty: Mapped[int] = mapped_column(Integer, default=2, index=True)
+    source_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+
+
+class LearningAttempt(TimestampMixin, Base):
+    __tablename__ = "learning_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_questions.id", ondelete="CASCADE"), index=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    answer_json: Mapped[str] = mapped_column(Text, default="{}")
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    feedback: Mapped[str] = mapped_column(Text, default="")
+    error_type: Mapped[str] = mapped_column(String(50), default="")
+    rubric_result_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class LearningMistake(TimestampMixin, Base):
+    __tablename__ = "learning_mistakes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_attempts.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    knowledge_node_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_knowledge_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    cause: Mapped[str] = mapped_column(Text, default="")
+    correction: Mapped[str] = mapped_column(Text, default="")
+    review_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+
+
+class LearningMemory(TimestampMixin, Base):
+    __tablename__ = "learning_memories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(50), default="concept", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(50), default="user")
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class LearningAssessment(TimestampMixin, Base):
+    __tablename__ = "learning_assessments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    period: Mapped[str] = mapped_column(String(30), default="current", index=True)
+    overall_score: Mapped[float] = mapped_column(Float, default=0.0)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    recommendations_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
 class Workflow(TimestampMixin, Base):
     __tablename__ = "workflows"
 

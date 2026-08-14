@@ -4,11 +4,11 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-2.0.0-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-2.1.0-1769c2)](#windows-桌面端)
 
-EvoAgent V2.0.0 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖 Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
+EvoAgent V2.1.0 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖科研空间、学习空间、Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
 
-V2 科研应用层已经完整接入：以科研项目为数据边界，支持多人文献研究、参考文献关联图谱、Idea 探索、项目记忆与 Skill、实验承接、LaTeX 协作写作/批改/渲染、版本管理和多角色模拟审稿。后续“教”和“学”应用层可复用同一套项目资源、协作权限与可信知识能力。
+V2 科研与学习应用层已经完整接入：科研空间支持多人文献研究、领域前沿追踪、参考文献关联、科研数据分析、论文图表、Idea 探索、项目记忆与 Skill、实验承接、LaTeX 协作写作/批改/渲染、版本管理和多角色模拟审稿；学习空间支持方向独立画像、动态路径、可追溯知识讲解、导师/学伴陪伴、练习错题闭环与个性化空间。各应用统一复用项目资源、Agent 工厂、工作流、计算机学科包与可信知识能力。
 
 当前内置“教育学科研证据链”示范场景，可替换成医学、法学、经济学、计算机等学科包。
 
@@ -40,6 +40,9 @@ cd EvoAgent
 ## 已实现能力
 
 - 科研项目中心：新增独立“科研空间”，按课题统一管理研究问题、学科、预期成果、引用格式、文献、Idea、记忆、实验、论文和审稿轮次；支持负责人、项目管理员、共同作者、审稿者和只读成员五级角色，并可绑定已有 Agent、知识库、工作流、会话、成果和 Skill。
+- 学习空间：面向计算机基础、程序设计和人工智能方向，提供方向独立建档与画像、五维学习诊断、先修关系可视化、动态个性化路径和资源推送；知识问答覆盖公式推导、代码调试和概念辨析，按“澄清—前置知识—分步讲解—验证/反例—迁移练习”提供带来源解释；导师/学伴按学习状态生成理解—练习—复盘闭环，并结合错题归因、间隔复习、学习记忆和个人偏好持续调整。
+- 领域前沿追踪：按项目研究问题自动检索近期论文，形成题录内热点、增长主题、时间趋势和“参考文献—主题”关联图；每个节点保留题名、年份、DOI、原文链接、来源与可信度，界面明确区分项目内相对指标和全领域结论。
+- 科研数据与论文图表：本地导入 CSV、TSV 或 JSON 后完成字段类型、缺失率、描述统计、相关性、数据质量警告和结论边界分析；图表工作台遵循 SciPilot Figure Skill 的“数据画像—论证目标—图型选择—期刊规范—视觉自检—矢量导出”流程，使用白底、色觉友好配色和 SVG，自动拦截饼图、3D、双 Y 轴、彩虹色等不适合学术论证的表达。
 - 智能文献研究：复用 Crossref、Google Scholar 入口、可信度评分和联网访问中心，形成项目级候选/纳入/重点/排除文献集合；仅使用已纳入文献生成带 `[文献 N]` 的综述、主题脉络、方法脉络、争议与研究空白。可生成白底黑字、携带原始 source ID 的学术关系图。
 - Idea 实验室：采用一问一答的苏格拉底式探索，逐轮检查新颖性、可证伪性、数据可得性、方法匹配和反例；Idea 卡片保存研究空白、假设、创新点、方法、证据与评分，可一键转换为包含变量、数据集、基线、指标、消融、随机种子、重复次数和统计检验的实验方案。
 - 科研记忆与实验：项目记忆保存类型、来源、置信度与锁定状态；从已确认记忆生成的 Skill 默认禁用且处于待验证状态，继续复用可信 Skill 门禁。实验记录保存 Idea 版本、设计参数、运行状态、指标、异常和结论。
@@ -84,8 +87,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-.tmp/tauri-target-2.0.0-portable/release/bundle/nsis/EvoAgent_2.0.0_x64-setup.exe
-.tmp/tauri-target-2.0.0-portable/release/bundle/msi/EvoAgent_2.0.0_x64_en-US.msi
+.tmp/tauri-target-2.1.0-portable/release/bundle/nsis/EvoAgent_2.1.0_x64-setup.exe
+.tmp/tauri-target-2.1.0-portable/release/bundle/msi/EvoAgent_2.1.0_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -202,9 +205,9 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **V2.0.0**。源码构建后，主程序和安装包位于 `.tmp/tauri-target-2.0.0-portable/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **V2.1.0**。源码构建后，主程序和安装包位于 `.tmp/tauri-target-2.1.0-portable/release/`，本地客户端安装目标位于 `frontend/src-tauri/target/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
 
-V2.0.0 在 V1 的 Agent 工厂、RAG、工作流和可信 Skill 基础上，新增完整科研应用层、LaTeX 多文件写作与内置渲染、参考文献关系图谱、科研专家 Agent、实时模拟审稿、多人协作和自动更新发布链路。V2 的版本号已在 Python 包、后端 API、前端界面、Tauri 配置、Rust 包和安装包中保持一致。
+V2.1.0 源码现已包含完整学习空间、计算机科学学科包、领域前沿追踪与科研数据/论文图表工作台。学习端包含动态路径、知识问答、学习陪伴、练习批改、错题复习、学习记忆、个性化空间和量化评测；科研端可用可追溯题录形成热点趋势，并按 SciPilot 方法生成白底、色觉友好、矢量优先的论文图表。上述模块与 Agent 工厂、工作流、RAG 和智能评测共用底层能力。
 
 ### 签名更新发布
 

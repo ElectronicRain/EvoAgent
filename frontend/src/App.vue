@@ -6,6 +6,7 @@ import {
   LayoutDashboard, LoaderCircle, LockKeyhole, PanelLeftClose, PanelLeftOpen, ScanFace,
   ShieldCheck, Sparkles, UserRound, RefreshCw,
   Microscope,
+  GraduationCap,
 } from 'lucide-vue-next'
 import AuthGate from './components/AuthGate.vue'
 import UpdateDialog from './components/UpdateDialog.vue'
@@ -30,6 +31,7 @@ const navGroups = [
     items: [
       { to: '/', label: '运行总览', icon: LayoutDashboard },
       { to: '/research', label: '科研空间', icon: Microscope },
+      { to: '/learning', label: '学习空间', icon: GraduationCap },
     ],
   },
   {

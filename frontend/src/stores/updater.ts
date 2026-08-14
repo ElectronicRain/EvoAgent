@@ -10,15 +10,9 @@ export type UpdateInfo = {
 
 const AUTO_CHECK_KEY = 'evoagent-update-auto-check'
 const SKIPPED_VERSION_KEY = 'evoagent-update-skipped-version'
-const LATEST_RELEASE_API = 'https://api.github.com/repos/ElectronicRain/EvoAgent/releases/latest'
-
-function compareVersions(left: string, right: string) {
-  const normalize = (value: string) => value.replace(/^v/i, '').split(/[.+-]/).slice(0, 3).map(part => Number(part) || 0)
-  const [a, b] = [normalize(left), normalize(right)]
-  for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1
-  }
-  return 0
+const UPDATE_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'EvoAgent-Desktop-Updater',
 }
 
 export const useUpdaterStore = defineStore('updater', {
@@ -33,7 +27,7 @@ export const useUpdaterStore = defineStore('updater', {
     error: '',
     sourceNote: '',
     lastCheckedAt: '',
-    installedVersion: '2.0.0',
+    installedVersion: '2.1.0',
     automaticCheck: window.localStorage.getItem(AUTO_CHECK_KEY) !== 'false',
     skippedVersion: window.localStorage.getItem(SKIPPED_VERSION_KEY) || '',
     pendingUpdate: null as any,
@@ -55,31 +49,29 @@ export const useUpdaterStore = defineStore('updater', {
       } catch { /* Browser preview keeps the packaged fallback version. */ }
       return this.installedVersion
     },
-    async checkReleaseFallback() {
+    async loadSystemProxy() {
       try {
-        const response = await fetch(LATEST_RELEASE_API, {
-          cache: 'no-store',
-          headers: { Accept: 'application/vnd.github+json' },
-        })
-        this.lastCheckedAt = new Date().toISOString()
-        if (response.status === 404) {
-          this.error = ''
-          this.sourceNote = `GitHub 当前尚未发布更高版本；EvoAgent V${this.installedVersion} 已是最新正式版本。`
-          return true
+        const { invoke } = await import('@tauri-apps/api/core')
+        return await invoke<string | null>('system_update_proxy')
+      } catch { return null }
+    },
+    async checkWithNetworkPaths() {
+      const { check } = await import('@tauri-apps/plugin-updater')
+      const proxy = await this.loadSystemProxy()
+      const paths = proxy ? [{ proxy }, {}] : [{}]
+      let lastError: unknown = null
+      for (const path of paths) {
+        try {
+          return await check({
+            ...path,
+            headers: UPDATE_HEADERS,
+            timeout: 15_000,
+          })
+        } catch (error) {
+          lastError = error
         }
-        if (!response.ok) return false
-        const release = await response.json()
-        const latestVersion = String(release?.tag_name || release?.name || '').replace(/^v/i, '')
-        if (!latestVersion) return false
-        if (compareVersions(latestVersion, this.installedVersion) <= 0) {
-          this.error = ''
-          this.sourceNote = `已核对 GitHub Release，EvoAgent V${this.installedVersion} 是最新正式版本。`
-        } else {
-          this.error = `发现正式版本 V${latestVersion}，但发布方尚未上传可验证的桌面更新清单。请稍后重试。`
-          this.sourceNote = ''
-        }
-        return true
-      } catch { return false }
+      }
+      throw lastError || new Error('官方更新源连接失败')
     },
     async check(manual = false) {
       if (this.checking || this.downloading) return this.update
@@ -88,9 +80,8 @@ export const useUpdaterStore = defineStore('updater', {
       this.sourceNote = ''
       await this.loadInstalledVersion()
       try {
-        const { check } = await import('@tauri-apps/plugin-updater')
         this.supported = true
-        const result = await check({ timeout: 20_000 })
+        const result = await this.checkWithNetworkPaths()
         this.lastCheckedAt = new Date().toISOString()
         if (!result) {
           this.update = null
@@ -117,15 +108,9 @@ export const useUpdaterStore = defineStore('updater', {
           this.error = '浏览器开发模式不执行桌面更新；请在 EvoAgent Windows 客户端中检查。'
         } else {
           this.supported = true
-          // Tauri/WebView2 会因系统语言、TLS 和插件版本返回不同错误文本，
-          // 因此桌面更新源失败后统一进入 GitHub Release 二次核验，不依赖错误字符串。
-          const handled = await this.checkReleaseFallback()
-          if (handled) {
-            if (manual) this.dialogOpen = true
-            return null
-          }
-          this.error = ''
-          this.sourceNote = `EvoAgent V${this.installedVersion} 是当前安装包标记的最新正式版本；本次未能连接 GitHub 发布源，联网后可重新核验。`
+          const concise = message.replace(/^.*?:\s*/, '').slice(0, 180)
+          this.error = `暂时无法连接官方更新源。已尝试 Windows 系统代理和直连${concise ? `：${concise}` : '，请检查网络或代理后重试。'}`
+          this.sourceNote = ''
         }
         if (manual) this.dialogOpen = true
         return null

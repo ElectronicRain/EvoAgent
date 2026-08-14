@@ -12,6 +12,8 @@ from .models import (
     EvaluationCase,
     Extension,
     KnowledgeBase,
+    KnowledgeBaseGroup,
+    KnowledgeBaseGroupMember,
     Skill,
     Workflow,
     WorkflowRun,
@@ -482,6 +484,33 @@ async def ensure_builtin_agent_catalog(
             "skills": skill_ids("研究问题与实验设计", "数据隐私与科研伦理", "结构化成果交付"),
         },
         {
+            "name": "领域前沿追踪专家",
+            "slug": "research-frontier-tracker",
+            "status": "active",
+            "group": "research",
+            "description": "持续检索近期论文与研究动态，形成可追溯的热点图谱、时间趋势和证据边界。",
+            "system_prompt": (
+                "你是领域前沿追踪专家。围绕项目研究问题构造近期检索式，保留题名、年份、DOI、"
+                "来源和可信度；热点与增长趋势必须说明统计时间窗、样本范围和推断限制，不用题录频次冒充全领域引用影响力。"
+            ),
+            "tools": ["web_research", "read_file", "search_files", "exec"],
+            "skills": skill_ids("学术可信回答", "引用与事实核验", "结构化成果交付"),
+        },
+        {
+            "name": "科研数据与论文图表专家",
+            "slug": "research-data-figure-specialist",
+            "status": "active",
+            "group": "specialist",
+            "description": "完成数据画像、质量检查、统计洞察与期刊风格论文图表，保留分析依据和图表质量门禁。",
+            "system_prompt": (
+                "你是科研数据与论文图表专家。遵循 SciPilot Figure Skill 的数据画像—论证目标—图型选择—"
+                "期刊规范—视觉自检—矢量导出流程；不伪造数据，不使用 3D、彩虹色、双 Y 轴和误导性小样本均值柱，"
+                "明确缺失值、样本量、相关与因果边界，并给出可复现的图注信息。"
+            ),
+            "tools": ["list_directory", "read_file", "search_files", "write_file", "exec"],
+            "skills": skill_ids("学术可信回答", "研究问题与实验设计", "数据隐私与科研伦理", "结构化成果交付"),
+        },
+        {
             "name": "LaTeX 学术写作专家",
             "slug": "research-latex-writing-specialist",
             "status": "active",
@@ -610,6 +639,213 @@ async def ensure_builtin_agent_catalog(
     await db.flush()
 
 
+async def ensure_computer_learning_subject_pack(
+    db,
+    agent_groups: dict[str, AgentGroup],
+    builtin_skills: dict[str, Skill],
+) -> None:
+    """Install the local computer-science pack without changing user resources."""
+    group = await db.scalar(
+        select(KnowledgeBaseGroup).where(KnowledgeBaseGroup.name == "计算机科学学科包")
+    )
+    if not group:
+        group = KnowledgeBaseGroup(
+            name="计算机科学学科包",
+            description="面向计算机基础、程序设计、软件工程、人工智能学习的本地权威知识组合。",
+            color="#1769c2",
+        )
+        db.add(group)
+        await db.flush()
+
+    base_definitions = [
+        (
+            "计算机基础与 408 知识库",
+            "数据结构、计算机组成原理、操作系统和计算机网络的核心概念与学习规范。",
+            [
+                (
+                    "计算机科学课程体系与能力结构",
+                    "ACM/IEEE-CS Computing Curricula 2023 · https://csed.acm.org/",
+                    "ACM 与 IEEE-CS 的 Computing Curricula 2023 强调，计算机教育需要同时覆盖知识、技能和职业能力。学习设计应明确先修关系，并通过编程、分析、设计、评价与综合实践证明能力，而不只记录阅读时长。\n\nEvoAgent 学习空间据此把学习过程拆为知识节点、可执行任务、形成性练习、错题订正和阶段评测。每项生成内容保留来源标签；无法由资料确认的内容应标为推断或待核验。",
+                ),
+                (
+                    "数据结构与算法核心规范",
+                    "Cormen et al., Introduction to Algorithms, MIT Press",
+                    "算法分析关注输入规模与时间、空间资源之间的增长关系。渐近记号用于描述增长上界、下界或紧确界，不能替代对常数、输入分布和实现环境的分析。\n\n数据结构的选择应由操作需求驱动：数组适合随机访问，链式结构适合局部插入删除，散列表追求期望常数时间查找，树与图用于表达层次和一般关系。作答时应同时说明正确性、复杂度、边界条件与反例。",
+                ),
+                (
+                    "操作系统的抽象、并发与虚拟化",
+                    "Arpaci-Dusseau, Operating Systems: Three Easy Pieces · https://pages.cs.wisc.edu/~remzi/OSTEP/",
+                    "操作系统通过进程、地址空间和文件等抽象管理硬件资源。并发问题需要识别共享状态、临界区、原子性、互斥和同步条件；只给出锁并不能自动证明程序无死锁或无竞态。\n\n虚拟内存把进程使用的虚拟地址映射到物理内存，并通过页表、TLB 和页面置换在隔离、容量与性能之间权衡。分析系统问题应明确事件顺序、状态变化和失败边界。",
+                ),
+                (
+                    "分层网络与可靠传输",
+                    "Kurose & Ross, Computer Networking: A Top-Down Approach",
+                    "网络分层用于控制复杂度，各层通过明确接口提供服务。IP 提供尽力而为的数据报服务；TCP 在其上提供面向连接的可靠字节流，并包含序号、确认、重传、流量控制与拥塞控制等机制。\n\n排查网络问题时应从应用、传输、网络和链路层逐层验证，区分域名解析、连接建立、路由、丢包、服务端状态和应用协议错误。",
+                ),
+            ],
+        ),
+        (
+            "编程与软件工程知识库",
+            "程序设计、调试测试、版本控制、需求设计和协作交付规范。",
+            [
+                (
+                    "Python 语言与程序行为",
+                    "Python 3 官方文档 · https://docs.python.org/3/",
+                    "Python 程序设计应区分名称、对象、可变性、作用域、迭代协议和异常控制流。代码答案需要说明输入输出、类型假设、边界条件与异常行为，并尽可能给出可运行的最小示例。\n\n调试应先稳定复现，再缩小问题范围，提出可证伪假设，进行最小修改并执行回归测试。不得仅凭错误表象直接修改多个无关位置。",
+                ),
+                (
+                    "软件工程、测试与协作交付",
+                    "SWEBOK Guide, IEEE Computer Society · https://www.computer.org/education/bodies-of-knowledge/software-engineering",
+                    "软件工程覆盖需求、设计、构造、测试、维护、配置管理、质量与工程管理。可验收需求应描述对象、场景、约束和成功标准；设计需要记录关键取舍与风险。\n\n测试至少应区分单元、集成、系统和验收层次。版本控制提交应保持目标单一、信息清晰和可追溯；代码审查关注正确性、安全性、可维护性、测试充分性与文档一致性。",
+                ),
+                (
+                    "数据库事务与数据可靠性",
+                    "Silberschatz et al., Database System Concepts",
+                    "关系数据库使用关系模型组织数据，主键标识记录，外键表达参照关系。索引可以减少部分查询的搜索代价，但会增加存储与写入维护成本。\n\n事务的 ACID 特性分别涉及原子性、一致性、隔离性和持久性。并发控制需要结合隔离级别分析脏读、不可重复读、幻读等现象，不能把应用层校验当作完整事务保障。",
+                ),
+            ],
+        ),
+        (
+            "人工智能与数据科学知识库",
+            "机器学习、深度学习、RAG、实验评测与可信 AI 的基础知识。",
+            [
+                (
+                    "机器学习实验与量化评测",
+                    "James et al., An Introduction to Statistical Learning · https://www.statlearning.com/",
+                    "机器学习实验需要先定义任务、数据分布、目标指标和基线。训练集用于参数学习，验证集用于模型选择，测试集用于最终泛化估计；反复依据测试集调参会导致信息泄漏。\n\n报告结果时应给出样本规模、数据划分、随机种子、指标定义、基线、方差或置信区间，并进行错误分析。单一准确率不足以描述类别不平衡任务的表现。",
+                ),
+                (
+                    "检索增强生成与来源追溯",
+                    "Lewis et al., Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks, NeurIPS 2020",
+                    "RAG 先从外部知识集合检索与问题相关的证据，再将证据作为生成上下文。系统质量应分别评估检索召回、排序、上下文覆盖、回答正确性、引用完整性与忠实度。\n\n生成答案必须把结论与证据对应起来，保留文档、片段或链接标识。检索不到证据时应明确说明知识缺口，不能使用模型记忆伪造来源。",
+                ),
+                (
+                    "可信 AI 风险管理",
+                    "NIST AI Risk Management Framework 1.0 · https://www.nist.gov/itl/ai-risk-management-framework",
+                    "NIST AI RMF 将可信 AI 风险管理组织为 Govern、Map、Measure 和 Manage。具体应用应识别使用情境、影响对象、数据与模型限制，建立量化测量、人工监督、事件记录和持续改进机制。\n\n教育场景中的 AI 输出不能替代教师或学习者的最终判断。高风险建议、学术结论和评价结果需要展示依据、置信度、限制与人工复核入口。",
+                ),
+            ],
+        ),
+    ]
+
+    bases: list[KnowledgeBase] = []
+    for name, description, documents in base_definitions:
+        base = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.name == name))
+        if not base:
+            base = KnowledgeBase(name=name, discipline="计算机科学", description=description)
+            db.add(base)
+            await db.flush()
+        else:
+            base.description = description
+        bases.append(base)
+        member = await db.scalar(
+            select(KnowledgeBaseGroupMember).where(
+                KnowledgeBaseGroupMember.group_id == group.id,
+                KnowledgeBaseGroupMember.knowledge_base_id == base.id,
+            )
+        )
+        if not member:
+            db.add(KnowledgeBaseGroupMember(group_id=group.id, knowledge_base_id=base.id))
+        for title, source, content in documents:
+            await knowledge_service.add_document(
+                db,
+                base.id,
+                title=title,
+                source=source,
+                content=content,
+                metadata={"subject_pack": "computer-science", "authority": True},
+            )
+    await db.flush()
+
+    skill_ids = [
+        builtin_skills[name].id
+        for name in ("学术可信回答", "引用与事实核验", "结构化成果交付")
+    ]
+    agent_definitions = [
+        ("learning-planner", "计算机学习规划 Agent", "orchestration", "把学习目标、基础水平、可用时间和截止日期转化为具有先修关系、练习与复习节奏的可执行计划。"),
+        ("learning-socratic-tutor", "计算机苏格拉底辅导 Agent", "specialist", "通过连续追问帮助学习者澄清概念、暴露推理缺口，并使用学科包证据提供分层提示。"),
+        ("learning-practice-designer", "计算机练习设计 Agent", "specialist", "依据知识节点、掌握度和学习目标生成选择、简答、代码与综合实践题，并附标准答案与量化评分规程。"),
+        ("learning-answer-reviewer", "计算机作答批改 Agent", "review", "按标准答案、关键步骤、边界条件、复杂度和代码测试结果量化批改，区分概念错误与表达遗漏。"),
+        ("learning-mistake-diagnostician", "计算机错题诊断 Agent", "review", "归因错题、提出最小补救材料和 1/3/7 天间隔复习任务，跟踪订正是否真正迁移。"),
+        ("learning-assessment-coach", "计算机学习评测 Agent", "review", "综合任务完成度、练习正确率、知识掌握度、错题订正率和覆盖度生成可解释学习报告。"),
+    ]
+    agents: dict[str, AgentDefinition] = {}
+    for slug, name, group_key, purpose in agent_definitions:
+        agent = await db.scalar(select(AgentDefinition).where(AgentDefinition.slug == slug))
+        prompt = (
+            f"你是{name}。{purpose}所有事实性回答优先使用绑定的计算机学科知识库，"
+            "结论必须给出来源标签；资料不足时明确说明待核验，不得编造定义、标准、文献或运行结果。"
+            "反馈应简洁友好，结合上下文消解歧义，并通过追问确认学习者真实理解。"
+        )
+        if not agent:
+            agent = AgentDefinition(
+                group_id=agent_groups[group_key].id,
+                name=name,
+                slug=slug,
+                description=purpose,
+                system_prompt=prompt,
+                provider="demo",
+                model="demo-model",
+                temperature=0.2,
+                tools_json=dumps(["read_file", "search_files", "exec"]),
+                skills_json=dumps(skill_ids),
+                knowledge_bases_json=dumps([base.id for base in bases]),
+                permissions_json=dumps({"tool_mode": "ask"}),
+                status="active",
+                is_template=True,
+            )
+            db.add(agent)
+            await db.flush()
+        agents[slug] = agent
+
+    workflow_definitions = [
+        (
+            "计算机学习闭环工作流",
+            "规划—辅导—练习—批改—评测的学习闭环，可由学习空间直接调用。",
+            [
+                ("plan", "学习规划", "learning-planner", "请根据学习任务制定可执行计划：{{input.task}}"),
+                ("tutor", "概念辅导", "learning-socratic-tutor", "围绕任务进行循序辅导：{{nodes.plan.output}}"),
+                ("practice", "练习设计", "learning-practice-designer", "根据辅导内容设计练习：{{nodes.tutor.output}}"),
+                ("review", "作答核验", "learning-answer-reviewer", "核验计划和练习是否明确、正确、可评分：{{nodes.practice.output}}"),
+            ],
+        ),
+        (
+            "计算机错题强化工作流",
+            "错因诊断—补救练习—掌握度评测的间隔复习闭环。",
+            [
+                ("diagnose", "错因诊断", "learning-mistake-diagnostician", "分析该错题的知识缺口：{{input.task}}"),
+                ("practice", "变式练习", "learning-practice-designer", "依据错因生成由浅入深的变式题：{{nodes.diagnose.output}}"),
+                ("assess", "掌握评测", "learning-assessment-coach", "给出量化验收标准和复习节奏：{{nodes.practice.output}}"),
+            ],
+        ),
+    ]
+    for name, description, steps in workflow_definitions:
+        workflow = await db.scalar(select(Workflow).where(Workflow.name == name))
+        if workflow:
+            continue
+        nodes: list[dict] = [{"id": "input", "type": "input", "label": "学习任务输入"}]
+        edges: list[dict] = []
+        previous = "input"
+        for node_id, label, slug, prompt in steps:
+            nodes.append({"id": node_id, "type": "agent", "label": label, "config": {"agent_id": agents[slug].id, "input": prompt}})
+            edges.append({"source": previous, "target": node_id})
+            previous = node_id
+        nodes.append({"id": "output", "type": "output", "label": "学习结果", "config": {"value": "{{nodes.%s.output}}" % previous}})
+        edges.append({"source": previous, "target": "output"})
+        db.add(Workflow(name=name, description=description, definition_json=dumps({"nodes": nodes, "edges": edges})))
+
+    existing_cases = set((await db.scalars(select(EvaluationCase.name).where(EvaluationCase.discipline == "计算机科学"))).all())
+    cases = [
+        ("算法复杂度概念测试", "解释 O(n log n) 与 O(n²) 的增长差异，并说明为何渐近复杂度不等于实际运行时间。", ["增长", "输入规模", "常数"], "quality"),
+        ("操作系统并发安全测试", "两个线程修改共享计数器时为什么可能丢失更新？给出可验证的解决思路。", ["竞态", "临界区", "互斥"], "quality"),
+        ("RAG 来源追溯测试", "说明检索增强生成的基本流程、评测指标和检索不到证据时的处理方式。", ["检索", "引用", "待核验"], "evidence"),
+    ]
+    for name, input_text, keywords, category in cases:
+        if name not in existing_cases:
+            db.add(EvaluationCase(name=name, discipline="计算机科学", category=category, input_text=input_text, expected_keywords_json=dumps(keywords), requires_citation=True, weight=1.5))
+    await db.flush()
+
+
 async def seed_demo_data() -> None:
     async with session_scope() as db:
         await recover_stale_runs(db)
@@ -627,6 +863,7 @@ async def seed_demo_data() -> None:
                         tools.append("web_research")
                 agent.tools_json = dumps(tools)
             await ensure_builtin_agent_catalog(db, agent_groups, builtin_skills)
+            await ensure_computer_learning_subject_pack(db, agent_groups, builtin_skills)
             await ensure_online_agent_bindings(db)
             await upgrade_workflow_runtime_contracts(db)
             return
@@ -788,6 +1025,7 @@ async def seed_demo_data() -> None:
         db.add_all([planner, researcher, reviewer])
         await db.flush()
         await ensure_builtin_agent_catalog(db, agent_groups, builtin_skills)
+        await ensure_computer_learning_subject_pack(db, agent_groups, builtin_skills)
 
         workflow = Workflow(
             name="教育学科研证据链工作流",

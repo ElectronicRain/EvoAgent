@@ -6,6 +6,9 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
+#[cfg(windows)]
+use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
 struct BackendProcess(Mutex<Option<CommandChild>>);
 
 #[derive(Serialize)]
@@ -21,6 +24,38 @@ struct SelectedLatexFile {
     name: String,
     relative_path: String,
     content_base64: String,
+}
+
+#[tauri::command]
+fn system_update_proxy() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let internet_settings = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+            .ok()?;
+        let enabled: u32 = internet_settings.get_value("ProxyEnable").ok()?;
+        if enabled == 0 {
+            return None;
+        }
+        let raw: String = internet_settings.get_value("ProxyServer").ok()?;
+        let selected = raw
+            .split(';')
+            .find_map(|entry| entry.strip_prefix("https="))
+            .or_else(|| raw.split(';').find_map(|entry| entry.strip_prefix("http=")))
+            .unwrap_or(raw.as_str())
+            .trim();
+        if selected.is_empty() {
+            return None;
+        }
+        return Some(if selected.contains("://") {
+            selected.to_string()
+        } else {
+            format!("http://{selected}")
+        });
+    }
+
+    #[cfg(not(windows))]
+    None
 }
 
 fn is_latex_project_file(path: &Path) -> bool {
@@ -167,7 +202,8 @@ pub fn run() {
             open_research_browser,
             research_browser_cookies,
             select_latex_files,
-            select_latex_folder
+            select_latex_folder,
+            system_update_proxy
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
