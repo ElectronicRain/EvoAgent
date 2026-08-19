@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Authoritative computer-science curriculum ontology used by Learning Space.
 
 The catalogue follows the 166 knowledge units in ACM/IEEE-CS/AAAI CS2023.
 Networking is expanded one level further because a useful networking learning
 path needs protocol/mechanism-level leaves rather than only eight unit labels.
 """
+
+from __future__ import annotations
 
 from typing import Any
 

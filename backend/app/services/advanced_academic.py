@@ -445,16 +445,20 @@ class AdvancedAcademicService:
             return start + size * (1 - ratio if invert else ratio)
 
         if chart_type == "scatter" and len(numeric) >= 2:
-            x = x if x in numeric else numeric[0]; y = y if y in numeric and y != x else next(item for item in numeric if item != x)
+            x = x if x in numeric else numeric[0]
+            y = y if y in numeric and y != x else next(item for item in numeric if item != x)
             points = [(self._number(row.get(x)), self._number(row.get(y))) for row in records]
             points = [(a, b) for a, b in points if a is not None and b is not None]
-            xmin, xmax = min(a for a, _ in points), max(a for a, _ in points); ymin, ymax = min(b for _, b in points), max(b for _, b in points)
+            xmin, xmax = min(a for a, _ in points), max(a for a, _ in points)
+            ymin, ymax = min(b for _, b in points), max(b for _, b in points)
             for index, (a, b) in enumerate(points):
                 parts.append(f'<circle cx="{scale(a,xmin,xmax,left,plot_w):.2f}" cy="{scale(b,ymin,ymax,top,plot_h,True):.2f}" r="4" fill="{OKABE_ITO[index % 6]}" fill-opacity="0.68"/>')
         elif chart_type == "strip" and categorical and numeric:
-            x = x if x in categorical else categorical[0]; y = y if y in numeric else numeric[0]
+            x = x if x in categorical else categorical[0]
+            y = y if y in numeric else numeric[0]
             categories = list(dict.fromkeys(str(row.get(x, "")) for row in records))[:12]
-            values = [self._number(row.get(y)) for row in records]; values = [value for value in values if value is not None]
+            values = [self._number(row.get(y)) for row in records]
+            values = [value for value in values if value is not None]
             ymin, ymax = min(values), max(values)
             for index, category in enumerate(categories):
                 category_values = [self._number(row.get(y)) for row in records if str(row.get(x, "")) == category]
@@ -465,12 +469,14 @@ class AdvancedAcademicService:
                     parts.append(f'<circle cx="{px+jitter:.2f}" cy="{scale(value,ymin,ymax,top,plot_h,True):.2f}" r="4" fill="{OKABE_ITO[index % 6]}" fill-opacity="0.72"/>')
                 parts.append(f'<text x="{px:.2f}" y="{top+plot_h+24}" text-anchor="middle" font-family="Arial,Microsoft YaHei" font-size="10">{escape(category[:14])}</text>')
         elif chart_type == "correlation" and len(numeric) >= 2:
-            fields = numeric[:10]; matrix = {(item["x"], item["y"]): item["r"] for item in profile["correlations"]}
+            fields = numeric[:10]
+            matrix = {(item["x"], item["y"]): item["r"] for item in profile["correlations"]}
             cell = min(plot_w, plot_h) / len(fields)
             for row_index, row_name in enumerate(fields):
                 for col_index, col_name in enumerate(fields):
                     r = 1.0 if row_name == col_name else matrix.get((row_name, col_name), matrix.get((col_name, row_name), 0))
-                    blue = int(245 - max(0, r) * 145); red = int(245 - max(0, -r) * 145)
+                    blue = int(245 - max(0, r) * 145)
+                    red = int(245 - max(0, -r) * 145)
                     color = f'#{red:02x}{min(red,blue):02x}{blue:02x}'
                     px, py = left + col_index * cell, top + row_index * cell
                     parts.append(f'<rect x="{px:.2f}" y="{py:.2f}" width="{cell:.2f}" height="{cell:.2f}" fill="{color}" stroke="#fff"/><text x="{px+cell/2:.2f}" y="{py+cell/2+4:.2f}" text-anchor="middle" font-family="Arial" font-size="10">{r:.2f}</text>')
@@ -478,17 +484,23 @@ class AdvancedAcademicService:
             for index, field in enumerate(fields):
                 parts.append(f'<text x="{left+index*cell+cell/2:.2f}" y="{top+len(fields)*cell+18:.2f}" text-anchor="end" transform="rotate(-35 {left+index*cell+cell/2:.2f} {top+len(fields)*cell+18:.2f})" font-family="Arial,Microsoft YaHei" font-size="9">{escape(field[:12])}</text>')
         elif chart_type == "histogram" and numeric:
-            x = x if x in numeric else numeric[0]; values = [self._number(row.get(x)) for row in records]; values = [value for value in values if value is not None]
-            low, high = min(values), max(values); bins = max(5, min(20, round(math.sqrt(len(values))))); counts = [0] * bins
+            x = x if x in numeric else numeric[0]
+            values = [self._number(row.get(x)) for row in records]
+            values = [value for value in values if value is not None]
+            low, high = min(values), max(values)
+            bins = max(5, min(20, round(math.sqrt(len(values)))))
+            counts = [0] * bins
             for value in values:
                 counts[min(bins - 1, int((value - low) / max(high - low, 1e-12) * bins))] += 1
             max_count = max(counts)
             for index, count in enumerate(counts):
-                bar_w = plot_w / bins - 2; bar_h = plot_h * count / max_count
+                bar_w = plot_w / bins - 2
+                bar_h = plot_h * count / max_count
                 parts.append(f'<rect x="{left+index*plot_w/bins+1:.2f}" y="{top+plot_h-bar_h:.2f}" width="{bar_w:.2f}" height="{bar_h:.2f}" fill="{OKABE_ITO[0]}" fill-opacity="0.78"/>')
         else:
             x = x if x in categorical else categorical[0]
-            counts = Counter(str(row.get(x, "")) for row in records).most_common(12); max_count = max(count for _, count in counts)
+            counts = Counter(str(row.get(x, "")) for row in records).most_common(12)
+            max_count = max(count for _, count in counts)
             bar_h = plot_h / max(1, len(counts)) - 5
             for index, (label, count) in enumerate(counts):
                 py = top + index * (bar_h + 5)

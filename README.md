@@ -4,9 +4,9 @@
 [![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Version](https://img.shields.io/badge/version-2.1.2-1769c2)](#windows-桌面端)
+[![Version](https://img.shields.io/badge/version-2.1.4-1769c2)](#windows-桌面端)
 
-EvoAgent V2.1.2 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖科研空间、学习空间、Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
+EvoAgent V2.1.4 是一套面向高校教学科研的 Windows 多智能体协作平台，采用 Vue 3、Python/FastAPI、SQLite 和 Tauri 2 构建。正式版已覆盖科研空间、学习空间、智能讲解教室、管理员控制台、离线日志补传、Agent 创建与进化、全链路 RAG、多 Agent 工作流、在线模型与图片生成、可信 Skill 治理、安全审批、用户记忆和成果数据库交付。
 
 V2 科研与学习应用层已经完整接入：科研空间支持多人文献研究、领域前沿追踪、参考文献关联、科研数据分析、论文图表、Idea 探索、项目记忆与 Skill、实验承接、LaTeX 协作写作/批改/渲染、版本管理和多角色模拟审稿；学习空间支持方向独立画像、动态路径、可追溯知识讲解、导师/学伴陪伴、练习错题闭环与个性化空间。各应用统一复用项目资源、Agent 工厂、工作流、计算机学科包与可信知识能力。
 
@@ -87,8 +87,8 @@ cd EvoAgent
 构建后的安装包位于：
 
 ```text
-.tmp/tauri-target-2.1.2/release/bundle/nsis/EvoAgent_2.1.2_x64-setup.exe
-.tmp/tauri-target-2.1.2/release/bundle/msi/EvoAgent_2.1.2_x64_en-US.msi
+.tmp/tauri-target-2.1.4/release/bundle/nsis/EvoAgent_2.1.4_x64-setup.exe
+.tmp/tauri-target-2.1.4/release/bundle/msi/EvoAgent_2.1.4_x64_en-US.msi
 ```
 
 安装后的持久化目录：
@@ -205,9 +205,9 @@ Agent 和工作流不会降级为离线演示模型。运行前必须在“扩�
 
 ## Windows 桌面端
 
-当前桌面版本为 **V2.1.2**。源码构建后，主程序和安装包位于 `.tmp/tauri-target-2.1.2/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
+当前桌面版本为 **V2.1.4**。源码构建后，主程序和安装包位于 `.tmp/tauri-target-2.1.4/release/`。正式版将用户数据独立保存在 `%LOCALAPPDATA%\EvoAgent\`，升级或替换程序不会覆盖数据库、密钥、工作区、Skills 和插件。
 
-V2.1.2 源码现已包含完整学习空间、计算机科学学科包、领域前沿追踪与科研数据/论文图表工作台。学习端使用 ACM/IEEE-CS/AAAI CS2023 的 17 个知识领域、166 个正式知识单元；计算机网络进一步展开为 47 个可追溯知识节点，并按学科隔离建立先修图谱。学习深度只控制节点解锁，不再把通用任务阶段作为知识点。科研端可用可追溯题录形成热点趋势，并按 SciPilot 方法生成白底、色觉友好、矢量优先的论文图表。上述模块与 Agent 工厂、工作流、RAG 和智能评测共用底层能力。
+V2.1.4 新增管理员控制台、严格的服务端 RBAC、用户与设备概览、结构化脱敏日志、错误聚合、本地离线事件队列和中央遥测汇聚接口。普通客户端在管理员电脑关闭时仍会将事件保存在本地，并在配置中央服务且网络恢复后自动补传；事件使用 UUID 去重，密码、令牌、密钥、文档正文、对话正文和本地绝对路径不会上传。管理员账户必须在受控设备数据库中显式授予 `admin` 角色，不采用可伪造的同名账户自动提升规则。
 
 ### 签名更新发布
 

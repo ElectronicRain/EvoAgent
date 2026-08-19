@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "EvoAgent"
-    version: str = "2.1.1"
+    version: str = "2.1.4"
     debug: bool = True
     database_url: str = f"sqlite+aiosqlite:///{(DATA_ROOT / 'evoagent.db').as_posix()}"
     workspace_root: Path = DATA_ROOT / "workspace"
@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     max_tool_iterations: int = 8
     command_timeout_seconds: int = 30
     max_file_bytes: int = 2_000_000
+    telemetry_enabled: bool = True
+    telemetry_hub_url: str = ""
+    telemetry_hub_mode: bool = False
+    telemetry_hub_admin_key: str = ""
+    telemetry_batch_size: int = 200
+    telemetry_retention_days: int = 90
 
     def prepare_directories(self) -> None:
         for path in (self.workspace_root, self.skills_root, self.plugins_root):

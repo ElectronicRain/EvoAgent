@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "evoagent-desktop"
-version = "2.1.2"
+version = "2.1.4"
 dependencies = [
  "base64 0.22.1",
  "rfd",

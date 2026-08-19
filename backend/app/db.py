@@ -56,6 +56,10 @@ async def init_db() -> None:
         # create_all does not add columns to databases created by earlier EvoAgent versions.
         # These additive migrations keep existing local knowledge bases usable.
         migrations = {
+            "user_accounts": {
+                "role": "VARCHAR(20) NOT NULL DEFAULT 'user'",
+                "last_active_at": "DATETIME",
+            },
             "agents": {
                 "group_id": "VARCHAR(36)",
                 "image_model_endpoint_id": "VARCHAR(36)",
@@ -176,6 +180,12 @@ async def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_agent_conversations_user_id "
                 "ON agent_conversations(user_id)"
+            )
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_user_accounts_role "
+                "ON user_accounts(role)"
             )
         )
         await connection.execute(

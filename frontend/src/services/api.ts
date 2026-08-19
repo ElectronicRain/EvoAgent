@@ -55,6 +55,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       break
     } catch {
       if (attempt === 2) {
+        if (!path.startsWith('/telemetry')) window.dispatchEvent(new CustomEvent('evoagent:api-error', { detail:{ path:path.split('?')[0], status:0, kind:'network' } }))
         throw new ApiError(0, '本地服务尚未就绪，请稍后重试')
       }
       await new Promise(resolve => window.setTimeout(resolve, 500))
@@ -62,6 +63,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   if (!response) throw new ApiError(0, '本地服务尚未就绪，请稍后重试')
   if (!response.ok) {
+    if (!path.startsWith('/telemetry')) window.dispatchEvent(new CustomEvent('evoagent:api-error', { detail:{ path:path.split('?')[0], status:response.status, kind:'http' } }))
     const body = await response.json().catch(() => ({}))
     throw new ApiError(response.status, errorMessage(body.detail, response.status))
   }
@@ -152,6 +154,17 @@ async function blob(path: string, data: unknown): Promise<Blob> {
   return response.blob()
 }
 
+async function getBlob(path: string): Promise<Blob> {
+  const headers = new Headers()
+  attachAuth(headers)
+  const response = await fetch(`${API_BASE}${path}`, { headers, cache: 'no-store' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new ApiError(response.status, errorMessage(body.detail, response.status))
+  }
+  return response.blob()
+}
+
 export const api = {
   get: <T = any>(path: string) => request<T>(path),
   post: <T = any>(path: string, data?: unknown) => request<T>(path, {
@@ -164,6 +177,7 @@ export const api = {
   stream,
   streamEvents,
   blob,
+  getBlob,
   upload: <T = any>(path: string, file: File, fields: Record<string, string> = {}) => {
     const form = new FormData()
     form.append('file', file)

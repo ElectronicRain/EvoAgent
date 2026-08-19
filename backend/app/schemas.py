@@ -235,6 +235,49 @@ class UserReplyStyleUpdate(BaseModel):
     custom_style: str = Field(default="", max_length=1200)
 
 
+class TelemetryEventCreate(BaseModel):
+    event_type: str = Field(min_length=2, max_length=100)
+    module: str = Field(default="frontend", max_length=60)
+    resource_type: str = Field(default="", max_length=60)
+    resource_id: str | None = Field(default=None, max_length=100)
+    success: bool = True
+    duration_ms: int = Field(default=0, ge=0, le=86_400_000)
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class TelemetryHubDeviceRegister(BaseModel):
+    installation_id: str = Field(min_length=24, max_length=64)
+    device_name: str = Field(default="", max_length=160)
+    platform: str = Field(default="", max_length=120)
+    app_version: str = Field(default="", max_length=30)
+
+
+class TelemetryHubEvent(BaseModel):
+    id: str = Field(min_length=16, max_length=64)
+    installation_id: str = Field(min_length=24, max_length=64)
+    user_id: str | None = Field(default=None, max_length=36)
+    username: str = Field(default="anonymous", max_length=80)
+    event_type: str = Field(min_length=2, max_length=100)
+    module: str = Field(default="system", max_length=60)
+    resource_type: str = Field(default="", max_length=60)
+    resource_id: str | None = Field(default=None, max_length=100)
+    success: bool = True
+    duration_ms: int = Field(default=0, ge=0, le=86_400_000)
+    detail: dict[str, Any] = Field(default_factory=dict)
+    error_fingerprint: str = Field(default="", max_length=64)
+    client_version: str = Field(default="", max_length=30)
+    occurred_at: datetime
+
+
+class TelemetryHubBatch(BaseModel):
+    events: list[TelemetryHubEvent] = Field(default_factory=list, max_length=1000)
+
+
+class AdminUserUpdate(BaseModel):
+    status: Literal["active", "disabled"]
+    note: str = Field(default="", max_length=500)
+
+
 class ResearchSourceReviewCreate(BaseModel):
     run_id: str | None = None
     url: str = Field(min_length=8, max_length=4000)
@@ -898,6 +941,38 @@ class LearningTutorChat(BaseModel):
     mode: Literal["socratic", "explain", "examiner", "debug", "feynman", "sprint"] = "socratic"
     knowledge_node_id: str | None = None
     agent_id: str | None = None
+
+
+class TeachingSessionCreate(BaseModel):
+    document_id: str
+    agent_id: str | None = None
+    pace: Literal["slow", "standard", "fast"] = "standard"
+    depth: Literal["introductory", "course", "exam", "deep"] = "course"
+    duration_minutes: int = Field(default=45, ge=10, le=180)
+    proactive_questions: bool = True
+
+
+class TeachingSessionControl(BaseModel):
+    action: Literal["start", "pause", "resume", "stop", "seek", "complete"]
+    page: int | None = Field(default=None, ge=1)
+
+
+class TeachingTurnCreate(BaseModel):
+    message: str = Field(default="", max_length=4000)
+    action: Literal["explain", "ask", "continue"] = "ask"
+    page: int = Field(default=1, ge=1)
+
+
+class TeachingAnnotationItem(BaseModel):
+    id: str | None = None
+    page: int = Field(ge=1)
+    author: Literal["student", "teacher"] = "student"
+    kind: Literal["pen", "highlighter", "circle", "rectangle", "arrow", "text", "formula"]
+    payload: dict[str, Any]
+
+
+class TeachingAnnotationsSave(BaseModel):
+    annotations: list[TeachingAnnotationItem] = Field(default_factory=list, max_length=5000)
 
 
 class LearningQuestionCreate(BaseModel):

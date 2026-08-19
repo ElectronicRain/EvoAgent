@@ -7,6 +7,8 @@ import {
   ShieldCheck, Sparkles, UserRound, RefreshCw,
   Microscope,
   GraduationCap,
+  Presentation,
+  UserCog,
 } from 'lucide-vue-next'
 import AuthGate from './components/AuthGate.vue'
 import UpdateDialog from './components/UpdateDialog.vue'
@@ -14,6 +16,7 @@ import { useAppStore } from './stores/app'
 import { useAgentChatStore } from './stores/agentChat'
 import { useUserStore } from './stores/user'
 import { useUpdaterStore } from './stores/updater'
+import { telemetry } from './services/telemetry'
 
 const AgentChatOverlay = defineAsyncComponent(() => import('./components/AgentChatOverlay.vue'))
 const route = useRoute()
@@ -24,7 +27,7 @@ const updater = useUpdaterStore()
 const pageTitle = computed(() => String(route.meta.title || 'EvoAgent'))
 const detached = computed(() => Boolean(route.meta.detached))
 const sidebarCollapsed = ref(window.localStorage.getItem('evoagent-sidebar-collapsed') === 'true')
-const navGroups = [
+const baseNavGroups = [
   {
     label: '上层应用层',
     caption: '面向使用者的业务工作台',
@@ -32,6 +35,7 @@ const navGroups = [
       { to: '/', label: '运行总览', icon: LayoutDashboard },
       { to: '/research', label: '科研空间', icon: Microscope },
       { to: '/learning', label: '学习空间', icon: GraduationCap },
+      { to: '/teaching', label: '智能讲解教室', icon: Presentation },
     ],
   },
   {
@@ -48,6 +52,14 @@ const navGroups = [
     ],
   },
 ]
+const navGroups = computed(() => userStore.user?.role === 'admin' ? [
+  ...baseNavGroups,
+  {
+    label: '管理员板块',
+    caption: '用户、设备与运行审计',
+    items: [{ to: '/admin', label: '系统管理', icon: UserCog }],
+  },
+] : baseNavGroups)
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
@@ -62,12 +74,43 @@ watch(sidebarCollapsed, value => {
   window.localStorage.setItem('evoagent-sidebar-collapsed', String(value))
 })
 
+watch(
+  [() => route.fullPath, () => userStore.user?.id],
+  ([path, userId], previous) => {
+    if (!userId || (previous?.[0] === path && previous?.[1] === userId)) return
+    void telemetry.track({
+      event_type: 'page.viewed', module: 'navigation', resource_type: 'route',
+      resource_id: String(path).split('?')[0], detail: { page_title: pageTitle.value },
+    })
+  },
+)
+
 onMounted(async () => {
   await store.waitForBackend()
   await userStore.bootstrap()
+  if (userStore.user) void telemetry.flush()
   await updater.loadInstalledVersion()
   if (updater.automaticCheck) window.setTimeout(() => { void updater.check(false) }, 1800)
   window.setInterval(() => { void store.checkBackend() }, 15000)
+  window.setInterval(() => { if (userStore.user) void telemetry.flush() }, 60000)
+  window.addEventListener('error', event => {
+    if (!userStore.user) return
+    void telemetry.track({
+      event_type:'frontend.error', module:'frontend', success:false,
+      detail:{ message:String(event.message||'unknown').slice(0,250), source:'window.error' },
+    })
+  })
+  window.addEventListener('unhandledrejection', event => {
+    if (!userStore.user) return
+    void telemetry.track({
+      event_type:'frontend.error', module:'frontend', success:false,
+      detail:{ message:String(event.reason?.message||event.reason||'unknown').slice(0,250), source:'unhandledrejection' },
+    })
+  })
+  window.addEventListener('evoagent:api-error', ((event: CustomEvent) => {
+    if (!userStore.user) return
+    void telemetry.track({ event_type:'frontend.api_error', module:'frontend', success:false, detail:event.detail || {} })
+  }) as EventListener)
 })
 </script>
 

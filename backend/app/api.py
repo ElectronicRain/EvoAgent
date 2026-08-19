@@ -14,8 +14,8 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import delete, desc, func, select, update
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from sqlalchemy import case as sql_case, delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -42,15 +42,18 @@ from .models import (
     KnowledgeIngestionJob,
     KnowledgeProviderConfig,
     KnowledgeSource,
-    LearningAssessment,
-    LearningAttempt,
     LearningKnowledgeNode,
     LearningMemory,
     LearningMistake,
     LearningProject,
     LearningQuestion,
     LearningTask,
-    LearningTutorTurn,
+    TeachingDocument,
+    TeachingSession,
+    TeachingStudioDocument,
+    TeachingStudioSession,
+    TelemetryDevice,
+    TelemetryEvent,
     ModelEndpoint,
     ResearchComment,
     ResearchArtifact,
@@ -120,6 +123,14 @@ from .schemas import (
     LearningTaskCreate,
     LearningTaskUpdate,
     LearningTutorChat,
+    TeachingAnnotationsSave,
+    TeachingSessionControl,
+    TeachingSessionCreate,
+    TeachingTurnCreate,
+    TelemetryEventCreate,
+    TelemetryHubBatch,
+    TelemetryHubDeviceRegister,
+    AdminUserUpdate,
     WebKnowledgeSourceCreate,
     DatabaseKnowledgeSourceCreate,
     APIKnowledgeSourceCreate,
@@ -199,6 +210,9 @@ from .services.secrets import secret_store
 from .services.security import RuntimeSecurityContext, runtime_security_service
 from .services.skill_security import SkillPackageError, skill_security_service
 from .services.teaching import teaching_service
+from .services.teaching_space import teaching_space_service
+from .services.standalone_teaching import standalone_teaching_service
+from .services.telemetry import telemetry_service
 from .services.tools import tool_runtime
 from .services.users import REPLY_STYLES, user_service
 from .services.research_projects import research_project_service
@@ -279,6 +293,13 @@ async def require_user(db: AsyncSession, authorization: str | None) -> UserAccou
     return user
 
 
+async def require_admin(db: AsyncSession, authorization: str | None) -> UserAccount:
+    user = await require_user(db, authorization)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="该功能仅管理员可用")
+    return user
+
+
 def research_row(model: Any) -> dict[str, Any]:
     data = row(model)
     for key in (
@@ -338,13 +359,26 @@ async def register_user(
             password=payload.password,
         )
     except ValueError as exc:
+        await telemetry_service.record(
+            db,
+            "user.registration_failed",
+            username=payload.username,
+            module="account",
+            success=False,
+            detail={"reason": str(exc)},
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await audit(
         db,
         "user.registered",
         "user_account",
         result["user"]["id"],
-        {"claimed_legacy_data": result.get("claimed_legacy_data", False)},
+        {
+            "claimed_legacy_data": result.get("claimed_legacy_data", False),
+            "display_name": result["user"]["display_name"],
+            "role": result["user"]["role"],
+            "client_version": settings.version,
+        },
         actor=result["user"]["username"],
     )
     return result
@@ -355,6 +389,14 @@ async def login_user(payload: UserLogin, db: AsyncSession = Depends(get_db)) -> 
     try:
         result = await user_service.login(db, username=payload.username, password=payload.password)
     except ValueError as exc:
+        await telemetry_service.record(
+            db,
+            "user.login_failed",
+            username=payload.username,
+            module="account",
+            success=False,
+            detail={"reason": "invalid_credentials_or_disabled"},
+        )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     await audit(
         db,
@@ -383,6 +425,441 @@ async def current_user(
     user = await require_user(db, authorization)
     preference = await user_service.preference(db, user.id)
     return user_service.public_user(user, preference)
+
+
+def telemetry_event_row(item: TelemetryEvent) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "installation_id": item.installation_id,
+        "device_id": item.device_id,
+        "user_id": item.user_id,
+        "username": item.username,
+        "event_type": item.event_type,
+        "module": item.module,
+        "resource_type": item.resource_type,
+        "resource_id": item.resource_id,
+        "success": item.success,
+        "duration_ms": item.duration_ms,
+        "detail": loads(item.detail_json, {}),
+        "error_fingerprint": item.error_fingerprint,
+        "client_version": item.client_version,
+        "occurred_at": item.occurred_at,
+        "received_at": item.received_at,
+        "sync_status": item.sync_status,
+        "sync_attempts": item.sync_attempts,
+        "synced_at": item.synced_at,
+    }
+
+
+async def local_admin_overview(db: AsyncSession, *, hub: bool = False) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    if hub:
+        user_key = (
+            TelemetryEvent.installation_id
+            + ":"
+            + func.coalesce(TelemetryEvent.user_id, TelemetryEvent.username)
+        )
+        total_users = await db.scalar(select(func.count(func.distinct(user_key)))) or 0
+        new_users = await db.scalar(
+            select(func.count(TelemetryEvent.id)).where(
+                TelemetryEvent.event_type == "user.registered",
+                TelemetryEvent.occurred_at >= day_start,
+            )
+        ) or 0
+        active_users = await db.scalar(
+            select(func.count(func.distinct(user_key))).where(
+                TelemetryEvent.occurred_at >= week_start
+            )
+        ) or 0
+    else:
+        total_users = await db.scalar(select(func.count(UserAccount.id))) or 0
+        new_users = await db.scalar(
+            select(func.count(UserAccount.id)).where(UserAccount.created_at >= day_start)
+        ) or 0
+        active_users = await db.scalar(
+            select(func.count(UserAccount.id)).where(UserAccount.last_active_at >= week_start)
+        ) or 0
+    total_events = await db.scalar(select(func.count(TelemetryEvent.id))) or 0
+    error_events = await db.scalar(
+        select(func.count(TelemetryEvent.id)).where(TelemetryEvent.success.is_(False))
+    ) or 0
+    today_events = await db.scalar(
+        select(func.count(TelemetryEvent.id)).where(TelemetryEvent.occurred_at >= day_start)
+    ) or 0
+    devices = await db.scalar(select(func.count(TelemetryDevice.id))) or 0
+    version_rows = (
+        await db.execute(
+            select(TelemetryEvent.client_version, func.count(TelemetryEvent.id))
+            .where(TelemetryEvent.client_version != "")
+            .group_by(TelemetryEvent.client_version)
+            .order_by(desc(func.count(TelemetryEvent.id)))
+        )
+    ).all()
+    module_rows = (
+        await db.execute(
+            select(TelemetryEvent.module, func.count(TelemetryEvent.id))
+            .group_by(TelemetryEvent.module)
+            .order_by(desc(func.count(TelemetryEvent.id)))
+            .limit(12)
+        )
+    ).all()
+    latest_event = await db.scalar(
+        select(TelemetryEvent.occurred_at).order_by(desc(TelemetryEvent.occurred_at)).limit(1)
+    )
+    return {
+        "scope": "hub" if hub else "local",
+        "generated_at": now,
+        "latest_event_at": latest_event,
+        "metrics": {
+            "total_users": int(total_users),
+            "new_users_today": int(new_users),
+            "active_users_7d": int(active_users),
+            "devices": int(devices),
+            "events": int(total_events),
+            "events_today": int(today_events),
+            "errors": int(error_events),
+            "success_rate": round(
+                100 * (int(total_events) - int(error_events)) / max(1, int(total_events)), 1
+            ),
+        },
+        "versions": [
+            {"version": version or "unknown", "events": count}
+            for version, count in version_rows
+        ],
+        "modules": [{"module": module, "events": count} for module, count in module_rows],
+    }
+
+
+async def local_admin_users(db: AsyncSession, *, hub: bool = False) -> list[dict[str, Any]]:
+    if hub:
+        rows = (
+            await db.execute(
+                select(
+                    TelemetryEvent.installation_id,
+                    TelemetryEvent.user_id,
+                    TelemetryEvent.username,
+                    func.min(TelemetryEvent.occurred_at),
+                    func.max(TelemetryEvent.occurred_at),
+                    func.count(TelemetryEvent.id),
+                    func.sum(sql_case((TelemetryEvent.success.is_(False), 1), else_=0)),
+                    func.max(TelemetryEvent.client_version),
+                )
+                .where(TelemetryEvent.username.notin_(["anonymous", "system", "local-user"]))
+                .group_by(
+                    TelemetryEvent.installation_id,
+                    TelemetryEvent.user_id,
+                    TelemetryEvent.username,
+                )
+                .order_by(desc(func.max(TelemetryEvent.occurred_at)))
+                .limit(1000)
+            )
+        ).all()
+        return [
+            {
+                "id": user_id or f"{installation_id}:{username}",
+                "installation_id": installation_id,
+                "username": username,
+                "display_name": username,
+                "role": "user",
+                "status": "active",
+                "created_at": first_seen,
+                "last_active_at": last_seen,
+                "event_count": event_count,
+                "error_count": int(error_count or 0),
+                "client_version": client_version,
+            }
+            for (
+                installation_id,
+                user_id,
+                username,
+                first_seen,
+                last_seen,
+                event_count,
+                error_count,
+                client_version,
+            ) in rows
+        ]
+    users = (await db.scalars(select(UserAccount).order_by(desc(UserAccount.created_at)))).all()
+    statistics = {
+        user_id: {
+            "event_count": event_count,
+            "last_event_at": last_event_at,
+            "error_count": int(error_count or 0),
+            "client_version": client_version,
+        }
+        for user_id, event_count, last_event_at, error_count, client_version in (
+            await db.execute(
+                select(
+                    TelemetryEvent.user_id,
+                    func.count(TelemetryEvent.id),
+                    func.max(TelemetryEvent.occurred_at),
+                    func.sum(sql_case((TelemetryEvent.success.is_(False), 1), else_=0)),
+                    func.max(TelemetryEvent.client_version),
+                )
+                .where(TelemetryEvent.user_id.is_not(None))
+                .group_by(TelemetryEvent.user_id)
+            )
+        ).all()
+    }
+    return [
+        {
+            **user_service.public_user(user),
+            **statistics.get(
+                user.id,
+                {
+                    "event_count": 0,
+                    "last_event_at": None,
+                    "error_count": 0,
+                    "client_version": "",
+                },
+            ),
+        }
+        for user in users
+    ]
+
+
+async def query_admin_events(
+    db: AsyncSession,
+    *,
+    username: str = "",
+    module: str = "",
+    success: bool | None = None,
+    cursor: datetime | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    statement = select(TelemetryEvent)
+    if username:
+        statement = statement.where(TelemetryEvent.username == username)
+    if module:
+        statement = statement.where(TelemetryEvent.module == module)
+    if success is not None:
+        statement = statement.where(TelemetryEvent.success == success)
+    if cursor is not None:
+        statement = statement.where(TelemetryEvent.occurred_at < cursor)
+    items = (
+        await db.scalars(
+            statement.order_by(desc(TelemetryEvent.occurred_at)).limit(min(limit, 500))
+        )
+    ).all()
+    return [telemetry_event_row(item) for item in items]
+
+
+@router.post("/telemetry/events", status_code=201)
+async def create_client_telemetry_event(
+    payload: TelemetryEventCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    item = await telemetry_service.record(
+        db,
+        payload.event_type,
+        username=user.username,
+        user_id=user.id,
+        module=payload.module,
+        resource_type=payload.resource_type,
+        resource_id=payload.resource_id,
+        success=payload.success,
+        duration_ms=payload.duration_ms,
+        detail=payload.detail,
+    )
+    return {"recorded": item is not None, "id": item.id if item else None}
+
+
+@router.get("/telemetry/status")
+async def telemetry_status(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await require_user(db, authorization)
+    return {
+        "enabled": settings.telemetry_enabled,
+        "hub_configured": bool(settings.telemetry_hub_url),
+        "pending": await telemetry_service.pending_count(db),
+        "device": telemetry_service.device_payload(),
+    }
+
+
+@router.post("/telemetry/sync")
+async def sync_client_telemetry(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await require_user(db, authorization)
+    return await telemetry_service.sync_pending(db)
+
+
+@router.post("/telemetry-hub/devices/register", status_code=201)
+async def register_telemetry_hub_device(
+    payload: TelemetryHubDeviceRegister,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if not settings.telemetry_hub_mode:
+        raise HTTPException(status_code=404, detail="中央遥测服务未启用")
+    device, token = await telemetry_service.register_hub_device(db, payload.model_dump())
+    return {"device_id": device.id, "device_token": token}
+
+
+@router.post("/telemetry-hub/events/batch")
+async def ingest_telemetry_hub_events(
+    payload: TelemetryHubBatch,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if not settings.telemetry_hub_mode:
+        raise HTTPException(status_code=404, detail="中央遥测服务未启用")
+    device = await telemetry_service.authenticate_device(db, authorization)
+    if device is None:
+        raise HTTPException(status_code=401, detail="设备令牌无效")
+    received = await telemetry_service.ingest_events(
+        db, device, [item.model_dump() for item in payload.events]
+    )
+    return {"received": received, "duplicates": len(payload.events) - received}
+
+
+def require_hub_admin_key(value: str | None) -> None:
+    if not settings.telemetry_hub_mode:
+        raise HTTPException(status_code=404, detail="中央遥测服务未启用")
+    if not settings.telemetry_hub_admin_key:
+        raise HTTPException(status_code=503, detail="中央管理密钥尚未配置")
+    if not value or not secrets.compare_digest(value, settings.telemetry_hub_admin_key):
+        raise HTTPException(status_code=403, detail="中央管理凭据无效")
+
+
+@router.get("/telemetry-hub/admin/overview")
+async def telemetry_hub_admin_overview(
+    x_admin_key: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    require_hub_admin_key(x_admin_key)
+    return await local_admin_overview(db, hub=True)
+
+
+@router.get("/telemetry-hub/admin/users")
+async def telemetry_hub_admin_users(
+    x_admin_key: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    require_hub_admin_key(x_admin_key)
+    return await local_admin_users(db, hub=True)
+
+
+@router.get("/telemetry-hub/admin/events")
+async def telemetry_hub_admin_events(
+    username: str = Query(default="", max_length=80),
+    module: str = Query(default="", max_length=60),
+    success: bool | None = Query(default=None),
+    cursor: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    x_admin_key: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    require_hub_admin_key(x_admin_key)
+    return await query_admin_events(
+        db,
+        username=username,
+        module=module,
+        success=success,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.post("/admin/refresh")
+async def refresh_admin_data(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_admin(db, authorization)
+    sync = await telemetry_service.sync_pending(db)
+    remote = await telemetry_service.remote_admin_get("overview")
+    await audit(
+        db,
+        "admin.dashboard_refreshed",
+        "telemetry",
+        detail={"remote_available": remote is not None},
+        actor=user.username,
+    )
+    return {"sync": sync, "remote_available": remote is not None, "overview": remote}
+
+
+@router.get("/admin/overview")
+async def admin_overview(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    await require_admin(db, authorization)
+    remote = await telemetry_service.remote_admin_get("overview")
+    overview = remote or await local_admin_overview(db)
+    overview["remote_available"] = remote is not None
+    overview["hub_configured"] = bool(settings.telemetry_hub_url)
+    overview["pending_local_events"] = await telemetry_service.pending_count(db)
+    return overview
+
+
+@router.get("/admin/users")
+async def admin_users(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    await require_admin(db, authorization)
+    remote = await telemetry_service.remote_admin_get("users")
+    return remote if isinstance(remote, list) else await local_admin_users(db)
+
+
+@router.get("/admin/events")
+async def admin_events(
+    username: str = Query(default="", max_length=80),
+    module: str = Query(default="", max_length=60),
+    success: bool | None = Query(default=None),
+    cursor: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    await require_admin(db, authorization)
+    params: dict[str, Any] = {"username": username, "module": module, "limit": limit}
+    if success is not None:
+        params["success"] = str(success).lower()
+    if cursor is not None:
+        params["cursor"] = cursor.isoformat()
+    remote = await telemetry_service.remote_admin_get("events", params)
+    return remote if isinstance(remote, list) else await query_admin_events(
+        db,
+        username=username,
+        module=module,
+        success=success,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.patch("/admin/users/{user_id}")
+async def update_admin_user(
+    user_id: str,
+    payload: AdminUserUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    admin = await require_admin(db, authorization)
+    item = await db.get(UserAccount, user_id)
+    if item is None:
+        raise not_found("用户")
+    if item.id == admin.id and payload.status != "active":
+        raise HTTPException(status_code=422, detail="管理员不能停用自己的账户")
+    item.status = payload.status
+    await audit(
+        db,
+        "admin.user_status_changed",
+        "user_account",
+        item.id,
+        {"status": payload.status, "note": payload.note},
+        actor=admin.username,
+    )
+    await db.flush()
+    return user_service.public_user(item)
 
 
 @router.patch("/users/me")
@@ -1703,6 +2180,500 @@ async def run_learning_workflow(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     await audit(db, "learning_workflow.started", "workflow_run", item.id, {"module": module}, actor=user.username)
     return row(item)
+
+
+@router.get("/teaching/documents")
+async def list_standalone_teaching_documents(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """List the current user's classroom documents without a learning-project scope."""
+
+    user = await require_user(db, authorization)
+    await standalone_teaching_service.migrate_legacy_documents(db, user)
+    items = (
+        await db.scalars(
+            select(TeachingStudioDocument)
+            .where(TeachingStudioDocument.owner_id == user.id)
+            .order_by(desc(TeachingStudioDocument.updated_at))
+        )
+    ).all()
+    return [standalone_teaching_service.document_payload(item) for item in items]
+
+
+@router.post("/teaching/documents", status_code=201)
+async def upload_standalone_teaching_document(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    filename = PurePosixPath((file.filename or "课件.pdf").replace("\\", "/")).name
+    data = await file.read(100 * 1024 * 1024 + 1)
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="教学课件不能超过 100MB")
+    try:
+        item = await standalone_teaching_service.store_document(db, user, filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit(
+        db,
+        "teaching_studio.document.uploaded",
+        "teaching_studio_document",
+        item.id,
+        {"filename": filename, "pages": item.page_count},
+        actor=user.username,
+    )
+    return standalone_teaching_service.document_payload(item)
+
+
+@router.get("/teaching/documents/{document_id}/file")
+async def get_standalone_teaching_document_file(
+    document_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    user = await require_user(db, authorization)
+    try:
+        item = await standalone_teaching_service.document_access(db, document_id, user)
+    except LookupError as exc:
+        raise not_found("教学文档") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    path = Path(item.rendered_path or item.source_path).resolve()
+    # Migrated files may still live in the former project-scoped teaching directory.
+    allowed_roots = [
+        (settings.workspace_root / "teaching-studio").resolve(),
+        (settings.workspace_root / "teaching").resolve(),
+    ]
+    if not any(root == path.parent or root in path.parents for root in allowed_roots):
+        raise not_found("教学文档文件")
+    if not path.is_file():
+        raise not_found("教学文档文件")
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else item.mime_type
+    return FileResponse(path, media_type=media_type)
+
+
+@router.get("/teaching/sessions")
+async def list_standalone_teaching_sessions(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    items = (
+        await db.scalars(
+            select(TeachingStudioSession)
+            .where(TeachingStudioSession.owner_id == user.id)
+            .order_by(desc(TeachingStudioSession.updated_at))
+            .limit(30)
+        )
+    ).all()
+    return [await standalone_teaching_service.session_payload(db, item) for item in items]
+
+
+@router.post("/teaching/sessions", status_code=201)
+async def create_standalone_teaching_session(
+    payload: TeachingSessionCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    try:
+        document = await standalone_teaching_service.document_access(
+            db, payload.document_id, user
+        )
+    except LookupError as exc:
+        raise not_found("教学文档") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if payload.agent_id:
+        agent = await db.get(AgentDefinition, payload.agent_id)
+        if not agent or agent.status != "active":
+            raise HTTPException(status_code=422, detail="教师 Agent 不存在或未启用")
+    session = await standalone_teaching_service.create_session(
+        db,
+        document,
+        user,
+        payload.model_dump(exclude={"document_id", "agent_id"}),
+        payload.agent_id,
+    )
+    await audit(
+        db,
+        "teaching_studio.session.created",
+        "teaching_studio_session",
+        session.id,
+        {"document_id": document.id},
+        actor=user.username,
+    )
+    return await standalone_teaching_service.session_payload(db, session)
+
+
+@router.get("/teaching/sessions/{session_id}")
+async def get_standalone_teaching_session(
+    session_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    try:
+        session = await standalone_teaching_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return await standalone_teaching_service.session_payload(db, session)
+
+
+@router.patch("/teaching/sessions/{session_id}/control")
+async def control_standalone_teaching_session(
+    session_id: str,
+    payload: TeachingSessionControl,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    try:
+        session = await standalone_teaching_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    status_map = {
+        "start": "explaining",
+        "pause": "paused",
+        "resume": "explaining",
+        "stop": "stopped",
+        "seek": session.status,
+        "complete": "completed",
+    }
+    session.status = status_map[payload.action]
+    document = await db.get(TeachingStudioDocument, session.document_id)
+    if payload.page is not None:
+        page_count = max(1, document.page_count if document else payload.page)
+        session.current_page = min(payload.page, page_count)
+        session.current_unit = session.current_page
+        session.progress = min(
+            100, round(100 * (session.current_page - 1) / max(1, page_count))
+        )
+    if payload.action == "complete":
+        session.progress = 100
+    await db.flush()
+    await audit(
+        db,
+        f"teaching_studio.session.{payload.action}",
+        "teaching_studio_session",
+        session.id,
+        {"page": session.current_page, "progress": session.progress},
+        actor=user.username,
+    )
+    return await standalone_teaching_service.session_payload(db, session)
+
+
+@router.post("/teaching/sessions/{session_id}/turns", status_code=201)
+async def create_standalone_teaching_turn(
+    session_id: str,
+    payload: TeachingTurnCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    try:
+        session = await standalone_teaching_service.session_access(db, session_id, user)
+        turn = await standalone_teaching_service.teach(
+            db,
+            session,
+            user,
+            message=payload.message,
+            action=payload.action,
+            page=payload.page,
+        )
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await audit(
+        db,
+        "teaching_studio.turn.created",
+        "teaching_studio_turn",
+        turn.id,
+        {"session_id": session_id, "page": payload.page, "action": payload.action},
+        actor=user.username,
+    )
+    return standalone_teaching_service.turn_payload(turn)
+
+
+@router.put("/teaching/sessions/{session_id}/annotations")
+async def save_standalone_teaching_annotations(
+    session_id: str,
+    payload: TeachingAnnotationsSave,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    try:
+        session = await standalone_teaching_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await standalone_teaching_service.save_annotations(
+        db, session, [item.model_dump() for item in payload.annotations]
+    )
+    return {"saved": len(payload.annotations)}
+
+
+@router.get("/learning-projects/{project_id}/teaching/documents")
+async def list_teaching_documents(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(TeachingDocument)
+            .where(
+                TeachingDocument.project_id == project_id,
+                TeachingDocument.owner_id == user.id,
+            )
+            .order_by(desc(TeachingDocument.updated_at))
+        )
+    ).all()
+    return [teaching_space_service.document_payload(item) for item in items]
+
+
+@router.post("/learning-projects/{project_id}/teaching/documents", status_code=201)
+async def upload_teaching_document(
+    project_id: str,
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    filename = PurePosixPath((file.filename or "课件.pdf").replace("\\", "/")).name
+    data = await file.read(100 * 1024 * 1024 + 1)
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="教学课件不能超过 100MB")
+    try:
+        item = await teaching_space_service.store_document(db, project, user, filename, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await audit(
+        db,
+        "teaching.document.uploaded",
+        "teaching_document",
+        item.id,
+        {"filename": filename, "pages": item.page_count},
+        actor=user.username,
+    )
+    return teaching_space_service.document_payload(item)
+
+
+@router.get("/learning-projects/{project_id}/teaching/documents/{document_id}/file")
+async def get_teaching_document_file(
+    project_id: str,
+    document_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    item = await teaching_space_service.document_access(db, document_id, user)
+    if item.project_id != project_id:
+        raise not_found("教学文档")
+    path = Path(item.rendered_path or item.source_path).resolve()
+    teaching_root = (settings.workspace_root / "teaching").resolve()
+    if teaching_root not in path.parents or not path.is_file():
+        raise not_found("教学文档文件")
+    return FileResponse(path, media_type="application/pdf" if path.suffix.lower() == ".pdf" else item.mime_type)
+
+
+@router.post("/learning-projects/{project_id}/teaching/sessions", status_code=201)
+async def create_teaching_session(
+    project_id: str,
+    payload: TeachingSessionCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    try:
+        document = await teaching_space_service.document_access(db, payload.document_id, user)
+    except LookupError as exc:
+        raise not_found("教学文档") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if document.project_id != project_id:
+        raise HTTPException(status_code=422, detail="教学文档不属于当前学习方向")
+    if payload.agent_id and not await db.get(AgentDefinition, payload.agent_id):
+        raise HTTPException(status_code=422, detail="教师 Agent 不存在")
+    session = await teaching_space_service.create_session(
+        db,
+        project,
+        document,
+        user,
+        payload.model_dump(exclude={"document_id", "agent_id"}),
+        payload.agent_id,
+    )
+    await audit(
+        db,
+        "teaching.session.created",
+        "teaching_session",
+        session.id,
+        {"document_id": document.id},
+        actor=user.username,
+    )
+    return await teaching_space_service.session_payload(db, session)
+
+
+@router.get("/learning-projects/{project_id}/teaching/sessions")
+async def list_teaching_sessions(
+    project_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    items = (
+        await db.scalars(
+            select(TeachingSession)
+            .where(
+                TeachingSession.project_id == project_id,
+                TeachingSession.owner_id == user.id,
+            )
+            .order_by(desc(TeachingSession.updated_at))
+            .limit(30)
+        )
+    ).all()
+    return [await teaching_space_service.session_payload(db, item) for item in items]
+
+
+@router.get("/learning-projects/{project_id}/teaching/sessions/{session_id}")
+async def get_teaching_session(
+    project_id: str,
+    session_id: str,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    try:
+        session = await teaching_space_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if session.project_id != project_id:
+        raise not_found("教学会话")
+    return await teaching_space_service.session_payload(db, session)
+
+
+@router.patch("/learning-projects/{project_id}/teaching/sessions/{session_id}/control")
+async def control_teaching_session(
+    project_id: str,
+    session_id: str,
+    payload: TeachingSessionControl,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    try:
+        session = await teaching_space_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if session.project_id != project_id:
+        raise not_found("教学会话")
+    status_map = {
+        "start": "explaining",
+        "pause": "paused",
+        "resume": "explaining",
+        "stop": "stopped",
+        "seek": session.status,
+        "complete": "completed",
+    }
+    session.status = status_map[payload.action]
+    document = await db.get(TeachingDocument, session.document_id)
+    if payload.page is not None:
+        session.current_page = min(payload.page, max(1, document.page_count if document else payload.page))
+        session.current_unit = session.current_page
+        session.progress = min(100, round(100 * (session.current_page - 1) / max(1, (document.page_count if document else 1))))
+    if payload.action == "complete":
+        session.progress = 100
+    await audit(
+        db,
+        f"teaching.session.{payload.action}",
+        "teaching_session",
+        session.id,
+        {"page": session.current_page, "progress": session.progress},
+        actor=user.username,
+    )
+    await db.flush()
+    return await teaching_space_service.session_payload(db, session)
+
+
+@router.post("/learning-projects/{project_id}/teaching/sessions/{session_id}/turns", status_code=201)
+async def create_teaching_turn(
+    project_id: str,
+    session_id: str,
+    payload: TeachingTurnCreate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    project = await learning_space_service.access(db, project_id, user)
+    try:
+        session = await teaching_space_service.session_access(db, session_id, user)
+        turn = await teaching_space_service.teach(
+            db,
+            session,
+            project,
+            user,
+            message=payload.message,
+            action=payload.action,
+            page=payload.page,
+        )
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    await audit(
+        db,
+        "teaching.turn.created",
+        "teaching_turn",
+        turn.id,
+        {"session_id": session_id, "page": payload.page, "action": payload.action},
+        actor=user.username,
+    )
+    return teaching_space_service.turn_payload(turn)
+
+
+@router.put("/learning-projects/{project_id}/teaching/sessions/{session_id}/annotations")
+async def save_teaching_annotations(
+    project_id: str,
+    session_id: str,
+    payload: TeachingAnnotationsSave,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    user = await require_user(db, authorization)
+    await learning_space_service.access(db, project_id, user)
+    try:
+        session = await teaching_space_service.session_access(db, session_id, user)
+    except LookupError as exc:
+        raise not_found("教学会话") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if session.project_id != project_id:
+        raise not_found("教学会话")
+    await teaching_space_service.save_annotations(
+        db, session, [item.model_dump() for item in payload.annotations]
+    )
+    return {"saved": len(payload.annotations)}
 
 
 @router.get("/research-projects")

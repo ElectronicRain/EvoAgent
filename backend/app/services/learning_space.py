@@ -689,10 +689,14 @@ class LearningSpaceService:
         weak_names = "、".join(item.title for item in weak_nodes) or "当前方向节点"
         target = project.target or "形成可验证的方向成果"
         recommendations = []
-        if task_completion < 70: recommendations.append(f"围绕“{project.name}”优先完成已排期任务，先收敛到目标“{target}”，避免同时开启过多节点。")
-        if accuracy < 80: recommendations.append(f"针对{weak_names}，练习后立即记录错因，并于 1、3、7 天完成同方向变式题。")
-        if mastery < 70: recommendations.append(f"使用苏格拉底辅导复述{weak_names}如何服务于“{project.name}”，再提交方向应用证据检验迁移。")
-        if not recommendations: recommendations.append(f"“{project.name}”当前节奏稳定，可增加跨节点综合实践，并以“{target}”为验收标准保持每周评测。")
+        if task_completion < 70:
+            recommendations.append(f"围绕“{project.name}”优先完成已排期任务，先收敛到目标“{target}”，避免同时开启过多节点。")
+        if accuracy < 80:
+            recommendations.append(f"针对{weak_names}，练习后立即记录错因，并于 1、3、7 天完成同方向变式题。")
+        if mastery < 70:
+            recommendations.append(f"使用苏格拉底辅导复述{weak_names}如何服务于“{project.name}”，再提交方向应用证据检验迁移。")
+        if not recommendations:
+            recommendations.append(f"“{project.name}”当前节奏稳定，可增加跨节点综合实践，并以“{target}”为验收标准保持每周评测。")
         item = LearningAssessment(project_id=project.id, period=period, overall_score=round(overall, 1), metrics_json=dumps(metrics), summary=f"“{project.name}”方向综合学习指数 {overall:.1f}/100。该分数由任务完成度、方向练习正确率、知识掌握度、错题订正率和方向知识覆盖度加权得到；当前优先关注：{weak_names}。", recommendations_json=dumps(recommendations))
         db.add(item)
         await db.flush()

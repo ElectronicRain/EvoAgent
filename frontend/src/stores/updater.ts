@@ -27,7 +27,7 @@ export const useUpdaterStore = defineStore('updater', {
     error: '',
     sourceNote: '',
     lastCheckedAt: '',
-    installedVersion: '2.1.1',
+    installedVersion: '2.1.4',
     automaticCheck: window.localStorage.getItem(AUTO_CHECK_KEY) !== 'false',
     skippedVersion: window.localStorage.getItem(SKIPPED_VERSION_KEY) || '',
     pendingUpdate: null as any,

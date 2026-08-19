@@ -8,6 +8,7 @@ const router = createRouter({
     { path: '/research/:projectId/:section?', component: () => import('./views/ResearchProjectView.vue'), meta: { title: '科研项目' } },
     { path: '/learning', component: () => import('./views/LearningView.vue'), meta: { title: '学习空间' } },
     { path: '/learning/:projectId/:section?', component: () => import('./views/LearningProjectView.vue'), meta: { title: '学习项目' } },
+    { path: '/teaching', component: () => import('./views/TeachingView.vue'), meta: { title: '智能讲解教室' } },
     { path: '/agents', component: () => import('./views/AgentsView.vue'), meta: { title: 'Agent 工厂' } },
     { path: '/workflows', component: () => import('./views/WorkflowsView.vue'), meta: { title: '协作工作流' } },
     { path: '/knowledge', component: () => import('./views/KnowledgeView.vue'), meta: { title: '学科知识库' } },
@@ -16,6 +17,7 @@ const router = createRouter({
     { path: '/evolution', component: () => import('./views/EvolutionView.vue'), meta: { title: '进化实验室' } },
     { path: '/perception', component: () => import('./views/UserPerceptionView.vue'), meta: { title: '用户与感知' } },
     { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { title: '安全治理' } },
+    { path: '/admin', component: () => import('./views/AdminView.vue'), meta: { title: '系统管理' } },
   ],
 })
 

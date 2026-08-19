@@ -129,8 +129,10 @@ class UserAccount(TimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(80))
     password_hash: Mapped[str] = mapped_column(Text)
     avatar_color: Mapped[str] = mapped_column(String(20), default="#1769c2")
+    role: Mapped[str] = mapped_column(String(20), default="user", index=True)
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserSession(Base):
@@ -156,6 +158,51 @@ class UserPreference(TimestampMixin, Base):
     custom_reply_style: Mapped[str] = mapped_column(Text, default="")
     memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     profile_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TelemetryDevice(TimestampMixin, Base):
+    """A pseudonymous installation registered with a telemetry hub."""
+
+    __tablename__ = "telemetry_devices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    installation_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    device_name: Mapped[str] = mapped_column(String(160), default="")
+    platform: Mapped[str] = mapped_column(String(120), default="")
+    app_version: Mapped[str] = mapped_column(String(30), default="")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TelemetryEvent(Base):
+    """Privacy-filtered event used both as the local outbox and hub event store."""
+
+    __tablename__ = "telemetry_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    installation_id: Mapped[str] = mapped_column(String(64), index=True)
+    device_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(80), default="anonymous", index=True)
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    module: Mapped[str] = mapped_column(String(60), default="system", index=True)
+    resource_type: Mapped[str] = mapped_column(String(60), default="")
+    resource_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
+    client_version: Mapped[str] = mapped_column(String(30), default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    sync_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_sync_error: Mapped[str] = mapped_column(Text, default="")
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserQuestionMemory(TimestampMixin, Base):
@@ -688,6 +735,156 @@ class LearningAssessment(TimestampMixin, Base):
     metrics_json: Mapped[str] = mapped_column(Text, default="{}")
     summary: Mapped[str] = mapped_column(Text, default="")
     recommendations_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class TeachingDocument(TimestampMixin, Base):
+    __tablename__ = "teaching_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    filename: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(160), default="application/pdf")
+    source_path: Mapped[str] = mapped_column(Text)
+    rendered_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_hash: Mapped[str] = mapped_column(String(64), index=True)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)
+    sections_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
+
+
+class TeachingSession(TimestampMixin, Base):
+    __tablename__ = "teaching_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_projects.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_documents.id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
+    current_page: Mapped[int] = mapped_column(Integer, default=1)
+    current_unit: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+    lesson_plan_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class TeachingTurn(TimestampMixin, Base):
+    __tablename__ = "teaching_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_sessions.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), default="assistant", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    page: Mapped[int] = mapped_column(Integer, default=1)
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    commands_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TeachingAnnotation(TimestampMixin, Base):
+    __tablename__ = "teaching_annotations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_sessions.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_documents.id", ondelete="CASCADE"), index=True
+    )
+    page: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    author: Mapped[str] = mapped_column(String(20), default="student")
+    kind: Mapped[str] = mapped_column(String(30), default="pen")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TeachingStudioDocument(TimestampMixin, Base):
+    """A classroom document owned by a user and independent of learning projects."""
+
+    __tablename__ = "teaching_studio_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(240))
+    filename: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(160), default="application/pdf")
+    source_path: Mapped[str] = mapped_column(Text)
+    rendered_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_hash: Mapped[str] = mapped_column(String(64), index=True)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)
+    sections_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
+
+
+class TeachingStudioSession(TimestampMixin, Base):
+    __tablename__ = "teaching_studio_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_studio_documents.id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
+    current_page: Mapped[int] = mapped_column(Integer, default=1)
+    current_unit: Mapped[int] = mapped_column(Integer, default=0)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    settings_json: Mapped[str] = mapped_column(Text, default="{}")
+    lesson_plan_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class TeachingStudioTurn(TimestampMixin, Base):
+    __tablename__ = "teaching_studio_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_studio_sessions.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), default="assistant", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    page: Mapped[int] = mapped_column(Integer, default=1)
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    commands_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class TeachingStudioAnnotation(TimestampMixin, Base):
+    __tablename__ = "teaching_studio_annotations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_studio_sessions.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("teaching_studio_documents.id", ondelete="CASCADE"), index=True
+    )
+    page: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    author: Mapped[str] = mapped_column(String(20), default="student")
+    kind: Mapped[str] = mapped_column(String(30), default="pen")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class Workflow(TimestampMixin, Base):

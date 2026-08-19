@@ -29,6 +29,8 @@ async def audit(
     detail: dict[str, Any] | None = None,
     success: bool = True,
     actor: str = "local-user",
+    module: str | None = None,
+    duration_ms: int = 0,
 ) -> None:
     db.add(
         AuditLog(
@@ -40,4 +42,21 @@ async def audit(
             success=success,
         )
     )
+    # Telemetry is a privacy-filtered local outbox. A failure here must never
+    # break the user's primary operation or the immutable local audit record.
+    try:
+        from .telemetry import telemetry_service
 
+        await telemetry_service.record(
+            db,
+            action,
+            username=actor,
+            module=module,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            success=success,
+            duration_ms=duration_ms,
+            detail=detail,
+        )
+    except Exception:
+        pass

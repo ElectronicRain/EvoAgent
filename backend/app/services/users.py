@@ -129,9 +129,11 @@ class UserService:
             "username": user.username,
             "display_name": user.display_name,
             "avatar_color": user.avatar_color,
+            "role": user.role,
             "status": user.status,
             "created_at": user.created_at,
             "last_login_at": user.last_login_at,
+            "last_active_at": user.last_active_at,
         }
         if preference is not None:
             result.update(
@@ -158,6 +160,7 @@ class UserService:
             )
         )
         user.last_login_at = now
+        user.last_active_at = now
         preference = await self.preference(db, user.id)
         await db.flush()
         return token, preference
@@ -257,6 +260,8 @@ class UserService:
         if user is None or user.status != "active":
             return None
         session.last_seen_at = now
+        if user.last_active_at is None or (now - _aware(user.last_active_at)).total_seconds() >= 60:
+            user.last_active_at = now
         return user
 
     async def logout(self, db: AsyncSession, authorization: str | None) -> None:
